@@ -344,6 +344,7 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
            near: float = 0.01, far: float = 100.0,
            background=(0.0, 0.0, 0.0), colors=None, max_radius_frac: float = 1.0,
            sh_rest=None, antialias: bool = False, absgrad_out=None,
+           aux_colors=None,
            **_ignored):
     """Same positional signature as torch_ref.render. Returns (rgb, alpha, info).
 
@@ -394,6 +395,11 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     fx, fy, cx, cy = K_h[0, 0].item(), K_h[1, 1].item(), K_h[0, 2].item(), K_h[1, 2].item()
 
     if colors is not None:
+        if aux_colors:
+            raise ValueError(
+                "aux_colors is only supported on the fused SH path. The explicit-colours "
+                "path re-projects in torch and re-bins per call, and its BACKWARD is where "
+                "the cost lands -- that is the design aux_colors exists to avoid.")
         # explicit-colour path (used by depth rendering etc.): torch projection.
         # Unlike the fused preprocess, this one runs the projection in torch, so
         # the pose has to be on the same device as the gaussians -- callers may
@@ -482,6 +488,26 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
         uv, conic, opacities, colors, gauss_ids, tile_offsets, W, H, tile, tiles_x,
         absgrad_out)
 
+    # Extra attribute maps -- normals, view-space z -- composited over the SAME projection,
+    # the SAME conics and opacities, and the SAME tile lists the RGB pass just used. The
+    # naive alternative is another `render(colors=...)` call, which re-runs the projection
+    # in torch autograd and re-bins; its backward is the expensive half. Sharing the lists
+    # is what makes the geometry recipe affordable here.
+    #
+    # `absgrad_out` is deliberately NOT forwarded: it accumulates a densification signal,
+    # and an aux pass must not vote on which gaussians get split.
+    #
+    # No background is composited into an aux map. A background constant added to a depth
+    # map turns "nothing here" into a plausible measurement.
+    aux_maps = []
+    if aux_colors:
+        for a in aux_colors:
+            if a.shape != (means.shape[0], 3):
+                raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
+            aux_maps.append(_RasterizeMetal.apply(
+                uv, conic, opacities, a.contiguous(), gauss_ids, tile_offsets,
+                W, H, tile, tiles_x, None)[0])
+
     if background is not None:
         bg = torch.as_tensor(background, device=rgb.device, dtype=rgb.dtype)
         rgb = rgb + (1.0 - alpha).clamp_min(0)[..., None] * bg
@@ -502,5 +528,10 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
         "isect_dropped_frac": 0.0,
         "valid_mask": valid_b,          # tensor, no sync; selective-Adam hook
         "backend": "metal",
+        "aux": aux_maps,
+        # The coverage the aux maps must be divided by. Identical to the RGB alpha by
+        # construction (same lists, same opacities) and captured BEFORE the background
+        # composite -- though the composite only touches rgb, never alpha.
+        "aux_alpha": alpha,
     }
 
