@@ -100,3 +100,302 @@ def test_flatten_flag_actually_reaches_the_training_loss(tmp_path):
     off = run(0.0, tmp_path / "off.ply")
     on = run(50.0, tmp_path / "on.ply")
     assert on < off * 0.9, f"flatten weight did not reach the loss: min-axis p50 {off} -> {on}"
+
+
+# ---------------------------------------------------- normals_from_depth (Task 6)
+
+def _fixture_case(name):
+    fx_ = json.loads(FIX.read_text())
+    return fx_, next(k for k in fx_["cases"] if k["name"] == name)
+
+
+def _rays(h, w, fx, fy, cx, cy):
+    v, u = torch.meshgrid(torch.arange(h, dtype=torch.float64),
+                          torch.arange(w, dtype=torch.float64), indexing="ij")
+    return torch.stack([(u - cx) / fx, (v - cy) / fy, torch.ones_like(u)], -1)
+
+
+@pytest.mark.parametrize("case", ["slanted_plane", "grazing_plane_positive_nz"])
+def test_normals_from_depth_matches_fixture(case):
+    from metal_gauss.geometry_loss import normals_from_depth
+    fx_, c = _fixture_case(case)
+    K = c["intrinsics"]
+    depth = torch.tensor(c["depth"], dtype=torch.float64)
+    want = torch.tensor(c["expected_normal"], dtype=torch.float64)
+    got = normals_from_depth(depth, K["fx"], K["fy"], K["cx"], K["cy"])
+    valid = want.norm(dim=-1) > 0.5
+    assert torch.allclose(got[valid], want[valid], atol=fx_["tolerance"]), \
+        (got[valid] - want[valid]).abs().max()
+    assert (got[~valid] == 0).all()
+
+
+def test_the_nz_rule_and_the_ray_rule_disagree_on_EVERY_valid_pixel_of_the_grazing_case():
+    """THE NULL MODEL. Before trusting a test to discriminate two rules, prove on this data
+    that they actually differ -- the repo's previous fixture used a plane family where both
+    rules agree, so the test that was supposed to pin the flip could never have failed.
+
+    Here the two candidate orientations are computed side by side from the SAME raw cross
+    product, and they must be exact negations on 100% of valid pixels."""
+    _, c = _fixture_case("grazing_plane_positive_nz")
+    K = c["intrinsics"]
+    depth = torch.tensor(c["depth"], dtype=torch.float64)
+    h, w = depth.shape
+    u = (torch.arange(w, dtype=torch.float64) - K["cx"]) / K["fx"]
+    v = (torch.arange(h, dtype=torch.float64) - K["cy"]) / K["fy"]
+    P = torch.stack([depth * u[None, :], depth * v[:, None], depth], -1)
+    base = P[:-1, :-1]
+    raw = torch.cross(P[:-1, 1:] - base, P[1:, :-1] - base, dim=-1)   # cross(du, dv)
+    raw = raw / raw.norm(dim=-1, keepdim=True)
+    r = _rays(h, w, K["fx"], K["fy"], K["cx"], K["cy"])[:-1, :-1]
+    by_ray = torch.where(((raw * r).sum(-1) > 0)[..., None], -raw, raw)
+    by_nz = torch.where((raw[..., 2] > 0)[..., None], -raw, raw)
+    assert torch.allclose(by_nz, -by_ray), "this fixture cannot discriminate the two rules"
+    assert (by_ray[..., 2] > 0).all(), "ray-correct normals must have n_z > 0 here"
+    # ...and the shipped function must agree with the RAY arm, not the n_z arm.
+    from metal_gauss.geometry_loss import normals_from_depth
+    got = normals_from_depth(depth, K["fx"], K["fy"], K["cx"], K["cy"])[:-1, :-1]
+    assert torch.allclose(got, by_ray, atol=1e-12)
+    assert not torch.allclose(got, by_nz, atol=1e-3)
+
+
+def test_grazing_plane_discriminates_the_ray_rule_from_the_nz_rule():
+    """The fixture's second case exists because the first could not tell the two rules apart.
+    Every camera-facing normal here has n_z > 0, so an `n_z <= 0` rule negates ALL of them."""
+    from metal_gauss.geometry_loss import normals_from_depth
+    _, c = _fixture_case("grazing_plane_positive_nz")
+    K = c["intrinsics"]
+    depth = torch.tensor(c["depth"], dtype=torch.float64)
+    n = normals_from_depth(depth, K["fx"], K["fy"], K["cx"], K["cy"])
+    valid = n.norm(dim=-1) > 0.5
+    r = _rays(*depth.shape, K["fx"], K["fy"], K["cx"], K["cy"])
+    assert ((n * r).sum(-1)[valid] <= -0.2).all()      # camera-facing, per-pixel ray
+    assert (n[..., 2][valid] > 0.3).all()              # ...and n_z POSITIVE everywhere
+    assert valid.sum() == 35
+
+
+def test_normals_from_depth_faces_the_camera_on_random_depth_graphs():
+    """The invariant is a theorem for ANY depth graph, not just planes:
+        dot(cross(dPdu, dPdv), r) = z(u+1,v) z(u,v+1) / (fx fy)
+    which is > 0 exactly when validity holds. So the correct orientation is a global
+    negation and needs no data-dependent test. 200 random graphs, including a wide,
+    off-centre principal point where n_z and the ray diverge hardest."""
+    from metal_gauss.geometry_loss import normals_from_depth
+    g = torch.Generator().manual_seed(0)
+    worst_nz_violations = 0
+    for _ in range(200):
+        depth = torch.rand(9, 11, generator=g, dtype=torch.float64) * 4.0 + 0.2
+        fx, fy, cx, cy = 3.0, 4.0, -6.0, 7.0        # deliberately extreme / off-centre
+        n = normals_from_depth(depth, fx, fy, cx, cy)
+        valid = n.norm(dim=-1) > 0.5
+        r = _rays(9, 11, fx, fy, cx, cy)
+        assert ((n * r).sum(-1)[valid] < 0).all()
+        assert torch.allclose(n[valid].norm(dim=-1),
+                              torch.ones(int(valid.sum()), dtype=torch.float64))
+        worst_nz_violations += int((n[..., 2][valid] > 0).sum())
+    assert worst_nz_violations > 0, \
+        "no sample had n_z > 0, so this test never exercised the rules' disagreement"
+
+
+def test_normals_from_depth_zeroes_the_border_and_any_nonpositive_contributor():
+    from metal_gauss.geometry_loss import normals_from_depth
+    depth = torch.full((4, 5), 2.0, dtype=torch.float64)
+    depth[1, 1] = 0.0                        # invalid: kills (1,1), (0,1) and (1,0)
+    n = normals_from_depth(depth, 2.0, 2.0, 2.0, 1.5)
+    assert (n[-1, :] == 0).all() and (n[:, -1] == 0).all()      # forward differences
+    for p in [(1, 1), (0, 1), (1, 0)]:
+        assert (n[p] == 0).all(), p
+    assert (n[2, 2] != 0).any()                                  # untouched neighbour lives
+
+
+def test_normals_from_depth_is_all_zero_on_a_degenerate_shape():
+    from metal_gauss.geometry_loss import normals_from_depth
+    assert (normals_from_depth(torch.ones(1, 5, dtype=torch.float64), 1, 1, 0, 0) == 0).all()
+
+
+# ---------------------------------------------------------------- splat normals
+
+def test_splat_normals_cam_faces_camera_by_ray_not_axis():
+    """A splat far off-axis whose thin axis is perpendicular to the optical axis: n_z == 0
+    exactly, so the n_z rule cannot decide and leaves it pointing AWAY from the camera."""
+    from metal_gauss.geometry_loss import splat_normals_cam
+    means = torch.tensor([[3.0, 0.0, 1.0]])          # 71.6 deg off-axis
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]])     # identity: R columns = axes
+    scales = torch.tensor([[0.001, 0.1, 0.1]])       # thin axis = x
+    n = splat_normals_cam(means, quats, scales, torch.eye(4))
+    assert torch.allclose(n, torch.tensor([[-1.0, 0.0, 0.0]]))
+    assert (n * means).sum() < 0                     # points back toward the camera
+    assert n[0, 2] == 0.0                            # ...on zero n_z, where n_z is mute
+
+
+def test_splat_normals_cam_does_not_annihilate_a_perpendicular_splat():
+    """`sign()` returns 0 at exactly 0 and multiplying by it deletes the normal. A `>`
+    comparison keeps it. A zero normal is not 'no opinion' downstream -- depth_normal_loss
+    gates on norm > 0.5, so an annihilated splat silently leaves the loss."""
+    from metal_gauss.geometry_loss import splat_normals_cam
+    means = torch.tensor([[0.0, 0.0, 5.0]])
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    scales = torch.tensor([[0.1, 0.001, 0.1]])       # thin axis = y, exactly perpendicular
+    n = splat_normals_cam(means, quats, scales, torch.eye(4))
+    assert (n * means).sum() == 0.0                  # the degenerate case, by construction
+    assert n.norm().item() == pytest.approx(1.0)
+    # Which of the two signs is taken at exactly 0 is arbitrary -- but Brush's
+    # `splat_normals` builds its selector as `(facing < 0) * 2 - 1`, so it NEGATES the tie,
+    # and this port matches it for cross-implementation parity. Pinned so a future
+    # "simplification" to `> 0` is caught rather than silently diverging.
+    assert torch.allclose(n, torch.tensor([[0.0, -1.0, 0.0]]))
+
+
+def test_splat_normals_cam_applies_the_view_rotation():
+    """n is a CAMERA-frame vector. Rotating the camera 90 deg about z must rotate it.
+
+    The splat is off-axis so `dot(n_cam, p_cam) = 1`, comfortably off the perpendicular
+    tie -- a splat on the optical axis puts every in-plane normal at dot 0, where the
+    answer is a tie-break rather than a rotation."""
+    from metal_gauss.geometry_loss import splat_normals_cam
+    vm = torch.eye(4)
+    vm[:3, :3] = torch.tensor([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    vm[:3, 3] = torch.tensor([0.0, 0.0, 5.0])
+    means = torch.tensor([[1.0, 0.0, 0.0]])          # p_cam = (0, 1, 5)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    scales = torch.tensor([[0.001, 0.1, 0.1]])       # thin axis = world x -> cam +y
+    n = splat_normals_cam(means, quats, scales, vm)
+    assert torch.allclose(n, torch.tensor([[0.0, -1.0, 0.0]]), atol=1e-6)
+    # Skipping the rotation entirely would leave n_cam = (1,0,0) and answer (-1,0,0).
+    assert not torch.allclose(n, torch.tensor([[-1.0, 0.0, 0.0]]), atol=1e-6)
+
+
+def test_splat_normals_cam_picks_the_thinnest_axis_column_of_R():
+    from metal_gauss.geometry_loss import splat_normals_cam
+    q = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1)
+    m = torch.tensor([[0.0, 0.0, 5.0]]).repeat(3, 1)
+    s = torch.tensor([[0.001, 0.1, 0.2], [0.2, 0.001, 0.1], [0.2, 0.1, 0.001]])
+    n = splat_normals_cam(m, q, s, torch.eye(4))
+    assert torch.allclose(n.abs(), torch.eye(3), atol=1e-6)
+
+
+def test_splat_normals_cam_takes_the_COLUMN_of_R_not_the_row():
+    """Every other splat test here uses an identity quaternion, where R is symmetric and
+    row == column -- so none of them can tell the two apart. `build_cov3d` forms
+    `R * scales[:, None, :]` = `R @ diag(s)`, so scale i scales COLUMN i; indexing the row
+    transposes the rotation and points the normal somewhere else entirely.
+
+    The rotation must be chosen with care: for a 90-degree rotation about z, row 0 is
+    exactly MINUS column 0, and the camera-facing flip then maps one onto the other, so
+    such a test cannot discriminate at all. Here R is the 120-degree rotation about
+    (1,1,1) that cycles x->y->z->x, whose column 0 (+y) and row 0 (+z) are ORTHOGONAL, and
+    the splat is placed off the perpendicular tie so neither arm lands on a coin flip:
+    the column answers +y, the row answers -z."""
+    from metal_gauss.geometry_loss import splat_normals_cam
+    q = torch.tensor([[0.5, 0.5, 0.5, 0.5]])         # 120 deg about (1,1,1): x->y->z->x
+    m = torch.tensor([[0.0, -1.0, 5.0]])
+    s = torch.tensor([[0.001, 0.1, 0.2]])            # thin axis index 0
+    n = splat_normals_cam(m, q, s, torch.eye(4))
+    assert torch.allclose(n, torch.tensor([[0.0, 1.0, 0.0]]), atol=1e-6), \
+        f"expected R's column 0 (+y); the row would give -z. got {n}"
+
+
+def test_splat_normals_cam_gradient_reaches_quats_not_scales():
+    from metal_gauss.geometry_loss import splat_normals_cam
+    torch.manual_seed(0)
+    q = torch.randn(5, 4, requires_grad=True)
+    s = torch.rand(5, 3, requires_grad=True)
+    m = torch.randn(5, 3) + torch.tensor([0, 0, 4.0])
+    splat_normals_cam(m, q, s, torch.eye(4)).sum().backward()
+    assert q.grad.abs().sum() > 0
+    assert s.grad is None or s.grad.abs().sum() == 0   # argmin detached, as in Brush
+
+
+# ---------------------------------------------------------------- the three losses
+
+def test_depth_loss_disparity_counts_uncovered_and_ignores_invalid_gt():
+    from metal_gauss.geometry_loss import depth_loss
+    gt = torch.tensor([[2.0, 0.0], [4.0, 1.0]])
+    pred = torch.tensor([[2.0, 7.0], [0.0, 1.0]])
+    # (0,1): gt invalid -> ignored. (1,0): pred uncovered (0) -> full disparity error 1/4.
+    assert depth_loss(pred, gt, "disparity").item() == pytest.approx((0 + 0.25 + 0) / 3)
+    assert depth_loss(pred, gt, "metric").item() == pytest.approx((0 + 4.0 + 0) / 3)
+
+
+def test_depth_loss_divides_by_the_VALID_count_not_the_pixel_count():
+    """Dividing by H*W makes the term shrink with the fraction of invalid pixels, so a
+    sparse LiDAR prior would be silently down-weighted against a dense one."""
+    from metal_gauss.geometry_loss import depth_loss
+    gt = torch.zeros(4, 4); gt[0, 0] = 2.0
+    pred = torch.full((4, 4), 1.0)
+    assert depth_loss(pred, gt, "metric").item() == pytest.approx(1.0)      # not 1/16
+
+
+def test_depth_loss_with_no_valid_pixels_is_zero_not_nan():
+    from metal_gauss.geometry_loss import depth_loss
+    l = depth_loss(torch.ones(3, 3), torch.zeros(3, 3))
+    assert l.item() == 0.0 and torch.isfinite(l)
+
+
+@pytest.mark.parametrize("space", ["disparity", "metric"])
+def test_depth_loss_is_finite_with_inf_and_nan_outside_the_mask(space):
+    """`x * 0` is NaN for inf and NaN, so masking MUST substitute before the arithmetic,
+    not multiply after it. A single non-finite render pixel would otherwise NaN the whole
+    training step -- and Adam writes NaN into the parameters on the first such step.
+
+    BOTH spaces, deliberately. In disparity the `pred > 0` guard happens to re-mask a NaN
+    that leaked in (NaN > 0 is False), so a multiply-after implementation passes the
+    disparity case and NaNs only in metric -- which is exactly the kind of half-covered
+    test that ships a latent defect."""
+    from metal_gauss.geometry_loss import depth_loss
+    inf, nan = float("inf"), float("nan")
+    # A NaN in the GROUND TRUTH matters too: `--prior-resident float32` reads a TIFF
+    # straight through, so a corrupt prior arrives here unsanitised. `nan > 0` is False, so
+    # the pixel is correctly invalid -- but `nan * 0` is still NaN, and a multiply-after
+    # implementation NaNs the run on a single bad prior pixel.
+    gt = torch.tensor([[1.0, 0.0, 0.0, nan]])
+    pred = torch.tensor([[1.0, inf, nan, 2.0]], requires_grad=True)
+    l = depth_loss(pred, gt, space)
+    l.backward()
+    assert torch.isfinite(l), f"{space}: loss is {l}"
+    assert torch.isfinite(pred.grad).all(), f"{space}: grad is {pred.grad}"
+
+
+def test_normal_loss_l1_over_valid_components():
+    from metal_gauss.geometry_loss import normal_loss
+    gt = torch.zeros(1, 2, 3); gt[0, 0] = torch.tensor([0, 0, -1.0])       # pixel 1 invalid
+    pred = torch.zeros(1, 2, 3)
+    pred[0, 0] = torch.tensor([0.1, 0, -1.0]); pred[0, 1] = 5.0
+    assert normal_loss(pred, gt).item() == pytest.approx(0.1 / 3)
+
+
+def test_normal_loss_is_l1_on_components_not_cosine():
+    """Brush uses component L1. Cosine would score these two IDENTICALLY (both are 90 deg
+    from gt) while L1 separates them, and the gradient shapes differ."""
+    from metal_gauss.geometry_loss import normal_loss
+    gt = torch.tensor([[[0.0, 0.0, -1.0]]])
+    a = normal_loss(torch.tensor([[[1.0, 0.0, 0.0]]]), gt).item()
+    b = normal_loss(torch.tensor([[[0.0, -1.0, 0.0]]]), gt).item()
+    assert a == pytest.approx(2.0 / 3) and b == pytest.approx(2.0 / 3)
+    c = normal_loss(torch.tensor([[[0.6, 0.0, -0.8]]]), gt).item()
+    assert c == pytest.approx((0.6 + 0.2) / 3)      # cosine would give 1 - 0.8 = 0.2
+
+
+def test_depth_normal_loss_gates_on_alpha_and_validity():
+    from metal_gauss.geometry_loss import depth_normal_loss
+    nd = torch.zeros(1, 3, 3); nr = torch.zeros(1, 3, 3)
+    nd[0, 0] = nr[0, 0] = torch.tensor([0, 0, -1.0])              # agree -> 0
+    nd[0, 1] = torch.tensor([0, 0, -1.0]); nr[0, 1] = torch.tensor([1.0, 0, 0])  # 90 deg -> 1
+    nd[0, 2] = nr[0, 2] = torch.tensor([0, 0, -1.0])              # agree but uncovered
+    alpha = torch.tensor([[1.0, 1.0, 0.1]])
+    assert depth_normal_loss(nd, nr, alpha).item() == pytest.approx(0.5)
+
+
+def test_depth_normal_loss_penalises_an_anti_aligned_pair_most():
+    """1 - cos, so agreement is 0, perpendicular is 1, and an INVERTED normal is 2. If a
+    prior's sign were flipped this term is what would blow up -- it must be able to."""
+    from metal_gauss.geometry_loss import depth_normal_loss
+    nd = torch.tensor([[[0.0, 0.0, -1.0]]])
+    alpha = torch.ones(1, 1)
+    assert depth_normal_loss(nd, -nd, alpha).item() == pytest.approx(2.0)
+    assert depth_normal_loss(nd, nd, alpha).item() == pytest.approx(0.0)
+
+
+def test_depth_normal_loss_with_nothing_valid_is_zero_not_nan():
+    from metal_gauss.geometry_loss import depth_normal_loss
+    l = depth_normal_loss(torch.zeros(2, 2, 3), torch.zeros(2, 2, 3), torch.zeros(2, 2))
+    assert l.item() == 0.0 and torch.isfinite(l)
