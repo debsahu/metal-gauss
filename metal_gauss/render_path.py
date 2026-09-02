@@ -1,21 +1,28 @@
 """Render an existing .ply along a camera path generated here.
 
-Every other render path in this repo borrows its cameras from a dataset:
-`bench/compare/score_ply.py` reads `transforms_test.json`, and
-`render_scene_reel.py` sweeps the official test orbit. A .ply predicted from a
-single photograph -- Apple's SHARP, say -- arrives with no cameras at all, so
-there is nothing to borrow and the camera has to be synthesised.
+Training writes a .ply and that was the end of the road. Turning one back into
+pixels needed a dataset to borrow cameras from: `bench/compare/score_ply.py`
+reads `transforms_test.json`, `render_scene_reel.py` sweeps the official test
+orbit. A .ply on its own -- a checkpoint from this trainer, a scene trained
+elsewhere, a download, anything a feedforward model predicted -- carries no
+cameras at all, so there is nothing to borrow and the camera has to be
+synthesised.
 
-Framing anchors on the input view. A monocular predictor works in the input
-photograph's camera frame, which means the identity world-to-camera matrix
-reproduces the original shot and the path can move around it. The pivot sits at
-the MEDIAN depth of the splat means rather than the mean: a monocular
-prediction leaves background splats far behind the subject, and a centroid gets
-dragged back into them, which puts the pivot behind the head and turns a small
-wobble into a swing.
+So this module synthesises one: a still, a wiggle or an orbit, framed either on
+the input view or on the cloud's bounding box, at a chosen resolution and field
+of view, through a pinhole or a thin lens.
 
-Keep the sweep small. The model only ever saw one photograph, so past roughly
-eight degrees the render starts showing surfaces it had no evidence for.
+Framing on the input view is what a monocular prediction needs. Such a
+predictor works in the input photograph's camera frame, which means the
+identity world-to-camera matrix reproduces the original shot and the path can
+move around it. The pivot comes from splats near the optical axis rather than
+from all of them: a monocular prediction leaves a wall of background splats
+behind the subject, that wall outnumbers the subject, and a pivot taken over
+everything therefore lands behind it, turning a small wobble into a swing.
+
+Keep that sweep small. A model that only ever saw one photograph starts showing
+surfaces it had no evidence for past roughly eight degrees. A scene trained
+from many views carries no such limit and orbits as far as it is asked to.
 
 Named `render_path` and not `render` because `metal_gauss/__init__.py`
 re-exports the rasteriser as `metal_gauss.render`; a sibling module of that
@@ -369,13 +376,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fov", type=float, default=None,
                     help="horizontal FOV in degrees. Overrides --like-photo.")
     ap.add_argument("--like-photo", default=None, metavar="IMAGE",
-                    help="read the focal length from this photograph's EXIF, the "
-                         "way SHARP does, so frame 0 reproduces it. This is the "
-                         "right flag for a monocular prediction: the predictor "
-                         "worked under that camera's intrinsics.")
+                    help="read the 35mm-equivalent focal length from this "
+                         "photograph's EXIF so frame 0 reproduces it. The right "
+                         "flag for a monocular prediction: the predictor worked "
+                         "under that camera's intrinsics.")
     ap.add_argument("--depth", type=float, default=None,
                     help="pivot depth for --frame input; default is the median "
-                         "splat depth")
+                         "depth of the splats near the optical axis")
     ap.add_argument("--frame", choices=("auto", "input", "bbox"), default="auto",
                     help="'input' anchors on the predicting camera, which is what "
                          "a monocular .ply wants; 'bbox' places the camera around "

@@ -95,11 +95,12 @@ metal-gauss-render prediction.ply --out wiggle.mp4 --like-photo portrait.jpg
 metal-gauss-render scene.ply --out orbit.mp4 --frame bbox --path orbit --sweep-deg 20
 ```
 
-Renders an existing `.ply` along a camera path the tool generates itself. Every other render path in
-the repo borrows its cameras from a dataset, so a `.ply` that arrives without cameras could not be
-rendered at all. Apple's [SHARP](https://github.com/apple/ml-sharp) writes exactly that: 3D
-Gaussians predicted from a single photograph, with a video renderer that **requires CUDA**. Predict
-on MPS, render here.
+Renders an existing `.ply` along a camera path the tool generates itself, so a file is no longer tied
+to the dataset it came from. Training already wrote `.ply` files, but every render path in the repo
+borrowed its cameras from a dataset, which left no way to look at a checkpoint, a scene trained
+elsewhere, a download, or anything a feedforward model predicted. Point this at a file and get a png
+or an mp4: `--path` picks still, wiggle or orbit, `--frame` picks what that path is built around,
+and `--resolution`, `--fov`, `--background` and `--convention` do what they say.
 
 `--frame input` anchors on the predicting camera, because a monocular predictor works in the input
 photograph's frame and the identity world-to-camera matrix reproduces that shot. `--frame bbox`
@@ -107,12 +108,17 @@ places the camera around the cloud instead, for a trained scene that has no inpu
 default `auto` picks by the fraction of splats sitting in front of the origin, taking `input` above
 **99%**.
 
-`--like-photo` matters more than it looks. A `.ply` carries no camera, but a monocular prediction
-was made under one: SHARP reads `FocalLengthIn35mmFilm` from EXIF and predicts under that. Render it
-back at some other FOV and the geometry is right while the crop is not, so frame 0 stops reproducing
-the photograph, which is the whole point of anchoring to it. This flag reads the EXIF the same way
-SHARP does. Without it the FOV is fitted to the cloud and the tool says so. The gap is not subtle: a
-135 mm portrait is **12.9°**, SHARP's no-EXIF fallback of 30 mm is **54°**.
+`--like-photo` matters more than it looks, and it is the flag that makes a monocular prediction come
+out right. A `.ply` carries no camera, but the prediction was made under one, taken from the
+photograph's EXIF. Render it back at some other FOV and the geometry is right while the crop is not,
+so frame 0 stops reproducing the photograph, which is the whole point of anchoring to it. Worked
+example: Apple's [SHARP](https://github.com/apple/ml-sharp) reads `FocalLengthIn35mmFilm` and
+converts it with `f_px = f_35mm · diag(W, H) / diag(36, 24)`; this flag reproduces that conversion
+rather than approximating it, because the goal is to agree with the predictor and not to be
+independently correct about the lens. Without the flag the FOV is fitted to the cloud and the tool
+says so. The gap is not subtle: a 135 mm portrait is **12.9°**, SHARP's no-EXIF fallback of 30 mm
+is **54°**. SHARP is also a fair test of the whole entry point, since its own video renderer
+**requires CUDA** — predict on MPS, render here.
 
 `--aperture` renders through a thin lens instead of a pinhole: the frame becomes the mean of many
 views spread over the lens area, every one aimed at the focal plane, so that plane stays sharp and
