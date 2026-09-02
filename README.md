@@ -87,6 +87,43 @@ Every 8th view is held out. The exported `.ply` is standard INRIA-convention 3DG
 the step count; `--budget` overrides it. Blender scenes are **not vendored** — unpack
 [nerf_synthetic](https://github.com/bmild/nerf) into `data/nerf_synthetic/`.
 
+## 🎥 Render
+
+```bash
+metal-gauss-render prediction.ply --out frame0.png --still --like-photo portrait.jpg
+metal-gauss-render prediction.ply --out wiggle.mp4 --like-photo portrait.jpg
+metal-gauss-render scene.ply --out orbit.mp4 --frame bbox --path orbit --sweep-deg 20
+```
+
+Renders an existing `.ply` along a camera path the tool generates itself. Every other render path in
+the repo borrows its cameras from a dataset, so a `.ply` that arrives without cameras could not be
+rendered at all. Apple's [SHARP](https://github.com/apple/ml-sharp) writes exactly that: 3D
+Gaussians predicted from a single photograph, with a video renderer that **requires CUDA**. Predict
+on MPS, render here.
+
+`--frame input` anchors on the predicting camera, because a monocular predictor works in the input
+photograph's frame and the identity world-to-camera matrix reproduces that shot. `--frame bbox`
+places the camera around the cloud instead, for a trained scene that has no input camera. The
+default `auto` picks by the fraction of splats sitting in front of the origin, taking `input` above
+**99%**.
+
+`--like-photo` matters more than it looks. A `.ply` carries no camera, but a monocular prediction
+was made under one: SHARP reads `FocalLengthIn35mmFilm` from EXIF and predicts under that. Render it
+back at some other FOV and the geometry is right while the crop is not, so frame 0 stops reproducing
+the photograph, which is the whole point of anchoring to it. This flag reads the EXIF the same way
+SHARP does. Without it the FOV is fitted to the cloud and the tool says so. The gap is not subtle: a
+135 mm portrait is **12.9°**, SHARP's no-EXIF fallback of 30 mm is **54°**.
+
+Forward-only, so it is much faster than a training step: **69 fps** at 600k splats and 768², **91**
+at 512², **481** at 100k splats and 384², on an M5 with the GPU to itself (`bench/render_fps.py`,
+three round-robin repeats agreeing to within 10%).
+
+Defaults are 60 frames at 30 fps, 512 px square, ±5° wiggle; `ffmpeg` on PATH writes the mp4.
+`--still` dumps frame 0 as a `.png`, the cheap way to check a file's convention before rendering 60
+frames of it; `--convention opengl` if it comes out flipped. A monocular prediction only has
+evidence for what the photograph saw, so past roughly **8°** the sweep starts showing invented
+surface. That is why the default sweep is small.
+
 ## ⚠️ Caveats
 
 - msplat is **1.3–1.8× faster per step** and owns every budget under ~0.3 min. Our floor there is

@@ -1,0 +1,387 @@
+"""Render an existing .ply along a camera path generated here.
+
+Every other render path in this repo borrows its cameras from a dataset:
+`bench/compare/score_ply.py` reads `transforms_test.json`, and
+`render_scene_reel.py` sweeps the official test orbit. A .ply predicted from a
+single photograph -- Apple's SHARP, say -- arrives with no cameras at all, so
+there is nothing to borrow and the camera has to be synthesised.
+
+Framing anchors on the input view. A monocular predictor works in the input
+photograph's camera frame, which means the identity world-to-camera matrix
+reproduces the original shot and the path can move around it. The pivot sits at
+the MEDIAN depth of the splat means rather than the mean: a monocular
+prediction leaves background splats far behind the subject, and a centroid gets
+dragged back into them, which puts the pivot behind the head and turns a small
+wobble into a swing.
+
+Keep the sweep small. The model only ever saw one photograph, so past roughly
+eight degrees the render starts showing surfaces it had no evidence for.
+
+Named `render_path` and not `render` because `metal_gauss/__init__.py`
+re-exports the rasteriser as `metal_gauss.render`; a sibling module of that
+name shadows it and breaks every `from metal_gauss import render`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+
+from metal_gauss.api import render as _render
+from metal_gauss.io import Splats, load_ply
+
+# OpenGL camera-to-world (+Y up, -Z forward) to OpenCV (+Y down, +Z forward).
+# Same flip `bench/compare/score_ply.py` applies to Blender cameras.
+_GL2CV = torch.diag(torch.tensor([1.0, -1.0, -1.0, 1.0]))
+
+
+# --------------------------------------------------------------- camera
+
+def _rot_x(a: float) -> torch.Tensor:
+    c, s = math.cos(a), math.sin(a)
+    return torch.tensor([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _rot_y(a: float) -> torch.Tensor:
+    c, s = math.cos(a), math.sin(a)
+    return torch.tensor([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def world_to_camera(R: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+    """(3,3) camera orientation and (3,) camera centre -> (4,4) world->camera."""
+    vm = torch.eye(4)
+    vm[:3, :3] = R.T
+    vm[:3, 3] = -R.T @ C
+    return vm
+
+
+def pivot_depth(means: torch.Tensor, quantile: float = 0.5) -> float:
+    """Depth to orbit about, along the input camera's forward axis.
+
+    Median by default. See the module docstring for why not the mean.
+    """
+    return float(means[:, 2].quantile(quantile))
+
+
+def look_at(eye: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Camera-to-world rotation looking from `eye` at `target`, OpenCV axes.
+
+    +Z forward and +Y DOWN, so the basis is built from a world-down vector. A
+    helper written for the +Y-up convention rolls the camera 180 degrees here.
+    """
+    z = target - eye
+    n = torch.linalg.norm(z)
+    if n < 1e-9:
+        raise ValueError("camera and target coincide")
+    z = z / n
+    down = torch.tensor([0.0, 1.0, 0.0])
+    if torch.linalg.norm(torch.linalg.cross(down, z)) < 1e-6:
+        down = torch.tensor([0.0, 0.0, 1.0])   # looking along the down axis
+    x = torch.linalg.cross(down, z)
+    x = x / torch.linalg.norm(x)
+    y = torch.linalg.cross(z, x)
+    return torch.stack([x, y, z], dim=1)
+
+
+def camera_path(eye, target, frames: int, sweep_deg: float,
+                path: str = "wiggle", pitch_ratio: float = 0.5) -> list[torch.Tensor]:
+    """World-to-camera matrices swinging the camera about `target`.
+
+    Both paths are built on sin(t) over a full period, so frame 0 is exactly the
+    starting view and the last frame joins back onto the first. That matters
+    twice over: frame 0 is what you check the .ply's convention against, and the
+    result has to loop cleanly when it plays on hover.
+
+    `wiggle` adds a sin(2t) pitch, a figure-eight that reads as a head shifting
+    rather than a turntable.
+    """
+    if path not in ("orbit", "wiggle"):
+        raise ValueError(f"unknown path {path!r}; expected 'orbit' or 'wiggle'")
+    eye = torch.as_tensor(eye, dtype=torch.float32)
+    target = torch.as_tensor(target, dtype=torch.float32)
+    R0 = look_at(eye, target)
+    sweep = math.radians(sweep_deg)
+    out = []
+    for i in range(frames):
+        t = 2.0 * math.pi * i / frames
+        yaw = sweep * math.sin(t)
+        pitch = sweep * pitch_ratio * math.sin(2.0 * t) if path == "wiggle" else 0.0
+        R = _rot_y(yaw) @ _rot_x(pitch)
+        out.append(world_to_camera(R @ R0, target + R @ (eye - target)))
+    return out
+
+
+def bbox_framing(means: torch.Tensor, fov_deg: float, margin: float = 1.25,
+                 quantile: float = 0.98) -> tuple[torch.Tensor, torch.Tensor]:
+    """(eye, target) for a .ply that did not come from a monocular predictor.
+
+    A trained scene sits around its own origin with no input camera to anchor
+    to, so the camera has to be placed rather than assumed. Robust percentiles
+    again: a few stray splats a long way out would otherwise set the framing.
+    """
+    lo = means.quantile(1.0 - quantile, dim=0)
+    hi = means.quantile(quantile, dim=0)
+    target = 0.5 * (lo + hi)
+    radius = float(torch.linalg.norm(hi - lo)) * 0.5
+    dist = margin * radius / max(math.tan(0.5 * math.radians(fov_deg)), 1e-6)
+    return target - torch.tensor([0.0, 0.0, dist]), target
+
+
+def intrinsics(W: int, H: int, fov_deg: float) -> torch.Tensor:
+    f = 0.5 * W / math.tan(0.5 * math.radians(fov_deg))
+    return torch.tensor([[f, 0.0, W / 2.0], [0.0, f, H / 2.0], [0.0, 0.0, 1.0]])
+
+
+def in_front_fraction(means: torch.Tensor, eps: float = 1e-3) -> float:
+    """Fraction of splats ahead of the origin along +Z.
+
+    This is what separates a monocular prediction from a trained scene, and
+    the median depth is not: a trained scene centred on its own origin can
+    easily have a positive median simply from how it is oriented, which made an
+    earlier median test anchor lego to a camera sitting inside it.
+    """
+    return float((means[:, 2] > eps).float().mean())
+
+
+def framing_fov(means: torch.Tensor, margin: float = 1.08, quantile: float = 0.98,
+                max_fov: float = 120.0) -> float:
+    """Horizontal FOV that happens to contain the cloud. NOT a focal length.
+
+    This is a bounding operation on a point cloud: it never looks at image
+    content and it recovers nothing about the camera that took the photograph.
+    Where a real focal length is known -- and for a monocular prediction it IS
+    known, see `fov_from_photo` -- use that instead. Rendering a SHARP
+    prediction at a FOV it was not predicted under gives the right geometry in
+    the wrong crop, which quietly breaks the one guarantee input-anchoring
+    exists for: that frame 0 reproduces the original shot.
+
+    Percentiles rather than extremes, because a monocular prediction throws a
+    few splats a long way out and fitting to those zooms the subject to
+    nothing. Splats close to the camera plane are dropped outright: x/z runs
+    away there and drove the FOV to 180 degrees on the first scene this was
+    pointed at. Note the near cutoff is derived from the same cloud it filters,
+    so a large enough near population lowers its own threshold; the clamp is
+    load-bearing, not belt-and-braces.
+    """
+    depth = means[:, 2]
+    near = max(float(depth.quantile(0.5)) * 0.2, 1e-3)
+    means = means[depth > near]
+    if means.numel() == 0:
+        return max_fov
+    z = means[:, 2].clamp_min(1e-6)
+    tan = torch.maximum((means[:, 0] / z).abs(), (means[:, 1] / z).abs())
+    fov = 2.0 * math.degrees(math.atan(float(tan.quantile(quantile)) * margin))
+    return min(fov, max_fov)
+
+
+
+
+def fov_from_focal_35mm(f_35mm: float, width: int, height: int) -> float:
+    """Horizontal FOV from a 35mm-equivalent focal length.
+
+    SHARP's own conversion, from `sharp/utils/io.py`:
+        f_px = f_35mm * diag(W, H) / diag(36, 24)
+    Reproduced rather than approximated, because the point is to match what the
+    predictor assumed, not to be independently correct about the lens.
+    """
+    f_px = f_35mm * math.sqrt(width ** 2 + height ** 2) / math.sqrt(36 ** 2 + 24 ** 2)
+    return 2.0 * math.degrees(math.atan(width / (2.0 * f_px)))
+
+
+def fov_from_photo(path: str | Path) -> tuple[float, float]:
+    """(fov_deg, f_35mm) read from a photograph's EXIF, the way SHARP reads it.
+
+    A monocular predictor works under the input camera's intrinsics, so those
+    are the intrinsics the prediction has to be rendered back under. SHARP takes
+    FocalLengthIn35mmFilm, falls back to FocalLength (scaled by 8.4 below 10mm,
+    its own crude guess at a non-35mm figure), and defaults to 30mm when the
+    file carries nothing.
+    """
+    try:
+        from PIL import ExifTags, Image, TiffTags
+    except ImportError as e:
+        raise SystemExit(
+            "--like-photo needs Pillow to read EXIF. Install it, or pass --fov "
+            "directly. Refusing to guess the focal length the predictor used."
+        ) from e
+
+    im = Image.open(path)
+    tags = {ExifTags.TAGS[k]: v for k, v in im.getexif().get_ifd(0x8769).items()
+            if k in ExifTags.TAGS}
+    tags.update({TiffTags.TAGS_V2[k].name: v for k, v in im.getexif().items()
+                 if k in TiffTags.TAGS_V2})
+
+    f35 = tags.get("FocalLengthIn35mmFilm", tags.get("FocalLenIn35mmFilm"))
+    if f35 is None or f35 < 1:
+        f35 = tags.get("FocalLength")
+        if f35 is None:
+            f35 = 30.0
+        elif f35 < 10.0:
+            f35 = f35 * 8.4
+    W, H = im.size
+    return fov_from_focal_35mm(float(f35), W, H), float(f35)
+
+# --------------------------------------------------------------- rendering
+
+def render_frames(sp: Splats, views: list[torch.Tensor], K: torch.Tensor,
+                  W: int, H: int, background=(1.0, 1.0, 1.0),
+                  backend: str = "metal"):
+    """Yield (H,W,3) float frames, one per view.
+
+    `sh_degree` comes from the file. Hardcoding 3 (as score_ply does, where
+    every input is a degree-3 trained model) would ask `eval_sh` for bases a
+    feedforward predictor never wrote.
+    """
+    for vm in views:
+        rgb, _, _ = _render(
+            sp.means, sp.quats, sp.scales, sp.opacities, sp.sh,
+            K, vm, W, H, sh_degree=sp.sh_degree, backend=backend,
+            background=background,
+        )
+        yield rgb.detach().clamp(0.0, 1.0)
+
+
+def _pipe_to_ffmpeg(frames, out: Path, W: int, H: int, tail: list[str],
+                    fps: int) -> None:
+    """Pipe raw RGB straight into ffmpeg.
+
+    No intermediate files and no new dependency: the package needs only torch,
+    numpy, plyfile and ninja, and this keeps it that way.
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+           "-framerate", str(fps), "-i", "-", *tail, str(out)]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    except FileNotFoundError:
+        raise SystemExit("ffmpeg not found on PATH; needed to write the output.")
+    assert proc.stdin is not None
+    for f in frames:
+        proc.stdin.write((f * 255.0).round().to(torch.uint8).cpu().numpy().tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise SystemExit("ffmpeg failed while writing the output.")
+
+
+def write_mp4(frames, out: Path, W: int, H: int, fps: int) -> None:
+    _pipe_to_ffmpeg(frames, out, W, H,
+                    ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p",
+                     "-movflags", "+faststart"], fps)
+
+
+def write_png(frame, out: Path, W: int, H: int) -> None:
+    _pipe_to_ffmpeg([frame], out, W, H, ["-frames:v", "1"], 1)
+
+
+# --------------------------------------------------------------- CLI
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="metal-gauss-render",
+        description="Render a .ply along a generated camera path, on Metal.")
+    ap.add_argument("ply")
+    ap.add_argument("--out", required=True, help="output .mp4")
+    ap.add_argument("--frames", type=int, default=60)
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--resolution", type=int, default=512, help="square output")
+    ap.add_argument("--sweep-deg", type=float, default=5.0,
+                    help="peak angle from the input view; small on purpose, see "
+                         "the module docstring")
+    ap.add_argument("--path", choices=("wiggle", "orbit"), default="wiggle")
+    ap.add_argument("--pitch-ratio", type=float, default=0.5)
+    ap.add_argument("--fov", type=float, default=None,
+                    help="horizontal FOV in degrees. Overrides --like-photo.")
+    ap.add_argument("--like-photo", default=None, metavar="IMAGE",
+                    help="read the focal length from this photograph's EXIF, the "
+                         "way SHARP does, so frame 0 reproduces it. This is the "
+                         "right flag for a monocular prediction: the predictor "
+                         "worked under that camera's intrinsics.")
+    ap.add_argument("--depth", type=float, default=None,
+                    help="pivot depth for --frame input; default is the median "
+                         "splat depth")
+    ap.add_argument("--frame", choices=("auto", "input", "bbox"), default="auto",
+                    help="'input' anchors on the predicting camera, which is what "
+                         "a monocular .ply wants; 'bbox' places the camera around "
+                         "the cloud, which is what a trained scene wants. 'auto' "
+                         "picks by whether the cloud sits in front of the origin.")
+    ap.add_argument("--background", default="white", choices=("white", "black"))
+    ap.add_argument("--convention", choices=("opencv", "opengl"), default="opencv",
+                    help="frame the .ply is written in. If the first frame comes "
+                         "out flipped, it is the other one.")
+    ap.add_argument("--backend", choices=("metal", "torch_ref"), default="metal")
+    ap.add_argument("--still", action="store_true",
+                    help="write frame 0 only, as a .png, to check the convention "
+                         "against the original photograph before rendering a video")
+    a = ap.parse_args(argv)
+
+    dev = "mps" if a.backend == "metal" else "cpu"
+    if a.backend == "metal" and not torch.backends.mps.is_available():
+        raise SystemExit("metal backend needs MPS; pass --backend torch_ref.")
+
+    sp = load_ply(a.ply, device=dev)
+    means_cpu = sp.means.detach().cpu()
+    print(f"{len(sp)} splats, SH degree {sp.sh_degree}", file=sys.stderr)
+
+    frame_mode = a.frame
+    if frame_mode == "auto":
+        ahead = in_front_fraction(means_cpu)
+        frame_mode = "input" if ahead > 0.99 else "bbox"
+        print(f"{100 * ahead:.1f}% of splats in front of the origin "
+              f"-> --frame {frame_mode}", file=sys.stderr)
+
+    if frame_mode == "input":
+        depth = a.depth if a.depth is not None else pivot_depth(means_cpu)
+        if not math.isfinite(depth) or depth <= 1e-3:
+            raise SystemExit(
+                f"median splat depth is {depth:.4g}, so the cloud is not in front "
+                "of the input camera. This .ply did not come from a monocular "
+                "predictor; use --frame bbox.")
+        if a.fov is not None:
+            fov = a.fov
+        elif a.like_photo:
+            fov, f35 = fov_from_photo(a.like_photo)
+            print(f"{a.like_photo}: {f35:g}mm (35mm equiv) -> {fov:.2f} deg",
+                  file=sys.stderr)
+        else:
+            fov = framing_fov(means_cpu)
+            print("WARNING: no focal length given, so the FOV is fitted to the "
+                  "cloud. The geometry is right but the crop is not the one the "
+                  "prediction was made under, so frame 0 will NOT reproduce the "
+                  "source photograph. Pass --like-photo or --fov.", file=sys.stderr)
+        eye, target = torch.zeros(3), torch.tensor([0.0, 0.0, float(depth)])
+    else:
+        fov = a.fov if a.fov is not None else 45.0
+        eye, target = bbox_framing(means_cpu, fov)
+
+    W = H = a.resolution
+    K = intrinsics(W, H, fov)
+    views = camera_path(eye, target, 1 if a.still else a.frames,
+                        a.sweep_deg, a.path, a.pitch_ratio)
+    if a.convention == "opengl":
+        views = [vm @ _GL2CV for vm in views]
+
+    print(f"framing {frame_mode}, target {[round(float(v), 3) for v in target]}, "
+          f"fov {fov:.1f} deg, {len(views)} frames, sweep +/-{a.sweep_deg} deg",
+          file=sys.stderr)
+
+    bg = (1.0, 1.0, 1.0) if a.background == "white" else (0.0, 0.0, 0.0)
+    frames = render_frames(sp, views, K, W, H, background=bg, backend=a.backend)
+
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if a.still:
+        out = out.with_suffix(".png")
+        write_png(next(iter(frames)), out, W, H)
+    else:
+        write_mp4(frames, out, W, H, a.fps)
+    print(f"wrote {out}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
