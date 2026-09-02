@@ -260,3 +260,58 @@ def test_loader_refuses_a_prior_that_does_not_match_the_LOADED_image_size(tmp_pa
     with pytest.raises(PriorSizeError, match="max-resolution"):
         load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=8,
                    eval_split_every=1000, depth_dir=tmp_path / "depth")
+
+
+# ------------------------------------------------------------------ opt-out + MPS
+
+def test_no_priors_disables_sibling_autodetect(tmp_path):
+    """Sibling auto-detect means a bare run on a dataset that HAS priors hard-refuses at any
+    --max-resolution below the prior size. There has to be a way to say "train without
+    priors" that is not "point the flag at an empty directory I made up"; the no-prior
+    control arm in the measurement tier needs exactly this."""
+    from metal_gauss import priors
+    (tmp_path / "images").mkdir(); (tmp_path / "depth").mkdir(); (tmp_path / "normal").mkdir()
+    assert priors.resolve_dirs(tmp_path / "images", None, None) != (None, None)
+    assert priors.resolve_dirs(tmp_path / "images", None, None, enabled=False) == (None, None)
+
+
+def test_no_priors_with_an_explicit_dir_is_a_contradiction(tmp_path):
+    """Silently honouring one and dropping the other is how a run trains with supervision
+    the operator thought they had turned off."""
+    from metal_gauss import priors
+    (tmp_path / "images").mkdir(); (tmp_path / "depth").mkdir()
+    with pytest.raises(ValueError, match="no-priors"):
+        priors.resolve_dirs(tmp_path / "images", tmp_path / "depth", None, enabled=False)
+
+
+def test_scene_loader_honours_the_opt_out_on_a_dataset_that_has_priors(tmp_path):
+    from metal_gauss import prior_io
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)
+    (tmp_path / "depth").mkdir()
+    prior_io.write_depth(tmp_path / "depth" / "v0.png", np.ones((4, 8), np.float32),
+                         "png-quantized")          # deliberately the WRONG size
+    with pytest.raises(Exception):                 # would refuse, were priors enabled
+        load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                   eval_split_every=1000)
+    sc = load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                   eval_split_every=1000, use_priors=False)
+    assert _only_view(sc).depth is None
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
+def test_decoders_run_on_real_mps_tensors():
+    """Priors are decoded AFTER `.to(device)` in the training loop, and MPS is not CPU:
+    torch 2.13 has no `uint16 == scalar` there (`eq_dense_scalar_cast_bool_ushort`), which
+    is why `decode_depth` is a cast and a divide and only `decode_normal` compares -- on
+    uint8, which does work. A CPU-only test cannot see any of that."""
+    from metal_gauss import priors
+    d = torch.tensor([[0, 1234, 65535]], dtype=torch.uint16).to("mps")
+    out = priors.decode_depth(d)
+    assert out.device.type == "mps" and out.dtype == torch.float32
+    assert out.cpu().tolist()[0] == pytest.approx([0.0, 1.234, 65.535], abs=1e-5)
+    n = torch.tensor([[[128, 255, 0]]], dtype=torch.uint8).to("mps")
+    dn = priors.decode_normal(n).cpu()
+    assert dn[0, 0, 0].item() == 0.0
+    assert dn[0, 0, 1].item() == pytest.approx(1.0)
+    assert dn[0, 0, 2].item() == pytest.approx(-1.0)

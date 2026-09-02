@@ -87,7 +87,8 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
                mask_polarity: str = "auto",
                depth_dir: str | Path | None = None,
                normal_dir: str | Path | None = None,
-               prior_resident: str = "quantized") -> Scene:
+               prior_resident: str = "quantized",
+               use_priors: bool = True) -> Scene:
     import pycolmap
     from PIL import Image
 
@@ -103,7 +104,7 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
             polarity = mask_polarity
         print(f"masks: {masks_dir} polarity={polarity} {mask_stats}")
 
-    d_dir, n_dir = resolve_dirs(images_dir, depth_dir, normal_dir)
+    d_dir, n_dir = resolve_dirs(images_dir, depth_dir, normal_dir, enabled=use_priors)
     if d_dir is not None or n_dir is not None:
         print(f"priors: depth={d_dir or 'none'} normal={n_dir or 'none'} "
               f"resident={prior_resident}")

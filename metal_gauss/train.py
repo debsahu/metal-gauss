@@ -24,7 +24,9 @@ import torch
 
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
-from metal_gauss.geometry_loss import flatten_loss
+from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
+                                      normal_loss, normals_from_depth, splat_normals_cam)
+from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
 from metal_gauss.mcmc import add_noise, grow, relocate
@@ -260,9 +262,59 @@ def make_optimizer(p: dict, lr_means0: float, *, lr_opac: float = 1e-2,
     return torch.optim.Adam(groups, eps=1e-15)
 
 
+def geometry_aux(means, quats, scales, viewmat):
+    """The two aux attribute maps the geometry recipe composites: camera-frame splat
+    normals and view-space z.
+
+    `scales` MUST be the same tensor handed to `render` (post-`filter_3d`), so the
+    thin-axis choice describes the ellipsoid actually rasterized.
+
+    z comes from torch, NEVER from the preprocess's own `depth` output.
+    `_PreprocessMetal.backward` accepts `d_depth` and DROPS it (metal_backend.py:267-279),
+    so a depth map built on that output has no gradient path: it trains nothing and does
+    not error. Pinned by tests/test_aux_render.py.
+    """
+    vmd = viewmat.to(means.device)
+    n_cam = splat_normals_cam(means, quats, scales, vmd)
+    z = (means @ vmd[:3, :3].T + vmd[:3, 3])[:, 2:3].expand(-1, 3)
+    return [n_cam, z]
+
+
+def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
+    """The depth / normal / depth-normal terms over one view's aux maps.
+
+    ALPHA IS DETACHED. The terms divide by coverage to recover an attribute from its
+    alpha-weighted composite; a differentiable divisor would make FADING A SPLAT OUT a
+    cheaper way to satisfy a depth loss than moving it. That is the mechanism behind
+    Brush's banned `--depth-source plane-fused`, where opacity p50 collapses ~30%.
+
+    `keep` is a BINARY mask. Multiplying a metric depth by a fractional alpha would invent
+    depths between 0 and the truth, and a smaller depth is a different surface, not a less
+    certain one.
+    """
+    alpha_d = alpha.detach()
+    n_img, z_img = aux_maps
+    n_img = n_img / alpha_d.clamp_min(1e-10)[..., None]
+    n_img = n_img / n_img.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    depth_img = z_img[..., 0] / alpha_d.clamp_min(1e-10)
+    terms = {}
+    if args.depth_loss_weight > 0 and gt_depth is not None:
+        gt_d = gt_depth if keep is None else gt_depth * keep
+        terms["depth"] = depth_loss(depth_img, gt_d, args.depth_loss_space)
+    if args.normal_loss_weight > 0 and gt_normal is not None:
+        gt_n = gt_normal if keep is None else gt_normal * keep[..., None]
+        terms["normal"] = normal_loss(n_img, gt_n)
+    if args.depth_normal_weight > 0:
+        n_d = normals_from_depth(depth_img, K[0, 0].item(), K[1, 1].item(),
+                                 K[0, 2].item(), K[1, 2].item())
+        terms["depth_normal"] = depth_normal_loss(
+            n_d, n_img, alpha_d if keep is None else alpha_d * keep)
+    return terms
+
+
 def render_view(p: dict, v, active: int, sh_deg: int = 3,
                 background=(0.0, 0.0, 0.0), antialias: bool = False,
-                absgrad_out=None, filter_3d=None):
+                absgrad_out=None, filter_3d=None, want_geometry: bool = False):
     """One rendered view, exactly as training renders it.
 
     v.K and v.viewmat stay on the HOST on purpose: the kernel reads both there,
@@ -276,17 +328,20 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
         # because it is a plain reparameterisation of scale and opacity, so
         # autograd carries it and no adjoint has to be written.
         scales, opac = apply_3d_filter(scales, opac, filter_3d[:active])
+    aux = geometry_aux(p["means"][:active], p["quats"][:active], scales,
+                       v.viewmat) if want_geometry else None
     return render(
         p["means"][:active], p["quats"][:active],
         scales, opac, p["sh_dc"][:active],
         v.K, v.viewmat, W, H,
         sh_degree=sh_deg, backend="metal", sh_rest=p["sh_rest"][:active],
-        background=background, antialias=antialias, absgrad_out=absgrad_out)
+        background=background, antialias=antialias, absgrad_out=absgrad_out,
+        aux_colors=aux)
 
 
 # ---------------------------------------------------------------- training
 
-def train(args) -> dict:
+def train(args, scene: Scene | None = None) -> dict:
     device = "mps"
     # Seed every torch RNG the run touches: the init jitter, relocate/grow's
     # multinomial, and add_noise's randn. The numpy streams (point subsample,
@@ -304,7 +359,11 @@ def train(args) -> dict:
     torch.manual_seed(args.seed)
     if hasattr(torch.mps, "manual_seed"):
         torch.mps.manual_seed(args.seed)
-    if args.blender:
+    if scene is not None:
+        # A pre-built Scene (tests, and any caller that already has one). Blender's white
+        # background is not implied here; a supplied scene uses the COLMAP convention.
+        bg = (0.0, 0.0, 0.0)
+    elif args.blender:
         from metal_gauss.blender import load_blender
         scene = load_blender(args.blender, args.max_resolution)
         # The Blender PNGs are composited over WHITE, so the renderer must
@@ -319,7 +378,8 @@ def train(args) -> dict:
                            mask_polarity=getattr(args, "mask_polarity", "auto"),
                            depth_dir=getattr(args, "depth_dir", None),
                            normal_dir=getattr(args, "normal_dir", None),
-                           prior_resident=getattr(args, "prior_resident", "quantized"))
+                           prior_resident=getattr(args, "prior_resident", "quantized"),
+                           use_priors=not getattr(args, "no_priors", False))
         bg = (0.0, 0.0, 0.0)
     print(f"{len(scene.train)} train views, {len(scene.heldout)} held out, "
           f"{len(scene.points):,} sparse points, budget {args.budget:,}")
@@ -330,6 +390,18 @@ def train(args) -> dict:
         n_m = sum(v.mask is not None for v in scene.train + scene.heldout)
         print(f"masked supervision active on {n_m}/"
               f"{len(scene.train) + len(scene.heldout)} views")
+
+    # Refuse to start rather than silently train without the supervision the run was
+    # configured for: a run that quietly drops a term looks exactly like one that kept it.
+    for flag, attr in (("--depth-loss-weight", "depth"), ("--normal-loss-weight", "normal")):
+        w = getattr(args, flag[2:].replace("-", "_"))
+        if w > 0 and not any(getattr(v, attr) is not None for v in scene.train):
+            raise RuntimeError(
+                f"{flag} {w} but no view carries a {attr} prior -- refusing to train "
+                f"without the supervision it was configured for. Point --{attr}-dir at "
+                f"the priors, or set the weight to 0.")
+    want_geometry = (args.depth_loss_weight > 0 or args.normal_loss_weight > 0
+                     or args.depth_normal_weight > 0)
 
     # Selective Adam was built, validated, and MEASURED SLOWER here: at this
     # scene's per-view visibility (well above 50%), 15 gather/scatter launches
@@ -418,13 +490,37 @@ def train(args) -> dict:
         rgb, alpha, info = render_view(p, v, active, sh_deg, bg,
                                        antialias=args.antialias,
                                        absgrad_out=grad_sum if use_absgrad else None,
-                                       filter_3d=filter_3d)
+                                       filter_3d=filter_3d,
+                                       want_geometry=want_geometry)
         gt = v.image.to(device).float() / 255.0
         # Correct the RENDER (not the ground truth) so the exported splat stays
         # in the true photometric space and held-out views need no transform.
         rgb_c = appearance(rgb, view_idx) if appearance is not None else rgb
         m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
-        loss = photometric_loss(rgb_c, gt, m01, kernel)
+
+        # Same arithmetic as photometric_loss(), split so each half can be logged.
+        terms = {}
+        l1 = (rgb_c - gt).abs()
+        ds = 1.0 - ssim_map(rgb_c, gt, kernel)
+        if m01 is not None:
+            l1 = l1 * _bcast(m01, l1)
+            ds = ds * _bcast(m01, ds)
+        terms["l1"], terms["ssim"] = l1.mean(), ds.mean()
+        loss = 0.8 * terms["l1"] + 0.2 * terms["ssim"]
+        if args.flatten_loss_weight > 0.0:
+            terms["flatten"] = flatten_loss(p["log_scales"][:active])
+            loss = loss + args.flatten_loss_weight * terms["flatten"]
+        if want_geometry:
+            keep = None if m01 is None else (m01 > 0.5)
+            gt_d = decode_depth(v.depth.to(device)) if v.depth is not None else None
+            gt_n = decode_normal(v.normal.to(device)) if v.normal is not None else None
+            g = geometry_terms(args, info["aux"], alpha, v.K, gt_d, gt_n, keep)
+            terms.update(g)
+            for name, w in (("depth", args.depth_loss_weight),
+                            ("normal", args.normal_loss_weight),
+                            ("depth_normal", args.depth_normal_weight)):
+                if name in g:
+                    loss = loss + w * g[name]
         if appearance is not None:
             loss = loss + args.appearance_reg * appearance.regulariser()
         # MCMC regularisers: keep opacity and scale mass in check
@@ -561,9 +657,12 @@ def train(args) -> dict:
             warn = mask_void_warning(masks_supplied, ev["coverage"])
             if warn:
                 print(warn, flush=True)
+            term_vals = {k: float(t.detach()) for k, t in terms.items()}
+            print("  terms  " + "  ".join(f"{k} {t:.5f}" for k, t in term_vals.items()),
+                  flush=True)
             log.append({"step": step, "psnr": ev["psnr"],
                         "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
-                        "wall_s": round(dt, 1), "active": active})
+                        "wall_s": round(dt, 1), "active": active, "terms": term_vals})
 
     out = _run_report(args, log, time.perf_counter() - t0, active)
     for dest in (args.out, getattr(args, "report", None)):
@@ -711,6 +810,7 @@ def _run_report(args, log, wall_s, active):
             "psnr": log[-1]["psnr"] if log else None,
             "psnr_masked": log[-1].get("psnr_masked") if log else None,
             "coverage": log[-1].get("coverage") if log else None,
+            "terms": log[-1].get("terms") if log else None,
             "wall_s": round(wall_s, 1),
             "n_splats": int(active),
             "ms_per_step": round(ms, 2) if ms else None,
@@ -763,6 +863,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "codes, 5 bytes/px against 16, and is training-equivalent per "
                          "the WS-G gate (0.0128 dB vs a 0.0317 dB same-seed repeat). "
                          "'float32' is the lossless escape hatch.")
+    ap.add_argument("--no-priors", action="store_true",
+                    help="ignore depth/normal priors entirely, including the sibling "
+                         "auto-detect. Without this, a dataset that HAS priors refuses to "
+                         "start at any --max-resolution below the prior size; this is the "
+                         "no-prior control arm.")
+    ap.add_argument("--depth-loss-weight", type=float, default=0.0,
+                    help="L1 on rendered vs prior depth. earthbyte indoor recipe: 1.0")
+    ap.add_argument("--depth-loss-space", choices=["disparity", "metric"],
+                    default="disparity",
+                    help="disparity (1/z, Brush's default) weights near geometry more")
+    ap.add_argument("--normal-loss-weight", type=float, default=0.0,
+                    help="component L1 on rendered vs prior normals. Recipe: 0.2")
+    ap.add_argument("--depth-normal-weight", type=float, default=0.0,
+                    help="1 - cos between normals differentiated from the rendered depth "
+                         "and the rendered normals. Needs NO prior data, so it is the "
+                         "cheapest of the three to switch on. Recipe: 0.05")
     ap.add_argument("--eval-dump", default=None,
                     help="write <stem>_render.png / _gt.png / _mask.png per held-out "
                          "view at every eval, for LPIPS and for looking at.")

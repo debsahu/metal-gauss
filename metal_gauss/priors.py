@@ -37,8 +37,15 @@ class PriorSizeError(RuntimeError):
     """A prior does not match the size its image loaded at. Never resize; regenerate."""
 
 
-def resolve_dirs(images_dir, depth_dir, normal_dir) -> tuple[Path | None, Path | None]:
+def resolve_dirs(images_dir, depth_dir, normal_dir,
+                 enabled: bool = True) -> tuple[Path | None, Path | None]:
     """Explicit flags win; otherwise the siblings `<images>/../{depth,normal}` if they exist.
+
+    `enabled=False` (the trainer's `--no-priors`) turns the whole mechanism off. Without it
+    the sibling auto-detect makes a bare run on a dataset that HAS priors refuse at any
+    `--max-resolution` below the prior size, and the only escape is inventing an empty
+    directory to point the flag at. Combining it with an explicit `--depth-dir` is a
+    contradiction and is refused rather than silently resolved one way.
 
     `abspath`, NOT `resolve()`. A dataset's `images/` is very often a symlink into another
     tree (P-GEOM's points at an entirely different capture directory), and `resolve()`
@@ -47,6 +54,12 @@ def resolve_dirs(images_dir, depth_dir, normal_dir) -> tuple[Path | None, Path |
     run trains with no priors and prints nothing, because there is nothing to print.
     `abspath` normalises lexically -- absolute, `..` collapsed, symlinks intact.
     """
+    if not enabled:
+        if depth_dir is not None or normal_dir is not None:
+            raise ValueError(
+                "--no-priors was given together with an explicit --depth-dir/--normal-dir; "
+                "pick one -- refusing to guess which the operator meant")
+        return None, None
     root = Path(os.path.abspath(images_dir)).parent
     d = Path(depth_dir) if depth_dir else (root / "depth" if (root / "depth").is_dir() else None)
     n = Path(normal_dir) if normal_dir else (root / "normal" if (root / "normal").is_dir() else None)
