@@ -57,8 +57,86 @@ def ssim(a: torch.Tensor, b: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor
     than the rasteriser -- almost all of it dispatch overhead rather than
     arithmetic.
     """
+    return ssim_map(a, b, kernel).mean()
+
+
+def ssim_map(a: torch.Tensor, b: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Per-pixel SSIM, before the mean. `ssim_tail_forward` returns (1,3,H,W) -- NOT
+    the (H,W,3) layout the images are in -- so anything multiplied into it has to be
+    broadcast to that layout, which `_bcast` does."""
     return _SSIMFused.apply(a.contiguous(), b.contiguous(),
-                            kernel[0, 0, 0].contiguous()).mean()
+                            kernel[0, 0, 0].contiguous())
+
+
+def _bcast(mask01: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """(H,W) keep-mask reshaped to multiply `like` elementwise.
+
+    (H,W,3) images take a trailing axis; the SSIM map's (1,3,H,W) takes two LEADING
+    axes. Using the trailing form on the SSIM map silently mis-broadcasts -- and on a
+    square image it does not even raise, it just multiplies the wrong pixels.
+    """
+    if like.ndim == 4:                      # (1,3,H,W) SSIM map
+        return mask01[None, None]
+    if like.ndim == 3:                      # (H,W,3) image
+        return mask01[..., None]
+    return mask01
+
+
+def photometric_loss(rgb_c: torch.Tensor, gt: torch.Tensor,
+                     mask01: torch.Tensor | None, kernel: torch.Tensor) -> torch.Tensor:
+    """0.8 L1 + 0.2 (1 - SSIM), per pixel, multiplied by the KEEP mask (1 = keep),
+    then meaned over ALL pixels.
+
+    The mask zeroes the NUMERATOR only -- there is deliberately no division by
+    coverage here, matching Brush's `image_loss`. `masked_mse` below DOES divide,
+    because a PSNR that did not would be inflated by -10 log10(coverage). The
+    asymmetry is intentional: a training loss is a descent direction whose overall
+    scale is absorbed by the learning rate, while a reported metric is a number
+    someone compares against a 24 dB gate.
+
+    Masking cannot be exact at a mask boundary: SSIM's 11-tap window means a kept
+    pixel within 5 px of a dropped one still sees it. That is a property of windowed
+    SSIM, not of this implementation (CLAUDE.md Stage 4 says the same of masked SSIM).
+    """
+    l1 = (rgb_c - gt).abs()
+    ds = 1.0 - ssim_map(rgb_c, gt, kernel)
+    if mask01 is not None:
+        l1 = l1 * _bcast(mask01, l1)
+        ds = ds * _bcast(mask01, ds)
+    return 0.8 * l1.mean() + 0.2 * ds.mean()
+
+
+def masked_mse(err2: torch.Tensor, mask01: torch.Tensor | None) -> torch.Tensor:
+    """mean(err2 * keep) / mean(keep). `mask01` None -> plain mean.
+
+    The divisor is the whole point. Without it, masked-out pixels leave the numerator
+    but not the denominator, so PSNR reads -10 log10(coverage) too high: +2.3 dB at
+    59% coverage. Coverage is clamped so a fully dropped frame scores 0 rather than
+    an infinite PSNR that would drag the held-out mean up.
+    """
+    if mask01 is None:
+        return err2.mean()
+    cov = mask01.mean().clamp_min(1e-6)
+    return (err2 * _bcast(mask01, err2)).mean() / cov
+
+
+def mask_void_warning(masks_supplied: bool, coverage: float) -> str | None:
+    """The one-line instrument that makes CLAUDE.md's 49.561 dB impossible to repeat.
+
+    `mean coverage 100.0%` on a run that supplied masks means the masks never reached
+    the loss: the trainer scored every pixel, trained the operator and the monopod in,
+    and its "masked" PSNR is identical to its unmasked one by construction. That run
+    (splat_3840v2_full) spent 47,037 s of GPU and its 2,500-step authorising gate was
+    measured on the same maskless dataset.
+
+    Silent when no masks were supplied -- an unmasked dataset legitimately reads 100%,
+    and a warning there just teaches operators to ignore the line.
+    """
+    if not masks_supplied or coverage < 0.9999:
+        return None
+    return ("  [MASKS] mean coverage 100.0% on a run that supplied masks: the masks "
+            "did not reach the loss. Treat this run as VOID "
+            "(see CLAUDE.md Stage 3, splat_3840v2_full).")
 
 
 class _SSIMFused(torch.autograd.Function):
@@ -235,10 +313,19 @@ def train(args) -> dict:
         bg = (1.0, 1.0, 1.0)
     else:
         scene = load_scene(args.colmap, args.images, args.max_resolution,
-                           args.eval_split_every)
+                           args.eval_split_every,
+                           masks_dir=getattr(args, "masks", None),
+                           mask_polarity=getattr(args, "mask_polarity", "auto"))
         bg = (0.0, 0.0, 0.0)
     print(f"{len(scene.train)} train views, {len(scene.heldout)} held out, "
           f"{len(scene.points):,} sparse points, budget {args.budget:,}")
+    # "supplied" means a mask source was present, from EITHER convention: an explicit
+    # --masks directory, or alpha baked into the images (which needs no flag at all).
+    masks_supplied = any(v.mask is not None for v in scene.train + scene.heldout)
+    if masks_supplied:
+        n_m = sum(v.mask is not None for v in scene.train + scene.heldout)
+        print(f"masked supervision active on {n_m}/"
+              f"{len(scene.train) + len(scene.heldout)} views")
 
     # Selective Adam was built, validated, and MEASURED SLOWER here: at this
     # scene's per-view visibility (well above 50%), 15 gather/scatter launches
@@ -332,8 +419,8 @@ def train(args) -> dict:
         # Correct the RENDER (not the ground truth) so the exported splat stays
         # in the true photometric space and held-out views need no transform.
         rgb_c = appearance(rgb, view_idx) if appearance is not None else rgb
-        l1 = (rgb_c - gt).abs().mean()
-        loss = 0.8 * l1 + 0.2 * (1.0 - ssim(rgb_c, gt, kernel))
+        m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
+        loss = photometric_loss(rgb_c, gt, m01, kernel)
         if appearance is not None:
             loss = loss + args.appearance_reg * appearance.regulariser()
         # MCMC regularisers: keep opacity and scale mass in check
@@ -451,15 +538,23 @@ def train(args) -> dict:
 
         if step % args.eval_every == 0 or step == args.steps:
             torch.mps.empty_cache()
-            psnr = evaluate(p, scene, device, sh_degree=sh_deg, active=active,
-                            background=bg, antialias=args.antialias,
-                            filter_3d=filter_3d)
+            ev = evaluate(p, scene, device, sh_degree=sh_deg, active=active,
+                          background=bg, antialias=args.antialias,
+                          filter_3d=filter_3d,
+                          dump_dir=getattr(args, "eval_dump", None))
             dt = time.perf_counter() - t0
-            print(f"step {step:>6}  loss {loss.item():.4f}  heldout PSNR {psnr:.2f} dB  "
+            print(f"step {step:>6}  loss {loss.item():.4f}  "
+                  f"heldout masked PSNR {ev['psnr_masked']:.2f} dB | "
+                  f"unmasked (legacy) PSNR {ev['psnr']:.2f} | "
+                  f"mean coverage {100 * ev['coverage']:.1f}%  "
                   f"{active/1000:.0f}k splats  {dt:.0f}s  ({1000 * dt / step:.0f} ms/step)",
                   flush=True)
-            log.append({"step": step, "psnr": psnr, "wall_s": round(dt, 1),
-                        "active": active})
+            warn = mask_void_warning(masks_supplied, ev["coverage"])
+            if warn:
+                print(warn, flush=True)
+            log.append({"step": step, "psnr": ev["psnr"],
+                        "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
+                        "wall_s": round(dt, 1), "active": active})
 
     out = _run_report(args, log, time.perf_counter() - t0, active)
     for dest in (args.out, getattr(args, "report", None)):
@@ -477,14 +572,19 @@ def train(args) -> dict:
 def evaluate(p, scene: Scene, device: str, max_views: int | None = None,
              background=(0.0, 0.0, 0.0),
              sh_degree: int = 3, active: int | None = None,
-             antialias: bool = False, filter_3d=None) -> float:
+             antialias: bool = False, filter_3d=None, dump_dir=None) -> dict:
     """Held-out PSNR over ALL held-out views by default.
 
     This used to default to the first 10 of 21 views, which biased every
     number we reported by up to ~0.5 dB depending on which views happened to
     be easy. Metrics get fixed before levers get credited.
+
+    Returns masked PSNR (the gate figure -- scored over KEPT pixels only), the
+    legacy unmasked PSNR (every pixel, kept comparable with every number recorded
+    before masks existed), and mean coverage. On an unmasked dataset all three are
+    the old number, 1.0 and each other.
     """
-    psnrs = []
+    psnrs_m, psnrs_u, covs = [], [], []
     for v in (scene.heldout if max_views is None else scene.heldout[:max_views]):
         H, W = v.image.shape[:2]
         a = len(p["means"]) if active is None else active
@@ -498,9 +598,24 @@ def evaluate(p, scene: Scene, device: str, max_views: int | None = None,
                            sh_degree=sh_degree, backend="metal", background=background,
                            antialias=antialias)
         gt = v.image.to(device).float() / 255.0
-        mse = ((rgb.clamp(0, 1) - gt) ** 2).mean().item()
-        psnrs.append(-10 * math.log10(max(mse, 1e-10)))
-    return float(np.mean(psnrs))
+        m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
+        err2 = (rgb.clamp(0, 1) - gt) ** 2
+        psnrs_u.append(-10 * math.log10(max(err2.mean().item(), 1e-10)))
+        psnrs_m.append(-10 * math.log10(max(masked_mse(err2, m01).item(), 1e-10)))
+        covs.append(1.0 if m01 is None else m01.mean().item())
+        if dump_dir is not None:
+            from PIL import Image as _Im
+            d = Path(dump_dir); d.mkdir(parents=True, exist_ok=True)
+            stem = Path(v.name).stem
+            def _u8(t):
+                return (t.clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
+            _Im.fromarray(_u8(rgb)).save(d / f"{stem}_render.png")
+            _Im.fromarray(_u8(gt)).save(d / f"{stem}_gt.png")
+            if v.mask is not None:
+                _Im.fromarray(v.mask.cpu().numpy()).save(d / f"{stem}_mask.png")
+    return {"psnr_masked": float(np.mean(psnrs_m)),
+            "psnr": float(np.mean(psnrs_u)),
+            "coverage": float(np.mean(covs))}
 
 
 @torch.no_grad()
@@ -583,7 +698,10 @@ def _run_report(args, log, wall_s, active):
             "machine": platform.machine(),
         },
         "metrics": {
+            # `psnr` stays the UNMASKED number: readers of --out predate masks.
             "psnr": log[-1]["psnr"] if log else None,
+            "psnr_masked": log[-1].get("psnr_masked") if log else None,
+            "coverage": log[-1].get("coverage") if log else None,
             "wall_s": round(wall_s, 1),
             "n_splats": int(active),
             "ms_per_step": round(ms, 2) if ms else None,
@@ -610,6 +728,18 @@ def main():
                          "auto_budget(). Set explicitly to override.")
     ap.add_argument("--max-resolution", type=int, default=1600)
     ap.add_argument("--eval-split-every", type=int, default=8)
+    ap.add_argument("--masks", default=None,
+                    help="directory of sidecar masks, one per image by stem. Polarity "
+                         "is decided for the DIRECTORY (see --mask-polarity). Images "
+                         "that carry a baked RGBA alpha need no flag and must NOT also "
+                         "have a sidecar -- that combination is an error, not a merge.")
+    ap.add_argument("--mask-polarity", choices=["auto", "drop", "keep"], default="auto",
+                    help="what 255 means in --masks. Every masks*/ directory in "
+                         "earthbyte/slam is 255 = DROP; 'auto' reads the median white "
+                         "fraction over a sample and picks, then prints what it picked.")
+    ap.add_argument("--eval-dump", default=None,
+                    help="write <stem>_render.png / _gt.png / _mask.png per held-out "
+                         "view at every eval, for LPIPS and for looking at.")
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--relocate-every", type=int, default=100)
     ap.add_argument("--lr-means", type=float, default=2e-4)
