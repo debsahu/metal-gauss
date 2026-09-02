@@ -8,13 +8,16 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from metal_gauss.masks import alpha_to_mask, decide_polarity, find_mask, load_sidecar_mask
+
 
 @dataclass
 class View:
     name: str
-    image: torch.Tensor      # (H,W,3) float32 in [0,1], cpu
+    image: torch.Tensor      # (H,W,3) uint8, cpu
     K: torch.Tensor          # (3,3)
     viewmat: torch.Tensor    # (4,4) world2cam
+    mask: torch.Tensor | None = None   # (H,W) uint8, 255 = KEEP, cpu
 
 
 _PYRAMID: dict = {}
@@ -52,7 +55,10 @@ def downscaled(v: View, factor: int) -> View:
     K[0, 0] *= sx; K[0, 2] *= sx
     K[1, 1] *= sy; K[1, 2] *= sy
 
-    out = View(v.name, img.contiguous(), K, v.viewmat)
+    # Strided NEAREST on the mask, never `interpolate`: a mask is labels, and an
+    # area-averaged label is not a label. The slice bounds give exactly (h, w).
+    m = None if v.mask is None else v.mask[:h * factor:factor, :w * factor:factor].contiguous()
+    out = View(v.name, img.contiguous(), K, v.viewmat, mask=m)
     if len(_PYRAMID) > 4096:          # bounded; scenes have a few hundred views
         _PYRAMID.clear()
     _PYRAMID[key] = out
@@ -68,22 +74,49 @@ class Scene:
 
 
 def load_scene(colmap_dir: str | Path, images_dir: str | Path,
-               max_resolution: int = 1600, eval_split_every: int = 8) -> Scene:
+               max_resolution: int = 1600, eval_split_every: int = 8,
+               masks_dir: str | Path | None = None,
+               mask_polarity: str = "auto") -> Scene:
     import pycolmap
     from PIL import Image
 
     rec = pycolmap.Reconstruction(str(colmap_dir))
     cam = list(rec.cameras.values())[0]
 
+    # Resolved ONCE for the directory, before any frame is read -- see masks.py.
+    polarity, mask_stats = "drop", None
+    if masks_dir is not None:
+        if mask_polarity == "auto":
+            polarity, mask_stats = decide_polarity(masks_dir)
+        else:
+            polarity = mask_polarity
+        print(f"masks: {masks_dir} polarity={polarity} {mask_stats}")
+
     views = []
     for im in sorted(rec.images.values(), key=lambda i: i.name):
         p = Path(images_dir) / im.name
         if not p.exists():
             continue
-        img = Image.open(p).convert("RGB")
+        # Capture the alpha BEFORE .convert("RGB") -- that call silently discards a
+        # baked mask, which is how an alpha-masked dataset trains unmasked.
+        src = Image.open(p)
+        alpha = src.getchannel("A") if src.mode in ("RGBA", "LA") else None
+        img = src.convert("RGB")
         scale = min(1.0, max_resolution / max(img.size))
         W, H = int(round(img.width * scale)), int(round(img.height * scale))
         img = img.resize((W, H), Image.LANCZOS)
+
+        side = find_mask(masks_dir, Path(im.name).stem) if masks_dir is not None else None
+        if alpha is not None and side is not None:
+            raise ValueError(
+                f"{im.name}: both a baked alpha channel and a sidecar mask {side} "
+                f"-- pick one source")
+        mask = None
+        if alpha is not None:
+            mask = alpha_to_mask(np.asarray(alpha.resize((W, H), Image.NEAREST)))
+        elif side is not None:
+            mask = load_sidecar_mask(side, (W, H), polarity)
+
         sx, sy = W / cam.width, H / cam.height
         K = torch.tensor([[cam.params[0] * sx, 0, cam.params[2] * sx],
                           [0, cam.params[1] * sy, cam.params[3] * sy],
@@ -96,7 +129,8 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
         # OOMed a 24GB M5 alongside the 1M-splat Adam state. Convert per step.
         views.append(View(im.name,
                           torch.from_numpy(np.asarray(img, dtype=np.uint8).copy()),
-                          K, vm))
+                          K, vm,
+                          mask=None if mask is None else torch.from_numpy(mask)))
 
     heldout = views[::eval_split_every]
     heldout_names = {v.name for v in heldout}
