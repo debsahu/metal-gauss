@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from metal_gauss.render_path import (
+    aperture_views,
     bbox_framing,
     fov_from_focal_35mm,
     camera_path,
@@ -462,3 +463,66 @@ def test_fov_from_focal_35mm_is_resolution_independent_when_square(side):
 def test_fov_from_focal_35mm_widens_as_the_lens_shortens():
     fovs = [fov_from_focal_35mm(f, 1000, 1000) for f in (24.0, 50.0, 135.0, 200.0)]
     assert fovs == sorted(fovs, reverse=True)
+
+
+# ----------------------------------------------------------------- the lens
+
+def test_zero_radius_is_exactly_the_pinhole():
+    """The aperture path must be a strict superset of the ordinary one.
+
+    If radius 0 returned a ring of samples at distance 0, or a slightly
+    different matrix, then adding defocus support would silently perturb every
+    existing render. It returns one view and that view is the pinhole.
+    """
+    vs = aperture_views([0.0, 0.0, 0.0], [0.0, 0.0, 2.0], 0.0, 64)
+    assert len(vs) == 1
+    assert torch.allclose(vs[0], torch.eye(4), atol=1e-6)
+
+
+@pytest.mark.parametrize("radius", [0.01, 0.05, 0.2])
+def test_samples_lie_inside_the_aperture_disc(radius):
+    """Every sample is on the lens plane and within the lens."""
+    eye, target = torch.zeros(3), torch.tensor([0.0, 0.0, 3.0])
+    centres = torch.stack([-(v[:3, :3].T @ v[:3, 3])
+                           for v in aperture_views(eye, target, radius, 128)])
+    assert torch.all(centres[:, :2].norm(dim=1) <= radius + 1e-6)
+    assert torch.allclose(centres[:, 2], torch.zeros(len(centres)), atol=1e-6)
+
+
+def test_every_aperture_view_aims_at_the_focal_plane():
+    """This is what makes it a lens rather than a shake.
+
+    Translating the camera without re-aiming would move the whole image, and
+    averaging that gives uniform motion blur with nothing in focus anywhere.
+    Re-aiming every sample at the focal plane is what holds that plane sharp
+    while everything else disperses.
+    """
+    target = torch.tensor([0.0, 0.0, 2.5])
+    for vm in aperture_views(torch.zeros(3), target, 0.08, 64):
+        centre = -(vm[:3, :3].T @ vm[:3, 3])
+        forward = vm[:3, :3][2]                     # camera +Z in world terms
+        want = target - centre
+        want = want / want.norm()
+        assert torch.allclose(forward, want, atol=1e-5)
+
+
+def test_samples_are_spread_by_area_not_by_radius():
+    """sqrt spacing, or the blur keeps a bright core.
+
+    Spacing linearly in r puts far more samples per unit AREA near the centre,
+    so the averaged result is brightest on the axis and the bokeh looks lit
+    from within. Half the samples should fall inside r/sqrt(2), which is the
+    radius that halves the disc's area.
+    """
+    n, radius = 512, 0.1
+    centres = torch.stack([-(v[:3, :3].T @ v[:3, 3])
+                           for v in aperture_views(torch.zeros(3),
+                                                   torch.tensor([0.0, 0.0, 2.0]),
+                                                   radius, n)])
+    inside = (centres[:, :2].norm(dim=1) < radius / math.sqrt(2)).float().mean()
+    assert abs(float(inside) - 0.5) < 0.05
+
+
+def test_aperture_rejects_a_zero_sample_count():
+    with pytest.raises(ValueError, match="at least one"):
+        aperture_views(torch.zeros(3), torch.tensor([0.0, 0.0, 1.0]), 0.05, 0)

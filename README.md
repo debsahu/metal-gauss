@@ -114,9 +114,21 @@ the photograph, which is the whole point of anchoring to it. This flag reads the
 SHARP does. Without it the FOV is fitted to the cloud and the tool says so. The gap is not subtle: a
 135 mm portrait is **12.9°**, SHARP's no-EXIF fallback of 30 mm is **54°**.
 
+`--aperture` renders through a thin lens instead of a pinhole: the frame becomes the mean of many
+views spread over the lens area, every one aimed at the focal plane, so that plane stays sharp and
+everything else disperses. Defocus therefore needs no new rasteriser, only more cameras. Radius 0 is
+the default and is bit-identical to the pinhole path. Below about 32 samples the sampling disc shows
+as a lattice in the bokeh.
+
+```bash
+metal-gauss-render prediction.ply --out bokeh.mp4 --like-photo portrait.jpg \
+    --aperture 0.03 --aperture-samples 96
+```
+
 Forward-only, so it is much faster than a training step: **69 fps** at 600k splats and 768², **91**
 at 512², **481** at 100k splats and 384², on an M5 with the GPU to itself (`bench/render_fps.py`,
-three round-robin repeats agreeing to within 10%).
+three round-robin repeats agreeing to within 10%). A defocused frame costs that times the sample
+count.
 
 Defaults are 60 frames at 30 fps, 512 px square, ±5° wiggle; `ffmpeg` on PATH writes the mp4.
 `--still` dumps frame 0 as a `.png`, the cheap way to check a file's convention before rendering 60

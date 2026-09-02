@@ -60,12 +60,34 @@ def world_to_camera(R: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
     return vm
 
 
-def pivot_depth(means: torch.Tensor, quantile: float = 0.5) -> float:
-    """Depth to orbit about, along the input camera's forward axis.
+def pivot_depth(means: torch.Tensor, fov_deg: float | None = None,
+                cone_frac: float = 0.4, quantile: float = 0.5,
+                min_splats: int = 256) -> float:
+    """Depth of whatever the camera is pointed at, not of the scene as a whole.
 
-    Median by default. See the module docstring for why not the mean.
+    Taking the median over ALL splats is wrong, and wrong in a way that only
+    shows up once you render it. A monocular portrait prediction is strongly
+    BIMODAL in depth: the face sits at one distance and the wall behind it at
+    another, and the wall carries more splats because it fills more of the
+    frame. On the portrait this was written against, the face is at z~2.0, the
+    background at z~9.5-12, and the median over everything lands at 9.5, deep
+    in the wall. Orbiting about that point swung the head clean out of frame at
+    four degrees.
+
+    So the pivot comes from splats near the optical axis instead, which is a
+    direct answer to "what is this camera looking at" and is unmoved by a
+    background that merely outnumbers the subject. Within 2% of the axis that
+    same portrait reads 2.06.
     """
-    return float(means[:, 2].quantile(quantile))
+    z = means[:, 2]
+    tan_half = math.tan(0.5 * math.radians(fov_deg)) if fov_deg else 0.125
+    r = (means[:, 0] ** 2 + means[:, 1] ** 2).sqrt() / z.clamp_min(1e-6)
+    near_axis = z[r < cone_frac * tan_half]
+    # Fall back to the whole cloud rather than an empty selection: a cloud with
+    # nothing on the axis is not a portrait and has no subject to find.
+    if near_axis.numel() < min_splats:
+        near_axis = z
+    return float(near_axis.quantile(quantile))
 
 
 def look_at(eye: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -113,6 +135,45 @@ def camera_path(eye, target, frames: int, sweep_deg: float,
         pitch = sweep * pitch_ratio * math.sin(2.0 * t) if path == "wiggle" else 0.0
         R = _rot_y(yaw) @ _rot_x(pitch)
         out.append(world_to_camera(R @ R0, target + R @ (eye - target)))
+    return out
+
+
+GOLDEN_ANGLE = math.pi * (3.0 - math.sqrt(5.0))
+
+
+def aperture_views(eye, target, radius: float, samples: int) -> list[torch.Tensor]:
+    """World-to-camera matrices for one thin lens, all focused on one plane.
+
+    A thin lens is many pinhole views spread over the lens area, averaged, with
+    every view aimed at the same focal plane. Points ON that plane project to
+    the same pixel from every sample and stay sharp; points off it disperse by
+    an amount proportional to their distance from it, which is the blur. So
+    defocus needs no new rasteriser, only more cameras.
+
+    Positions follow a Fibonacci disc. Random sampling leaves visible clumps in
+    the bokeh at sample counts anyone can afford, and a square grid leaves a
+    lattice; measured on a portrait, 32 samples still showed structure at full
+    blur and 96 did not. The sqrt gives equal-area spacing, without which the
+    samples bunch toward the centre and the blur keeps a bright core.
+
+    radius 0 returns exactly one view, which is the pinhole. That is deliberate:
+    it makes the aperture path a strict superset of the ordinary one.
+    """
+    if samples < 1:
+        raise ValueError("need at least one aperture sample")
+    eye = torch.as_tensor(eye, dtype=torch.float32)
+    target = torch.as_tensor(target, dtype=torch.float32)
+    if radius <= 0.0:
+        return [world_to_camera(look_at(eye, target), eye)]
+
+    R0 = look_at(eye, target)
+    right, up = R0[:, 0], R0[:, 1]      # lens plane, perpendicular to the axis
+    out = []
+    for i in range(samples):
+        r = radius * math.sqrt((i + 0.5) / samples)
+        a = i * GOLDEN_ANGLE
+        e = eye + right * (r * math.cos(a)) + up * (r * math.sin(a))
+        out.append(world_to_camera(look_at(e, target), e))
     return out
 
 
@@ -246,6 +307,17 @@ def render_frames(sp: Splats, views: list[torch.Tensor], K: torch.Tensor,
         yield rgb.detach().clamp(0.0, 1.0)
 
 
+def render_defocused(sp: Splats, eye, target, K: torch.Tensor, W: int, H: int,
+                     radius: float = 0.0, samples: int = 1,
+                     background=(1.0, 1.0, 1.0), backend: str = "metal"):
+    """One defocused frame: the mean of the aperture's views."""
+    views = aperture_views(eye, target, radius, samples)
+    acc = None
+    for frame in render_frames(sp, views, K, W, H, background=background, backend=backend):
+        acc = frame if acc is None else acc + frame
+    return acc / len(views)
+
+
 def _pipe_to_ffmpeg(frames, out: Path, W: int, H: int, tail: list[str],
                     fps: int) -> None:
     """Pipe raw RGB straight into ffmpeg.
@@ -314,6 +386,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="frame the .ply is written in. If the first frame comes "
                          "out flipped, it is the other one.")
     ap.add_argument("--backend", choices=("metal", "torch_ref"), default="metal")
+    ap.add_argument("--aperture", type=float, default=0.0,
+                    help="lens radius in world units. 0 is a pinhole, which is "
+                         "the default and leaves rendering unchanged.")
+    ap.add_argument("--aperture-samples", type=int, default=96,
+                    help="views averaged per frame. Below about 32 the sampling "
+                         "disc shows as a lattice in the bokeh.")
+    ap.add_argument("--focus", type=float, default=None,
+                    help="focal plane depth; defaults to the pivot, i.e. the "
+                         "subject the camera is already pointed at")
     ap.add_argument("--still", action="store_true",
                     help="write frame 0 only, as a .png, to check the convention "
                          "against the original photograph before rendering a video")
@@ -335,12 +416,6 @@ def main(argv: list[str] | None = None) -> int:
               f"-> --frame {frame_mode}", file=sys.stderr)
 
     if frame_mode == "input":
-        depth = a.depth if a.depth is not None else pivot_depth(means_cpu)
-        if not math.isfinite(depth) or depth <= 1e-3:
-            raise SystemExit(
-                f"median splat depth is {depth:.4g}, so the cloud is not in front "
-                "of the input camera. This .ply did not come from a monocular "
-                "predictor; use --frame bbox.")
         if a.fov is not None:
             fov = a.fov
         elif a.like_photo:
@@ -353,6 +428,13 @@ def main(argv: list[str] | None = None) -> int:
                   "cloud. The geometry is right but the crop is not the one the "
                   "prediction was made under, so frame 0 will NOT reproduce the "
                   "source photograph. Pass --like-photo or --fov.", file=sys.stderr)
+        # after the FOV, because the cone that finds the subject is sized by it
+        depth = a.depth if a.depth is not None else pivot_depth(means_cpu, fov)
+        if not math.isfinite(depth) or depth <= 1e-3:
+            raise SystemExit(
+                f"subject depth is {depth:.4g}, so the cloud is not in front of "
+                "the input camera. This .ply did not come from a monocular "
+                "predictor; use --frame bbox.")
         eye, target = torch.zeros(3), torch.tensor([0.0, 0.0, float(depth)])
     else:
         fov = a.fov if a.fov is not None else 45.0
@@ -370,7 +452,25 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
 
     bg = (1.0, 1.0, 1.0) if a.background == "white" else (0.0, 0.0, 0.0)
-    frames = render_frames(sp, views, K, W, H, background=bg, backend=a.backend)
+    if a.aperture > 0.0:
+        focus = a.focus if a.focus is not None else float(
+            torch.linalg.norm(torch.as_tensor(target, dtype=torch.float32)
+                              - torch.as_tensor(eye, dtype=torch.float32)))
+        print(f"aperture {a.aperture} over {a.aperture_samples} samples, "
+              f"focus at {focus:.3f}", file=sys.stderr)
+
+        def frames_gen():
+            for vm in views:
+                # Each path view becomes its own little lens: recover that
+                # view's centre and axis, then spread the aperture around it.
+                c = -vm[:3, :3].T @ vm[:3, 3]
+                t = c + vm[:3, :3][2] * focus
+                yield render_defocused(sp, c, t, K, W, H, radius=a.aperture,
+                                       samples=a.aperture_samples,
+                                       background=bg, backend=a.backend)
+        frames = frames_gen()
+    else:
+        frames = render_frames(sp, views, K, W, H, background=bg, backend=a.backend)
 
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
