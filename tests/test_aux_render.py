@@ -236,3 +236,16 @@ def test_depth_from_preprocess_output_has_no_gradient_trap_is_documented():
     L2 = _leaves(seed=7)
     _z(L2["m"], vm.to("mps")).sum().backward()
     assert L2["m"].grad is not None and L2["m"].grad.abs().sum() > 0
+
+
+def test_unknown_kwargs_are_rejected_but_torch_ref_only_ones_are_tolerated():
+    """`**_ignored` exists so `api.render(..., backend='metal')` can carry kwargs that only
+    `torch_ref.render` takes (`max_per_tile`, `tile_chunk`, `slab`). It also swallowed
+    `aux_colors=` before Task 7 implemented it, which made two tests in this file pass
+    vacuously in their RED phase. Tolerate the known set; reject the typo."""
+    L = _leaves(seed=31)
+    vm = torch.eye(4)
+    args = (L["m"], L["q"], L["s"], L["o"], L["sh"], _K(32, 32), vm, 32, 32)
+    render(*args, sh_degree=3, backend="metal", max_per_tile=4096, tile_chunk=32, slab=256)
+    with pytest.raises(TypeError, match="aux_colours"):
+        render(*args, sh_degree=3, backend="metal", aux_colours=[])

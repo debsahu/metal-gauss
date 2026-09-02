@@ -260,3 +260,20 @@ def test_run_report_records_masked_psnr_and_coverage_and_keeps_legacy_psnr_unmas
     assert r["metrics"]["psnr_masked"] == 24.25
     assert r["metrics"]["coverage"] == 0.923
     assert r["final_psnr"] == 19.5
+
+
+@mps
+def test_photometric_loss_can_return_its_two_halves_and_they_reconstruct_the_scalar():
+    """One source of truth. `train()` logs `l1` and `ssim` separately, and used to do it by
+    inlining a copy of this function's body -- so the tested object and the executed code
+    were different, and a fix here would not have reached the training loop."""
+    from metal_gauss.train import _gaussian_kernel, photometric_loss
+    torch.manual_seed(5)
+    gt, pred = torch.rand(48, 64, 3, device="mps"), torch.rand(48, 64, 3, device="mps")
+    k = _gaussian_kernel(device="mps")
+    scalar = photometric_loss(pred, gt, None, k)
+    loss, terms = photometric_loss(pred, gt, None, k, return_terms=True)
+    assert set(terms) == {"l1", "ssim"}
+    assert loss.item() == pytest.approx(scalar.item(), rel=1e-6)
+    assert loss.item() == pytest.approx(
+        0.8 * terms["l1"].item() + 0.2 * terms["ssim"].item(), rel=1e-6)

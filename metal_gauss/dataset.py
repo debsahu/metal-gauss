@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +21,13 @@ class View:
     mask: torch.Tensor | None = None    # (H,W) uint8, 255 = KEEP, cpu
     depth: torch.Tensor | None = None   # (H,W) uint16 mm (0 = invalid), or float32 metres
     normal: torch.Tensor | None = None  # (H,W,3) uint8 codes (128 = invalid), or float32
-
-
-_PYRAMID: dict = {}
+    # Downscale cache, per view. It used to be a module-level dict keyed by `id(v)`, which
+    # is unsafe: CPython reuses a freed object's address for the next allocation of the
+    # same size, so a View created after another was collected inherited its cached
+    # downscale -- wrong image, wrong intrinsics, and since Task 5, wrong PRIORS.
+    # Reproduced on trial 2 of 200. Holding the cache on the view makes the collision
+    # impossible by construction and lets it die with the view.
+    _pyramid: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 def downscaled(v: View, factor: int) -> View:
@@ -42,8 +46,7 @@ def downscaled(v: View, factor: int) -> View:
     """
     if factor <= 1:
         return v
-    key = (id(v), factor)
-    hit = _PYRAMID.get(key)
+    hit = v._pyramid.get(factor)
     if hit is not None:
         return hit
 
@@ -67,9 +70,7 @@ def downscaled(v: View, factor: int) -> View:
         return None if t is None else t[:h * factor:factor, :w * factor:factor].contiguous()
     out = View(v.name, img.contiguous(), K, v.viewmat,
                mask=_sub(v.mask), depth=_sub(v.depth), normal=_sub(v.normal))
-    if len(_PYRAMID) > 4096:          # bounded; scenes have a few hundred views
-        _PYRAMID.clear()
-    _PYRAMID[key] = out
+    v._pyramid[factor] = out
     return out
 
 

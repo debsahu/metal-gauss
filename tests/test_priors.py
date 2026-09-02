@@ -315,3 +315,37 @@ def test_decoders_run_on_real_mps_tensors():
     assert dn[0, 0, 0].item() == 0.0
     assert dn[0, 0, 1].item() == pytest.approx(1.0)
     assert dn[0, 0, 2].item() == pytest.approx(-1.0)
+
+
+def test_pyramid_cache_cannot_serve_one_view_the_data_of_another(tmp_path):
+    """`_PYRAMID` was keyed by `id(v)`. CPython reuses the address of a freed object for
+    the next allocation of the same size, so a View created after another was collected can
+    inherit its cached downscale -- wrong image, wrong intrinsics, and now wrong PRIORS.
+
+    Reproduced on trial 2 of 200 on 2026-09-02: the cache returned name='a' and a normal
+    prior for a view that had neither. It is the flake that surfaced as
+    `'NoneType' object has no attribute 'shape'` and would not reproduce.
+    """
+    import gc
+
+    from metal_gauss.dataset import View, downscaled
+    collisions = 0
+    for _ in range(1000):
+        a = View("a", torch.zeros(8, 8, 3, dtype=torch.uint8), torch.eye(3), torch.eye(4),
+                 normal=torch.ones(8, 8, 3, dtype=torch.uint8))
+        ida = id(a)
+        downscaled(a, 2)                       # populate a's pyramid entry
+        del a
+        gc.collect()
+        b = View("b", torch.zeros(8, 8, 3, dtype=torch.uint8), torch.eye(3), torch.eye(4))
+        if id(b) == ida:                       # the address was recycled
+            collisions += 1
+            d = downscaled(b, 2)
+            assert d.name == "b", f"pyramid served view {d.name!r} for view 'b'"
+            assert d.normal is None, "pyramid served another view's normal prior"
+            if collisions >= 3:
+                break
+        del b
+    assert collisions > 0, (
+        "no address reuse in 1000 trials -- this test can no longer exercise the defect "
+        "it was written for; do not treat its passing as evidence")

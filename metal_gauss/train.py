@@ -86,7 +86,8 @@ def _bcast(mask01: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
 
 
 def photometric_loss(rgb_c: torch.Tensor, gt: torch.Tensor,
-                     mask01: torch.Tensor | None, kernel: torch.Tensor) -> torch.Tensor:
+                     mask01: torch.Tensor | None, kernel: torch.Tensor,
+                     return_terms: bool = False):
     """0.8 L1 + 0.2 (1 - SSIM), per pixel, multiplied by the KEEP mask (1 = keep),
     then meaned over ALL pixels.
 
@@ -106,7 +107,9 @@ def photometric_loss(rgb_c: torch.Tensor, gt: torch.Tensor,
     if mask01 is not None:
         l1 = l1 * _bcast(mask01, l1)
         ds = ds * _bcast(mask01, ds)
-    return 0.8 * l1.mean() + 0.2 * ds.mean()
+    terms = {"l1": l1.mean(), "ssim": ds.mean()}
+    loss = 0.8 * terms["l1"] + 0.2 * terms["ssim"]
+    return (loss, terms) if return_terms else loss
 
 
 def masked_mse(err2: torch.Tensor, mask01: torch.Tensor | None) -> torch.Tensor:
@@ -262,6 +265,42 @@ def make_optimizer(p: dict, lr_means0: float, *, lr_opac: float = 1e-2,
     return torch.optim.Adam(groups, eps=1e-15)
 
 
+def geometry_view_coverage(args, views) -> dict:
+    """{term: (n_views_actually_supervised, n_views)} for each ENABLED geometry term.
+
+    The startup check proves at least ONE view carries each prior; it says nothing about
+    how many. A dataset with 10 of 196 views carrying depth passes it, trains with depth
+    supervision on 5% of steps, and produces a log indistinguishable from full coverage.
+    CLAUDE.md records exactly this in production -- "24 of 276 faces trained
+    photometric-only", caused by a stale gate and found long after the fact.
+
+    `depth_normal` compares the render against itself and needs no prior, so it is always
+    fully covered.
+    """
+    n = len(views)
+    cov = {}
+    if args.depth_loss_weight > 0:
+        cov["depth"] = (sum(v.depth is not None for v in views), n)
+    if args.normal_loss_weight > 0:
+        cov["normal"] = (sum(v.normal is not None for v in views), n)
+    if args.depth_normal_weight > 0:
+        cov["depth_normal"] = (n, n)
+    return cov
+
+
+def geometry_coverage_warning(cov: dict) -> str | None:
+    """Loud line when a term supervises only some views. Silent at full coverage, as the
+    mask warning is silent on an unmasked dataset -- a warning that always fires is one
+    operators learn to skip."""
+    partial = [(k, a, b) for k, (a, b) in cov.items() if 0 < a < b]
+    if not partial:
+        return None
+    bits = ", ".join(f"{k} {a}/{b} views ({100.0 * a / b:.1f}%)" for k, a, b in partial)
+    return ("  [PRIORS] PARTIAL geometry supervision: " + bits +
+            ". The remaining views train photometric-only and nothing else in this log "
+            "says so (see CLAUDE.md Stage 3, '24 of 276 faces trained photometric-only').")
+
+
 def geometry_aux(means, quats, scales, viewmat):
     """The two aux attribute maps the geometry recipe composites: camera-frame splat
     normals and view-space z.
@@ -402,6 +441,13 @@ def train(args, scene: Scene | None = None) -> dict:
                 f"the priors, or set the weight to 0.")
     want_geometry = (args.depth_loss_weight > 0 or args.normal_loss_weight > 0
                      or args.depth_normal_weight > 0)
+    term_cov = geometry_view_coverage(args, scene.train)
+    if term_cov:
+        print("geometry supervision: " + ", ".join(
+            f"{k} {a}/{b} views" for k, (a, b) in term_cov.items()))
+        cov_warn = geometry_coverage_warning(term_cov)
+        if cov_warn:
+            print(cov_warn, flush=True)
 
     # Selective Adam was built, validated, and MEASURED SLOWER here: at this
     # scene's per-view visibility (well above 50%), 15 gather/scatter launches
@@ -498,15 +544,7 @@ def train(args, scene: Scene | None = None) -> dict:
         rgb_c = appearance(rgb, view_idx) if appearance is not None else rgb
         m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
 
-        # Same arithmetic as photometric_loss(), split so each half can be logged.
-        terms = {}
-        l1 = (rgb_c - gt).abs()
-        ds = 1.0 - ssim_map(rgb_c, gt, kernel)
-        if m01 is not None:
-            l1 = l1 * _bcast(m01, l1)
-            ds = ds * _bcast(m01, ds)
-        terms["l1"], terms["ssim"] = l1.mean(), ds.mean()
-        loss = 0.8 * terms["l1"] + 0.2 * terms["ssim"]
+        loss, terms = photometric_loss(rgb_c, gt, m01, kernel, return_terms=True)
         if args.flatten_loss_weight > 0.0:
             terms["flatten"] = flatten_loss(p["log_scales"][:active])
             loss = loss + args.flatten_loss_weight * terms["flatten"]
@@ -665,6 +703,8 @@ def train(args, scene: Scene | None = None) -> dict:
                         "wall_s": round(dt, 1), "active": active, "terms": term_vals})
 
     out = _run_report(args, log, time.perf_counter() - t0, active)
+    out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
+    out["metrics"]["term_coverage_warning"] = geometry_coverage_warning(term_cov)
     for dest in (args.out, getattr(args, "report", None)):
         if dest:
             Path(dest).parent.mkdir(parents=True, exist_ok=True)

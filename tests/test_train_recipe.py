@@ -249,3 +249,61 @@ def test_train_call_site_gates_the_prior_binarily_too():
     assert b == pytest.approx(a, rel=1e-6), (
         f"a mask of 200 changed the depth term ({a:.6g} -> {b:.6g}); it is being used as a "
         f"weight (0.784) rather than as a keep/drop decision")
+
+
+@mps
+def test_train_routes_its_photometric_loss_through_photometric_loss():
+    """Seam test, and deliberately so: the property under test IS the call, because the
+    duplication it replaces was invisible to every value-based test (the two forms agreed
+    numerically). A spy that DELEGATES, so the run still has to come out correct."""
+    from metal_gauss import train as T
+    calls = []
+    real = T.photometric_loss
+
+    def spy(*a, **kw):
+        calls.append(kw.get("return_terms", False))
+        return real(*a, **kw)
+
+    T.photometric_loss = spy
+    try:
+        out = T.train(_args(steps=3, eval_every=3), scene=_synthetic_scene())
+    finally:
+        T.photometric_loss = real
+    assert len(calls) == 3, f"expected one call per step, got {len(calls)}"
+    assert all(calls), "train must ask for the term breakdown, not recompute it"
+    assert out["log"][-1]["terms"]["l1"] > 0
+
+
+@mps
+def test_partial_prior_coverage_is_reported_not_silent():
+    """The instrument CLAUDE.md needed and did not have: '24 of 276 faces trained
+    photometric-only', found long after the fact. The startup check only proves at least
+    ONE view carries the prior, so a dataset with 1-of-196 coverage trains almost entirely
+    unsupervised and every line of the log looks identical to full coverage."""
+    from metal_gauss import train as T
+    sc = _synthetic_scene()
+    for v in sc.train[2:]:
+        v.depth = None                                   # 2 of 5 training views keep depth
+    out = T.train(_args(depth_loss_weight=1.0), scene=sc)
+    cov = out["metrics"]["term_view_coverage"]
+    assert cov["depth"] == [2, len(sc.train)]
+    assert out["metrics"]["term_coverage_warning"] is not None
+
+
+@mps
+def test_full_prior_coverage_reports_no_warning():
+    from metal_gauss import train as T
+    sc = _synthetic_scene()
+    out = T.train(_args(depth_loss_weight=1.0, normal_loss_weight=0.2), scene=sc)
+    cov = out["metrics"]["term_view_coverage"]
+    n = len(sc.train)
+    assert cov["depth"] == [n, n] and cov["normal"] == [n, n]
+    assert out["metrics"]["term_coverage_warning"] is None
+
+
+def test_geometry_coverage_warning_fires_only_on_partial_coverage():
+    from metal_gauss.train import geometry_coverage_warning
+    assert geometry_coverage_warning({"depth": (196, 196)}) is None
+    assert geometry_coverage_warning({}) is None
+    w = geometry_coverage_warning({"depth": (10, 196), "normal": (196, 196)})
+    assert w is not None and "depth" in w and "10/196" in w and "normal" not in w

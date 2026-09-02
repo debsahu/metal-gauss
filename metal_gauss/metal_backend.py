@@ -339,6 +339,11 @@ def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
     return (det_before.clamp_min(0.0) / det_after).clamp(0.0, 1.0).sqrt()
 
 
+# Accepted-and-ignored: parameters of torch_ref.render that the fused Metal path has no
+# analogue for. Anything else reaching **_ignored is a caller mistake.
+_TORCH_REF_ONLY_KWARGS = frozenset({"max_per_tile", "tile_chunk", "slab"})
+
+
 def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
            sh_degree: int = 3, tile: int | None = None,
            near: float = 0.01, far: float = 100.0,
@@ -355,6 +360,18 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     """
     from metal_gauss.sh import eval_sh, num_sh_bases
     from metal_gauss.torch_ref import build_cov3d, project
+
+    # `**_ignored` exists so `api.render(..., backend="metal")` can carry kwargs that only
+    # `torch_ref.render` accepts. It must not become a place typos go to die: it silently
+    # swallowed `aux_colors=` before that parameter existed, which made two tests pass
+    # vacuously in their RED phase. Tolerate the known torch_ref-only set; reject the rest.
+    if _ignored:
+        unknown = set(_ignored) - _TORCH_REF_ONLY_KWARGS
+        if unknown:
+            raise TypeError(
+                f"render() got unexpected keyword argument(s) {sorted(unknown)}. "
+                f"Only torch_ref-only kwargs {sorted(_TORCH_REF_ONLY_KWARGS)} are ignored "
+                f"here, for api.render() signature compatibility.")
 
     # `colors` is REASSIGNED below by the fused preprocess (it returns the
     # SH-evaluated colours under the same name), so the caller's intent has to
