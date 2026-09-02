@@ -316,7 +316,10 @@ def train(args) -> dict:
         scene = load_scene(args.colmap, args.images, args.max_resolution,
                            args.eval_split_every,
                            masks_dir=getattr(args, "masks", None),
-                           mask_polarity=getattr(args, "mask_polarity", "auto"))
+                           mask_polarity=getattr(args, "mask_polarity", "auto"),
+                           depth_dir=getattr(args, "depth_dir", None),
+                           normal_dir=getattr(args, "normal_dir", None),
+                           prior_resident=getattr(args, "prior_resident", "quantized"))
         bg = (0.0, 0.0, 0.0)
     print(f"{len(scene.train)} train views, {len(scene.heldout)} held out, "
           f"{len(scene.points):,} sparse points, budget {args.budget:,}")
@@ -746,6 +749,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="what 255 means in --masks. Every masks*/ directory in "
                          "earthbyte/slam is 255 = DROP; 'auto' reads the median white "
                          "fraction over a sample and picks, then prints what it picked.")
+    ap.add_argument("--depth-dir", default=None,
+                    help="directory of depth priors, one per image by stem (tiff-f32, "
+                         "tiff-f32-deflate or png-quantized; formats may mix per frame). "
+                         "Default: the sibling <images>/../depth if it exists. A prior "
+                         "whose size differs from the LOADED image size is a hard error.")
+    ap.add_argument("--normal-dir", default=None,
+                    help="directory of normal priors. Default: the sibling "
+                         "<images>/../normal if it exists.")
+    ap.add_argument("--prior-resident", choices=["quantized", "float32"],
+                    default="quantized",
+                    help="how priors are held in RAM. 'quantized' is uint16 mm / uint8 "
+                         "codes, 5 bytes/px against 16, and is training-equivalent per "
+                         "the WS-G gate (0.0128 dB vs a 0.0317 dB same-seed repeat). "
+                         "'float32' is the lossless escape hatch.")
     ap.add_argument("--eval-dump", default=None,
                     help="write <stem>_render.png / _gt.png / _mask.png per held-out "
                          "view at every eval, for LPIPS and for looking at.")

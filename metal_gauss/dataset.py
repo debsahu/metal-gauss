@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from metal_gauss.masks import alpha_to_mask, decide_polarity, find_mask, load_sidecar_mask
+from metal_gauss.priors import load_view_priors, resolve_dirs
 
 
 @dataclass
@@ -17,7 +18,9 @@ class View:
     image: torch.Tensor      # (H,W,3) uint8, cpu
     K: torch.Tensor          # (3,3)
     viewmat: torch.Tensor    # (4,4) world2cam
-    mask: torch.Tensor | None = None   # (H,W) uint8, 255 = KEEP, cpu
+    mask: torch.Tensor | None = None    # (H,W) uint8, 255 = KEEP, cpu
+    depth: torch.Tensor | None = None   # (H,W) uint16 mm (0 = invalid), or float32 metres
+    normal: torch.Tensor | None = None  # (H,W,3) uint8 codes (128 = invalid), or float32
 
 
 _PYRAMID: dict = {}
@@ -57,8 +60,13 @@ def downscaled(v: View, factor: int) -> View:
 
     # Strided NEAREST on the mask, never `interpolate`: a mask is labels, and an
     # area-averaged label is not a label. The slice bounds give exactly (h, w).
-    m = None if v.mask is None else v.mask[:h * factor:factor, :w * factor:factor].contiguous()
-    out = View(v.name, img.contiguous(), K, v.viewmat, mask=m)
+    # Strided NEAREST on mask and priors, never `interpolate`: a mask is labels, and an
+    # area-averaged depth blends the 0 invalid-sentinel into its valid neighbours, which
+    # invents a measurement the sensor never made. The slice bounds give exactly (h, w).
+    def _sub(t):
+        return None if t is None else t[:h * factor:factor, :w * factor:factor].contiguous()
+    out = View(v.name, img.contiguous(), K, v.viewmat,
+               mask=_sub(v.mask), depth=_sub(v.depth), normal=_sub(v.normal))
     if len(_PYRAMID) > 4096:          # bounded; scenes have a few hundred views
         _PYRAMID.clear()
     _PYRAMID[key] = out
@@ -76,7 +84,10 @@ class Scene:
 def load_scene(colmap_dir: str | Path, images_dir: str | Path,
                max_resolution: int = 1600, eval_split_every: int = 8,
                masks_dir: str | Path | None = None,
-               mask_polarity: str = "auto") -> Scene:
+               mask_polarity: str = "auto",
+               depth_dir: str | Path | None = None,
+               normal_dir: str | Path | None = None,
+               prior_resident: str = "quantized") -> Scene:
     import pycolmap
     from PIL import Image
 
@@ -91,6 +102,12 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
         else:
             polarity = mask_polarity
         print(f"masks: {masks_dir} polarity={polarity} {mask_stats}")
+
+    d_dir, n_dir = resolve_dirs(images_dir, depth_dir, normal_dir)
+    if d_dir is not None or n_dir is not None:
+        print(f"priors: depth={d_dir or 'none'} normal={n_dir or 'none'} "
+              f"resident={prior_resident}")
+    n_depth = n_normal = 0
 
     views = []
     for im in sorted(rec.images.values(), key=lambda i: i.name):
@@ -117,6 +134,11 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
         elif side is not None:
             mask = load_sidecar_mask(side, (W, H), polarity)
 
+        depth, normal = load_view_priors(Path(im.name).stem, (W, H), d_dir, n_dir,
+                                        resident=prior_resident)
+        n_depth += depth is not None
+        n_normal += normal is not None
+
         sx, sy = W / cam.width, H / cam.height
         K = torch.tensor([[cam.params[0] * sx, 0, cam.params[2] * sx],
                           [0, cam.params[1] * sy, cam.params[3] * sy],
@@ -130,7 +152,11 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
         views.append(View(im.name,
                           torch.from_numpy(np.asarray(img, dtype=np.uint8).copy()),
                           K, vm,
-                          mask=None if mask is None else torch.from_numpy(mask)))
+                          mask=None if mask is None else torch.from_numpy(mask),
+                          depth=depth, normal=normal))
+
+    if d_dir is not None or n_dir is not None:
+        print(f"priors attached: depth {n_depth}/{len(views)}, normal {n_normal}/{len(views)}")
 
     heldout = views[::eval_split_every]
     heldout_names = {v.name for v in heldout}
