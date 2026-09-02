@@ -307,3 +307,53 @@ def test_geometry_coverage_warning_fires_only_on_partial_coverage():
     assert geometry_coverage_warning({}) is None
     w = geometry_coverage_warning({"depth": (10, 196), "normal": (196, 196)})
     assert w is not None and "depth" in w and "10/196" in w and "normal" not in w
+
+
+@mps
+def test_every_loss_term_enters_the_total_exactly_once_per_step():
+    """TERM MULTIPLICITY. The general defect; flatten was merely the instance.
+
+    Re-assembling the loss so each half could be logged separately (Fix-up 2) left the
+    ORIGINAL `loss = loss + flatten_loss_weight * flatten_loss(...)` in place beside the
+    new logged one, so every flatten run in this project trained at 2x the flag -- the
+    plan's own probe, this agent's reproduction and the reviewer's all agreed with each
+    other because all three carried the same bug. Agreement is not correctness.
+
+    This asserts multiplicity for EVERY term at once, so a future re-assembly cannot
+    silently double any of them. It counts CALLS, which catches a duplicated
+    `loss = loss + w * term(...)` line -- the shape that actually occurred. It does not
+    catch adding an already-computed tensor twice; that needs the trainer's own `loss`
+    scalar in the log, which is a change outside the term branches and is deliberately
+    deferred (see the report).
+    """
+    import metal_gauss.train as MT
+    from metal_gauss import train as T
+
+    steps = 6
+    watched = ["photometric_loss", "flatten_loss", "depth_loss", "normal_loss",
+               "depth_normal_loss"]
+    calls = {k: 0 for k in watched}
+    originals = {k: getattr(MT, k) for k in watched}
+
+    def make(name):
+        def spy(*a, **kw):
+            calls[name] += 1
+            return originals[name](*a, **kw)
+        return spy
+
+    for k in watched:
+        setattr(MT, k, make(k))
+    try:
+        T.train(_args(steps=steps, eval_every=steps, flatten_loss_weight=1.0,
+                      depth_loss_weight=1.0, normal_loss_weight=0.2,
+                      depth_normal_weight=0.05),
+                scene=_synthetic_scene())
+    finally:
+        for k, v in originals.items():
+            setattr(MT, k, v)
+
+    for name in watched:
+        per_step = calls[name] / steps
+        assert per_step == 1.0, (
+            f"{name} was evaluated {per_step} times per step, not once -- that term enters "
+            f"the total {per_step}x, so its effective weight is {per_step}x the flag")

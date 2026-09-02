@@ -545,6 +545,11 @@ def train(args, scene: Scene | None = None) -> dict:
         m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
 
         loss, terms = photometric_loss(rgb_c, gt, m01, kernel, return_terms=True)
+        # PlanarGS flatten. NOT ramped down with `aux`: it is a geometry prior on the
+        # final model, not an early-growth regulariser, and Brush applies it at constant
+        # weight for the whole schedule. ADDED EXACTLY ONCE -- a second add lived below
+        # the MCMC regularisers until 2026-09-02 and doubled every flatten run in this
+        # project; tests pin term multiplicity now.
         if args.flatten_loss_weight > 0.0:
             terms["flatten"] = flatten_loss(p["log_scales"][:active])
             loss = loss + args.flatten_loss_weight * terms["flatten"]
@@ -567,11 +572,6 @@ def train(args, scene: Scene | None = None) -> dict:
         aux = max(0.0, 1.0 - step / (0.9 * args.steps))
         loss = loss + aux * (args.opac_reg * torch.sigmoid(p["logit_opac"][:active]).mean()
                              + args.scale_reg * torch.exp(p["log_scales"][:active]).mean())
-        # PlanarGS flatten. NOT ramped down with `aux`: it is a geometry prior on the
-        # final model, not an early-growth regulariser, and Brush applies it at constant
-        # weight for the whole schedule.
-        if args.flatten_loss_weight > 0.0:
-            loss = loss + args.flatten_loss_weight * flatten_loss(p["log_scales"][:active])
 
         opt.zero_grad(set_to_none=True) if not args.selective_adam else opt.zero_grad()
         loss.backward()
