@@ -215,16 +215,33 @@ def test_normals_from_depth_is_all_zero_on_a_degenerate_shape():
 # ---------------------------------------------------------------- splat normals
 
 def test_splat_normals_cam_faces_camera_by_ray_not_axis():
-    """A splat far off-axis whose thin axis is perpendicular to the optical axis: n_z == 0
-    exactly, so the n_z rule cannot decide and leaves it pointing AWAY from the camera."""
+    """THE orientation test. The axis rule must give a definite WRONG answer here, not an
+    undecidable one.
+
+    An earlier version of this test put the thin axis exactly perpendicular to the optical
+    axis so that `n_cam[:, 2] == 0`, reasoning that the n_z rule "cannot decide". That was
+    the mistake: an undecidable rule still returns something, and at that geometry its
+    tie-break coincided with the ray answer, so the `facing = n_cam[:, 2]` mutant PASSED
+    this test. The suite killed it only via the unrelated column-vs-row test. This repo has
+    now shipped that shape of non-test three times (a plane family where both rules agree;
+    a flip test asserting over an empty array; this).
+
+    So: grazing geometry, borrowed from the fixture's case 2. The splat's normal has
+    n_z = +0.707 -- STRICTLY positive, so the axis rule is decidable -- while
+    dot(n, p_cam) = -1.414, so it is already facing the camera and must NOT be flipped.
+    The axis rule flips it and ends up pointing away; the ray rule leaves it alone.
+    """
     from metal_gauss.geometry_loss import splat_normals_cam
-    means = torch.tensor([[3.0, 0.0, 1.0]])          # 71.6 deg off-axis
-    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]])     # identity: R columns = axes
-    scales = torch.tensor([[0.001, 0.1, 0.1]])       # thin axis = x
+    r2 = math.sqrt(0.5)
+    quats = torch.tensor([[0.38268343, 0.0, -0.92387953, 0.0]])   # -135 deg about y
+    scales = torch.tensor([[0.001, 0.1, 0.1]])                    # thin axis = column 0
+    means = torch.tensor([[3.0, 0.0, 1.0]])                       # off-axis, in front
     n = splat_normals_cam(means, quats, scales, torch.eye(4))
-    assert torch.allclose(n, torch.tensor([[-1.0, 0.0, 0.0]]))
-    assert (n * means).sum() < 0                     # points back toward the camera
-    assert n[0, 2] == 0.0                            # ...on zero n_z, where n_z is mute
+
+    assert n[0, 2].item() > 0.1, "n_z must be decidably POSITIVE or the axis rule is mute"
+    assert torch.allclose(n, torch.tensor([[-r2, 0.0, r2]]), atol=1e-6), \
+        f"the axis rule would flip this to (+.707, 0, -.707). got {n}"
+    assert (n * means).sum() < 0                     # camera-facing, by the per-splat ray
 
 
 def test_splat_normals_cam_does_not_annihilate_a_perpendicular_splat():
@@ -353,6 +370,31 @@ def test_depth_loss_is_finite_with_inf_and_nan_outside_the_mask(space):
     l.backward()
     assert torch.isfinite(l), f"{space}: loss is {l}"
     assert torch.isfinite(pred.grad).all(), f"{space}: grad is {pred.grad}"
+
+
+def test_depth_loss_uncovered_lane_gradient_is_exactly_zero_NOT_brush_count_nan():
+    """DELIBERATE DIVERGENCE FROM BRUSH -- do not "restore parity" by removing it.
+
+    Brush's `Count` mode forms `pred.recip()` and masks afterwards, so an uncovered lane
+    (`pred == 0`) goes through `recip(0) = inf` and its VJP comes back NaN. Brush pins that
+    in `exclude_numerator_preserves_every_finite_disparity_gradient` and its own comment
+    calls it a latent defect, contained only because no gaussian in its pipeline touches an
+    uncovered pixel. Ours guards BEFORE the reciprocal, so:
+
+        forward  -- identical to Brush `Count` (the lane scores the full disparity 1/gt),
+        backward -- 0, i.e. Brush's `ExcludeNumerator` behaviour, not `Count`'s NaN.
+
+    A single NaN here reaches Adam and writes NaN into every parameter on the first step.
+    """
+    from metal_gauss.geometry_loss import depth_loss
+    gt = torch.tensor([[4.0, 2.0]])
+    pred = torch.tensor([[0.0, 2.0]], requires_grad=True)     # lane 0 uncovered
+    l = depth_loss(pred, gt, "disparity")
+    l.backward()
+    assert l.item() == pytest.approx(0.25 / 2)               # full 1/gt, counted in the mean
+    assert torch.isfinite(pred.grad).all()
+    assert pred.grad[0, 0].item() == 0.0, \
+        f"uncovered lane must carry exactly 0 gradient, got {pred.grad[0, 0]}"
 
 
 def test_normal_loss_l1_over_valid_components():

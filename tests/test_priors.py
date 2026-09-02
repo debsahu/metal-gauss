@@ -175,7 +175,7 @@ def test_sibling_autodetect_survives_a_SYMLINKED_images_dir(tmp_path):
     """P-GEOM's `images` is a symlink into another tree entirely. `.resolve()` follows it,
     so the "sibling" becomes a directory of the LINK TARGET's parent and the depth/ beside
     the dataset is never found -- the run then trains with no priors and says nothing.
-    Use `.absolute()`, which normalises without dereferencing."""
+    Use `os.path.abspath()`, which normalises lexically without dereferencing."""
     from metal_gauss import priors
     real = tmp_path / "elsewhere" / "frames"; real.mkdir(parents=True)
     ds = tmp_path / "ds"; ds.mkdir()
@@ -188,7 +188,7 @@ def test_sibling_autodetect_survives_a_SYMLINKED_images_dir(tmp_path):
 
 def test_sibling_autodetect_works_from_a_relative_images_path(tmp_path, monkeypatch):
     """`Path('images').parent` is `.`, which has no depth/ sibling. Normalisation must
-    happen, just without dereferencing."""
+    happen (via `os.path.abspath`), just without dereferencing."""
     from metal_gauss import priors
     (tmp_path / "images").mkdir(); (tmp_path / "depth").mkdir()
     monkeypatch.chdir(tmp_path)
