@@ -24,17 +24,21 @@ import json
 import sys
 from pathlib import Path
 
-ARMS = ("B0a", "B0b", "B0c")
-
-
 def load(out: Path, arm: str) -> dict:
     rep = json.loads((out / f"{arm}.json").read_text())
-    st = json.loads((out / f"{arm}.stats.json").read_text())
-    seed_cloud = str(st.get("seed_cloud") or "")
-    if not seed_cloud.endswith("points3D.tsdf.txt"):
-        sys.exit(f"{arm}: splatstats seed_cloud is {seed_cloud!r}, not the TSDF-only cloud. "
-                 f"Thin-axis scored against the trained seed is not comparable to anything.")
-    vals = {f"stats.{k}": v for k, v in st["metrics"].items() if isinstance(v, (int, float))}
+    seed_cloud = ""
+    vals: dict = {}
+    stats_path = out / f"{arm}.stats.json"
+    if stats_path.exists():
+        st = json.loads(stats_path.read_text())
+        seed_cloud = str(st.get("seed_cloud") or "")
+        # The reference must never be the cloud the trainer seeded from. Scoring thin-axis
+        # against the trained seed was an 11.6 deg error once -- larger than every recipe
+        # gain in CLAUDE.md's table -- so it is checked, not trusted.
+        if Path(seed_cloud).name == "points3D.txt":
+            sys.exit(f"{arm}: reference cloud is {seed_cloud!r}, which is the seed the "
+                     f"trainer initialised from. Thin-axis scored against it is meaningless.")
+        vals = {f"stats.{k}": v for k, v in st["metrics"].items() if isinstance(v, (int, float))}
     for k in ("psnr_masked", "psnr", "coverage", "ms_per_step", "n_splats"):
         if isinstance(rep["metrics"].get(k), (int, float)):
             vals[f"run.{k}"] = rep["metrics"][k]
@@ -47,21 +51,33 @@ def load(out: Path, arm: str) -> dict:
 
 def main() -> None:
     out = Path(sys.argv[1])
-    arms = {a: load(out, a) for a in ARMS}
-    if arms["B0a"]["seed"] != arms["B0b"]["seed"]:
-        sys.exit("B0a and B0b must share a seed; they are the REPEAT floor")
-    if arms["B0c"]["seed"] == arms["B0a"]["seed"]:
-        sys.exit("B0c must use a DIFFERENT seed; it is the SEED floor")
-    keys = sorted(set(arms["B0a"]["values"]) & set(arms["B0b"]["values"]) & set(arms["B0c"]["values"]))
+    names = sys.argv[2:] or ["B0a", "B0b", "B0c"]
+    if len(names) < 2:
+        sys.exit("need at least two floor arms: the same-seed pair IS the repeat floor")
+    arms = {a: load(out, a) for a in names}
+    ra, rb = names[0], names[1]
+    if arms[ra]["seed"] != arms[rb]["seed"]:
+        sys.exit(f"{ra} and {rb} must share a seed; they are the REPEAT floor")
+    sc = {a["seed_cloud"] for a in arms.values()}
+    if len(sc) > 1:
+        sys.exit(f"floor arms disagree about the reference cloud: {sc}")
+    third = names[2] if len(names) > 2 else None
+    if third and arms[third]["seed"] == arms[ra]["seed"]:
+        sys.exit(f"{third} must use a DIFFERENT seed; it is the SEED floor")
+    keys = sorted(set.intersection(*(set(arms[a]["values"]) for a in names)))
     floors = {}
     for k in keys:
-        a, b, c = (arms[x]["values"][k] for x in ARMS)
-        floors[k] = {"B0a": a, "B0b": b, "B0c": c,
-                     "repeat_floor": abs(a - b), "seed_floor": abs(a - c)}
+        a, b = arms[ra]["values"][k], arms[rb]["values"][k]
+        row = {ra: a, rb: b, "repeat_floor": abs(a - b)}
+        if third:
+            c = arms[third]["values"][k]
+            row[third] = c
+            row["seed_floor"] = abs(a - c)
+        floors[k] = row
     doc = {"schema": 1,
            "note": "repeat_floor = |B0a - B0b| (same seed); seed_floor = |B0a - B0c|. "
                    "An arm moves a metric only if it moves it by more than repeat_floor.",
-           "arms": {a: {k: v for k, v in arms[a].items() if k != "values"} for a in ARMS},
+           "arms": {a: {k: v for k, v in arms[a].items() if k != "values"} for a in names},
            "floors": floors}
     (out / "floors.json").write_text(json.dumps(doc, indent=1))
     print(f"wrote {out/'floors.json'} over {len(keys)} metrics")
@@ -69,7 +85,8 @@ def main() -> None:
               "stats.on_seed_frac_1cm", "stats.opacity_p50"):
         if k in floors:
             f = floors[k]
-            print(f"  {k:<38} repeat {f['repeat_floor']:.5g}   seed {f['seed_floor']:.5g}")
+            sf = f"   seed {f['seed_floor']:.5g}" if "seed_floor" in f else ""
+            print(f"  {k:<38} repeat {f['repeat_floor']:.5g}{sf}")
 
 
 if __name__ == "__main__":

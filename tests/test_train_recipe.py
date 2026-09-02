@@ -357,3 +357,41 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step():
         assert per_step == 1.0, (
             f"{name} was evaluated {per_step} times per step, not once -- that term enters "
             f"the total {per_step}x, so its effective weight is {per_step}x the flag")
+
+
+def test_run_report_uses_the_env_snapshot_it_is_given_not_a_fresh_git_query():
+    """PROVENANCE. `_run_report` used to call git at REPORT-WRITE time, so a run that had
+    already imported train.py recorded whatever commit existed when it FINISHED. On
+    2026-09-02 arm B0a executed c047dad and recorded 727b8ba, a commit made 6 minutes after
+    it started -- the mechanism claimed to answer "what code produced this number?" and
+    answered "what was checked out when it stopped?".
+
+    The snapshot must be taken at process start and used verbatim."""
+    import argparse
+    from metal_gauss.train import _run_report
+    snap = {"git": "DEADBEEF", "dirty": True, "torch": "x", "platform": "y",
+            "machine": "z", "started_at": "2026-01-01T00:00:00Z"}
+    r = _run_report(argparse.Namespace(steps=10, budget=7, seed=0), [], 1.0, 7, env=snap)
+    assert r["env"]["git"] == "DEADBEEF", "re-queried git instead of using the snapshot"
+    assert r["env"]["dirty"] is True
+    assert r["env"]["started_at"] == "2026-01-01T00:00:00Z"
+    assert "finished_at" in r["env"] and r["env"]["finished_at"] > r["env"]["started_at"]
+
+
+def test_env_snapshot_reports_a_real_commit_and_a_start_timestamp():
+    from metal_gauss.train import _env_snapshot
+    s = _env_snapshot()
+    assert s["git"] is None or len(s["git"]) >= 7
+    assert isinstance(s["dirty"], bool)
+    assert s["started_at"].endswith("Z") and "T" in s["started_at"]
+
+
+@mps
+def test_train_snapshots_the_environment_before_it_starts_training():
+    """End to end: the report's started_at must predate finished_at, and the hash must be
+    the one captured at entry."""
+    from metal_gauss import train as T
+    out = T.train(_args(steps=2, eval_every=2), scene=_synthetic_scene())
+    env = out["env"]
+    assert env["started_at"] < env["finished_at"]
+    assert env["git"] is None or len(env["git"]) >= 7

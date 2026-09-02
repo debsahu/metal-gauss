@@ -17,6 +17,7 @@ import math
 import platform
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -381,6 +382,7 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
 # ---------------------------------------------------------------- training
 
 def train(args, scene: Scene | None = None) -> dict:
+    env = _env_snapshot()          # BEFORE any work: this is the provenance of the run
     device = "mps"
     # Seed every torch RNG the run touches: the init jitter, relocate/grow's
     # multinomial, and add_noise's randn. The numpy streams (point subsample,
@@ -702,7 +704,7 @@ def train(args, scene: Scene | None = None) -> dict:
                         "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
                         "wall_s": round(dt, 1), "active": active, "terms": term_vals})
 
-    out = _run_report(args, log, time.perf_counter() - t0, active)
+    out = _run_report(args, log, time.perf_counter() - t0, active, env=env)
     out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
     out["metrics"]["term_coverage_warning"] = geometry_coverage_warning(term_cov)
     for dest in (args.out, getattr(args, "report", None)):
@@ -811,7 +813,36 @@ def export_ply(p, path: str, filter_3d=None) -> None:
     plyfile.PlyData([plyfile.PlyElement.describe(data, "vertex")]).write(path)
 
 
-def _run_report(args, log, wall_s, active):
+def _env_snapshot() -> dict:
+    """What code is about to run, captured BEFORE it runs.
+
+    `_run_report` used to query git when it WROTE the report, which answers "what was
+    checked out when this stopped?" -- not "what produced this number?". On 2026-09-02 an
+    arm that started at 16:53 and finished at 17:09 recorded a commit made at 16:59, six
+    minutes after Python had already imported the module it was executing. The report was
+    the provenance mechanism for a five-arm measurement protocol, so it has to be right.
+    """
+    def _git(*a):
+        try:
+            return subprocess.run(("git",) + a, cwd=Path(__file__).resolve().parent,
+                                  capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except Exception:
+            return None
+
+    return {
+        "git": _git("rev-parse", "--short", "HEAD") or None,
+        "dirty": bool(_git("status", "--porcelain")),
+        "torch": torch.__version__,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        # Microseconds, not seconds: a short run starts and finishes inside the same
+        # second, and a timestamp pair that cannot order two events is not provenance.
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
+def _run_report(args, log, wall_s, active, env=None):
     """Everything needed to reproduce this run, recorded by the process that ran it.
 
     Records ALL of vars(args), not a curated subset. Curation is how knobs go
@@ -825,26 +856,14 @@ def _run_report(args, log, wall_s, active):
     start_active clamping and the steps-scaler, so these are the values that
     actually ran, by construction rather than by convention.
     """
-    def _git(*a):
-        try:
-            return subprocess.run(("git",) + a, cwd=Path(__file__).resolve().parent,
-                                  capture_output=True, text=True,
-                                  timeout=5).stdout.strip()
-        except Exception:
-            return None
-
+    env = dict(env) if env is not None else _env_snapshot()
+    env["finished_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     resolved = {k: v for k, v in sorted(vars(args).items())}
     ms = (1000.0 * wall_s / args.steps) if args.steps else None
     return {
         "schema": 1,
         "resolved": resolved,
-        "env": {
-            "git": _git("rev-parse", "--short", "HEAD"),
-            "dirty": bool(_git("status", "--porcelain")),
-            "torch": torch.__version__,
-            "platform": platform.platform(),
-            "machine": platform.machine(),
-        },
+        "env": env,
         "metrics": {
             # `psnr` stays the UNMASKED number: readers of --out predate masks.
             "psnr": log[-1]["psnr"] if log else None,
