@@ -24,6 +24,7 @@ import torch
 
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
+from metal_gauss.geometry_loss import flatten_loss
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
 from metal_gauss.mcmc import add_noise, grow, relocate
@@ -429,6 +430,11 @@ def train(args) -> dict:
         aux = max(0.0, 1.0 - step / (0.9 * args.steps))
         loss = loss + aux * (args.opac_reg * torch.sigmoid(p["logit_opac"][:active]).mean()
                              + args.scale_reg * torch.exp(p["log_scales"][:active]).mean())
+        # PlanarGS flatten. NOT ramped down with `aux`: it is a geometry prior on the
+        # final model, not an early-growth regulariser, and Brush applies it at constant
+        # weight for the whole schedule.
+        if args.flatten_loss_weight > 0.0:
+            loss = loss + args.flatten_loss_weight * flatten_loss(p["log_scales"][:active])
 
         opt.zero_grad(set_to_none=True) if not args.selective_adam else opt.zero_grad()
         loss.backward()
@@ -715,7 +721,10 @@ def _run_report(args, log, wall_s, active):
     }
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as a value. Tests build arms through THIS so they inherit every default
+    from the one place the command line does -- a hand-written namespace is how a sweep
+    once ran with settings other than the ones it reported."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--colmap")
     ap.add_argument("--blender", help="NeRF-synthetic scene dir (transforms_*.json). "
@@ -746,6 +755,11 @@ def main():
     ap.add_argument("--noise-weight", type=float, default=4e4)
     ap.add_argument("--opac-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
+    ap.add_argument("--flatten-loss-weight", type=float, default=0.0,
+                    help="PlanarGS flatten: weight on the mean smallest ACTIVATED scale. "
+                         "The earthbyte indoor recipe is 1.0, applied at constant weight "
+                         "with no metric normalisation. Dominant measured geometry lever "
+                         "in Brush (-14.3 deg thin-axis on playroom, -8.9 on ARKitScenes).")
     ap.add_argument("--appearance", choices=["off", "gain_bias", "affine"],
                     default="off",
                     help="per-training-image photometric correction; held-out "
@@ -822,6 +836,11 @@ def main():
                          "convergence comparison: the checkpoint's mtime gives "
                          "its real elapsed time, which beats interpolating from "
                          "the step count when per-step cost is not constant.")
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
     if not args.blender and not (args.colmap and args.images):
         ap.error("need --blender, or --colmap with --images")
