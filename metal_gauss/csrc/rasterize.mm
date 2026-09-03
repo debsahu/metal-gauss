@@ -441,15 +441,17 @@ std::vector<torch::Tensor> nfd_backward(torch::Tensor depth, torch::Tensor g,
 
 std::vector<torch::Tensor> geom_loss_forward(
     torch::Tensor z_img, torch::Tensor n_sum, torch::Tensor alpha, torch::Tensor n_d,
-    torch::Tensor gt_depth, torch::Tensor gt_norm, int64_t space)
+    torch::Tensor gt_depth, torch::Tensor gt_norm, torch::Tensor keep, int64_t space)
 {
     checkMPS(z_img, "z_img");
+    const bool has_keep = keep.numel() > 0;
     const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
     const int64_t TG = 256, NG = (NPIX + TG - 1) / TG;
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(z_img.device());
     auto uopt = torch::TensorOptions().dtype(torch::kInt32).device(z_img.device());
     auto num = torch::zeros({NG, 3}, fopt), cnt = torch::zeros({NG, 3}, uopt);
     auto depth_o = torch::zeros({H, W}, fopt), nr_o = torch::zeros({H, W, 3}, fopt);
+    auto keep_in = has_keep ? keep.contiguous() : torch::ones({1}, fopt);
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
         dispatch_sync(torch::mps::get_dispatch_queue(), ^{
@@ -463,6 +465,9 @@ std::vector<torch::Tensor> geom_loss_forward(
             [enc setBytes:d length:sizeof(d) atIndex:10];
             uint sp = (uint)space;
             [enc setBytes:&sp length:sizeof(sp) atIndex:11];
+            SETBUF(enc, keep_in, 12);
+            uint hk = has_keep ? 1u : 0u;
+            [enc setBytes:&hk length:sizeof(hk) atIndex:13];
             [enc dispatchThreads:MTLSizeMake(NG * TG, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(TG, 1, 1)];
             [enc endEncoding];
@@ -475,12 +480,14 @@ std::vector<torch::Tensor> geom_loss_forward(
 std::vector<torch::Tensor> geom_loss_backward(
     torch::Tensor depth_i, torch::Tensor nr_i, torch::Tensor n_sum, torch::Tensor alpha,
     torch::Tensor n_d, torch::Tensor gt_depth, torch::Tensor gt_norm,
-    int64_t space, std::vector<double> wts, std::vector<double> invN)
+    torch::Tensor keep, int64_t space, std::vector<double> wts, std::vector<double> invN)
 {
     const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
+    const bool has_keep = keep.numel() > 0;
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(alpha.device());
     auto g_depth = torch::zeros({H, W}, fopt);
     auto g_nd = torch::zeros({H, W, 3}, fopt), g_nsum = torch::zeros({H, W, 3}, fopt);
+    auto keep_in = has_keep ? keep.contiguous() : torch::ones({1}, fopt);
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
         dispatch_sync(torch::mps::get_dispatch_queue(), ^{
@@ -498,6 +505,9 @@ std::vector<torch::Tensor> geom_loss_backward(
             [enc setBytes:w length:sizeof(w) atIndex:12];
             float n[4] = {(float)invN[0], (float)invN[1], (float)invN[2], 0.f};
             [enc setBytes:n length:sizeof(n) atIndex:13];
+            SETBUF(enc, keep_in, 14);
+            uint hk = has_keep ? 1u : 0u;
+            [enc setBytes:&hk length:sizeof(hk) atIndex:15];
             [enc dispatchThreads:MTLSizeMake(NPIX, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc endEncoding];

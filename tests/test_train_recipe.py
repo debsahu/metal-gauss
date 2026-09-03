@@ -324,7 +324,7 @@ def test_geometry_coverage_warning_fires_only_on_partial_coverage():
 
 
 @mps
-def test_every_loss_term_enters_the_total_exactly_once_per_step():
+def test_every_loss_term_enters_the_total_exactly_once_per_step(monkeypatch):
     """TERM MULTIPLICITY. The general defect; flatten was merely the instance.
 
     Re-assembling the loss so each half could be logged separately (Fix-up 2) left the
@@ -342,6 +342,13 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step():
     """
     import metal_gauss.train as MT
     from metal_gauss import train as T
+
+    # FORCE THE TORCH LOSS PATH. This test counts calls to depth_loss / normal_loss /
+    # depth_normal_loss, and the fused kernel (plan Task 17) calls none of them -- it
+    # computes all three in one pass. The fused path's multiplicity is guaranteed
+    # structurally (one kernel, one contribution per term) and is pinned numerically by
+    # test_fused_geom_loss.py's value-parity test, which would read 2x on a double-add.
+    monkeypatch.setenv("MG_TORCH_LOSS", "1")
 
     steps = 6
     watched = ["photometric_loss", "flatten_loss", "depth_loss", "normal_loss",

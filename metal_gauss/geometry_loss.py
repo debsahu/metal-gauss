@@ -293,15 +293,17 @@ class _FusedGeometryLosses(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, K, space):
+    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, keep, K, space):
         from metal_gauss.metal_backend import _load
         ext = _load()
         a = alpha.detach().contiguous()
         di = (z_img[..., 0] / a.clamp_min(1e-10)).contiguous()
         n_d = ext.nfd_forward(di, *K)[0]
+        k = (keep.to(a.dtype).contiguous() if keep is not None
+             else torch.empty(0, device=a.device, dtype=a.dtype))
         num, cnt, depth_o, nr_o = ext.geom_loss_forward(
             z_img.contiguous(), n_sum.contiguous(), a, n_d,
-            gt_depth.contiguous(), gt_normal.contiguous(), int(space))
+            gt_depth.contiguous(), gt_normal.contiguous(), k, int(space))
         # Fixed-order host reduce of the per-threadgroup partials. The count is integer:
         # an f32 sum of ones is exact only to 2^24, which is exactly one 4096^2 face.
         tot = num.sum(0)
@@ -310,7 +312,7 @@ class _FusedGeometryLosses(torch.autograd.Function):
         # not the pixel count, because the numerator is a component-wise L1. Brush:
         # `abs_err.sum() / (valid.sum() * 3.0).clamp_min(1.0)`.
         N = torch.stack([N[0], N[1] * 3, N[2]]).clamp_min(1)
-        ctx.save_for_backward(depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal)
+        ctx.save_for_backward(depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k)
         ctx.meta = (K, int(space), tuple(N.tolist()))
         return tot / N.to(tot.dtype)
 
@@ -318,7 +320,7 @@ class _FusedGeometryLosses(torch.autograd.Function):
     def backward(ctx, g):
         from metal_gauss.metal_backend import _load
         ext = _load()
-        depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal = ctx.saved_tensors
+        depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k = ctx.saved_tensors
         K, space, N = ctx.meta
         # The UPSTREAM COTANGENT already carries the caller's per-term weight -- the
         # forward returns the three losses UNWEIGHTED. Multiplying by `weights` here too
@@ -328,7 +330,7 @@ class _FusedGeometryLosses(torch.autograd.Function):
         inv = [1.0 / n for n in N]
         g_depth, g_nd, g_nsum = ext.geom_loss_backward(
             depth_o, nr_o, n_sum.contiguous(), a, n_d,
-            gt_depth.contiguous(), gt_normal.contiguous(), space, w, inv)
+            gt_depth.contiguous(), gt_normal.contiguous(), k, space, w, inv)
         # depth_img feeds BOTH the depth loss and normals_from_depth, so the two paths sum.
         g_depth = g_depth + ext.nfd_backward(depth_o, g_nd, *K)[0]
         g_z = torch.zeros_like(n_sum)
@@ -337,12 +339,12 @@ class _FusedGeometryLosses(torch.autograd.Function):
 
 
 def fused_geometry_losses(z_img, n_sum, alpha, gt_depth, gt_normal, K,
-                          space="disparity"):
+                          keep=None, space="disparity"):
     """(depth, normal, depth_normal) losses, UNWEIGHTED, as a length-3 tensor.
 
     The caller applies its own per-term weights to the returned tensor; they must not also
     be passed in here, or they are applied twice (once by the caller, once by the
     backward's use of the upstream cotangent)."""
     return _FusedGeometryLosses.apply(
-        z_img, n_sum, alpha, gt_depth, gt_normal, tuple(float(x) for x in K),
+        z_img, n_sum, alpha, gt_depth, gt_normal, keep, tuple(float(x) for x in K),
         0 if space == "disparity" else 1)

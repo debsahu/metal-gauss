@@ -147,6 +147,12 @@ kernel void geom_loss_forward(
     device float*       nr_o     [[buffer(9)]],   // (H,W,3) n_r,       saved for backward
     constant uint2&     dim      [[buffer(10)]],
     constant uint&      space    [[buffer(11)]],  // 0 = disparity, 1 = metric
+    // Mask support. The torch path multiplies the PRIORS and the dn alpha by `keep`, so a
+    // dropped pixel's gt_depth becomes exactly 0 (invalid), its gt_normal becomes the zero
+    // vector (invalid), and its dn alpha falls below the 0.5 gate. Multiplying here
+    // reproduces that exactly rather than approximating it with a separate branch.
+    device const float*  keep    [[buffer(12)]],   // (H,W), 1 = keep, or empty
+    constant uint&      has_keep [[buffer(13)]],
     uint  gidx [[thread_position_in_grid]],
     uint  lidx [[thread_index_in_threadgroup]],
     uint  tgid [[threadgroup_position_in_grid]])
@@ -160,6 +166,7 @@ kernel void geom_loss_forward(
 
     if (gidx < NPIX) {
         const uint o3 = gidx * 3u;
+        const float k  = has_keep ? keep[gidx] : 1.0f;
         const float a  = max(alpha[gidx], 1e-10f);
         const float di = z_img[o3] / a;
         depth_o[gidx] = di;
@@ -169,7 +176,7 @@ kernel void geom_loss_forward(
         nr_o[o3] = nr.x; nr_o[o3+1] = nr.y; nr_o[o3+2] = nr.z;
 
         // ---- depth loss: valid = gt > 0; uncovered pred scores the FULL disparity ----
-        const float gd = gt_depth[gidx];
+        const float gd = gt_depth[gidx] * k;
         if (gd > 0.0f) {
             float r;
             if (space == 0u) {                       // disparity
@@ -182,7 +189,7 @@ kernel void geom_loss_forward(
         }
 
         // ---- normal loss: component L1 over pixels whose PRIOR is valid ----
-        const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]);
+        const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]) * k;
         if (length(gn) > 0.5f) {
             const float3 e = abs(nr - gn);
             n_num = e.x + e.y + e.z; n_cnt = 1u;
@@ -190,7 +197,7 @@ kernel void geom_loss_forward(
 
         // ---- depth-normal consistency: gate on alpha AND both magnitudes ----
         const float3 nd = float3(n_d[o3], n_d[o3+1], n_d[o3+2]);
-        if (alpha[gidx] > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
+        if (alpha[gidx] * k > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
             dn_num = 1.0f - dot(nd, nr); dn_cnt = 1u;   // branch, never `* m`
         }
     }
@@ -232,11 +239,14 @@ kernel void geom_loss_backward(
     constant uint&      space    [[buffer(11)]],
     constant float4&    wts      [[buffer(12)]],  // w_depth, w_normal, w_dn, unused
     constant float4&    invN     [[buffer(13)]],  // 1/Nd, 1/Nn, 1/Ndn, unused
+    device const float* keep     [[buffer(14)]],
+    constant uint&      has_keep [[buffer(15)]],
     uint gidx [[thread_position_in_grid]])
 {
     const uint H = dim.x, W = dim.y;
     if (gidx >= H * W) return;
     const uint o3 = gidx * 3u;
+    const float k  = has_keep ? keep[gidx] : 1.0f;
     const float a  = max(alpha[gidx], 1e-10f);
     const float di = depth_i[gidx];
     const float3 nr = float3(nr_i[o3], nr_i[o3+1], nr_i[o3+2]);
@@ -244,7 +254,7 @@ kernel void geom_loss_backward(
     float gd_acc = 0.0f;
     float3 gnr = float3(0.0f), gnd = float3(0.0f);
 
-    const float gd = gt_depth[gidx];
+    const float gd = gt_depth[gidx] * k;
     if (gd > 0.0f) {
         if (space == 0u) {
             if (di > 0.0f) {
@@ -257,11 +267,11 @@ kernel void geom_loss_backward(
             gd_acc += wts.x * invN.x * sign(di - gd);
         }
     }
-    const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]);
+    const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]) * k;
     if (length(gn) > 0.5f) gnr += wts.y * invN.y * sign(nr - gn);
 
     const float3 nd = float3(n_d[o3], n_d[o3+1], n_d[o3+2]);
-    if (alpha[gidx] > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
+    if (alpha[gidx] * k > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
         gnd += -wts.z * invN.z * nr;          // ghat_n_d = -m n_r / N
         gnr += -wts.z * invN.z * nd;          // ghat_n_r = -m n_d / N
     }
