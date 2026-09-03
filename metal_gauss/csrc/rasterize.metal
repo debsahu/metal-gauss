@@ -22,6 +22,14 @@ kernel void rasterize_forward(
     device float*         out_T         [[buffer(8)]],
     device int*           out_ncontrib  [[buffer(9)]],
     constant uint4&       dims          [[buffer(10)]],  // W, H, tile, tiles_x
+    // Auxiliary channels, composited in THIS pass rather than by re-walking the tile
+    // lists in another one. Task 11 measured the two extra Tier 1 passes at 115.57 ms of
+    // which only 29.3 ms is forward: the rest is their separate BACKWARD traversals.
+    // `has_aux` is a threadgroup-uniform branch, so the aux-off path pays a predicted
+    // branch and no bandwidth.
+    device const float4*  aux           [[buffer(11)]],  // 4 per gaussian
+    device float4*        out_aux       [[buffer(12)]],  // (H, W, 4)
+    constant uint&        has_aux       [[buffer(13)]],
     uint2 gid  [[thread_position_in_grid]],
     uint2 lid  [[thread_position_in_threadgroup]],
     uint2 tgs  [[threads_per_threadgroup]])
@@ -46,10 +54,12 @@ kernel void rasterize_forward(
     threadgroup float3 s_conic[STAGE];
     threadgroup float  s_op[STAGE];
     threadgroup float3 s_col[STAGE];
+    threadgroup float4 s_aux[STAGE];
     threadgroup atomic_int s_done;
 
     float  T   = 1.0f;
     float3 acc = float3(0.0f);
+    float4 acc_aux = float4(0.0f);
     float  a_acc = 0.0f;
     int    stop = start;
     bool   done = !inimg;
@@ -67,6 +77,7 @@ kernel void rasterize_forward(
             s_conic[t] = float3(conic[g]);
             s_op[t] = opacity[g];
             s_col[t] = float3(color[g]);
+            if (has_aux) s_aux[t] = aux[g];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -81,6 +92,7 @@ kernel void rasterize_forward(
                 if (alpha < 1.0f / 255.0f) continue;
                 const float w = alpha * T;
                 acc   += w * s_col[j];
+                if (has_aux) acc_aux += w * s_aux[j];
                 a_acc += w;
                 T     *= (1.0f - alpha);
                 stop   = base + j + 1;
@@ -102,6 +114,9 @@ kernel void rasterize_forward(
     // backward can start its reverse walk directly instead of re-walking the
     // whole list forward to find where the forward pass ended.
     out_ncontrib[o] = stop;
+    // Uncovered pixels keep exactly 0 in every aux channel: "no measurement here", never
+    // a background constant. A depth map with a background baked in reads as a surface.
+    if (has_aux) out_aux[o] = acc_aux;
 }
 
 // Backward pass. Walks the same list BACK to front, reconstructing the

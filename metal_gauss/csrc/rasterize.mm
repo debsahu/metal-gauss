@@ -53,10 +53,20 @@ static void checkMPS(const torch::Tensor& t, const char* what) {
 
 std::vector<torch::Tensor> rasterize_forward(
     torch::Tensor uv, torch::Tensor conic, torch::Tensor opacity, torch::Tensor color,
+    torch::Tensor aux,
     torch::Tensor gauss_ids, torch::Tensor tile_offsets,
     int64_t W, int64_t H, int64_t tile, int64_t tiles_x)
 {
     for (auto& t : {uv, conic, opacity, color, gauss_ids, tile_offsets}) checkMPS(t, "input");
+
+    const bool has_aux = aux.numel() > 0;
+    if (has_aux) {
+        checkMPS(aux, "aux");
+        TORCH_CHECK(aux.dim() == 2 && aux.size(1) == 4,
+                    "aux must be (N,4) float32; got ", aux.sizes());
+        TORCH_CHECK(aux.size(0) == uv.size(0),
+                    "aux must have one row per gaussian: ", aux.size(0), " vs ", uv.size(0));
+    }
 
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(uv.device());
     auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(uv.device());
@@ -64,6 +74,10 @@ std::vector<torch::Tensor> rasterize_forward(
     auto out_alpha = torch::zeros({H, W}, fopt);
     auto out_T     = torch::ones({H, W}, fopt);
     auto out_n     = torch::zeros({H, W}, iopt);
+    // Metal needs a bound buffer even on the unused path, so the aux-off case binds
+    // one-element dummies and returns an EMPTY tensor to the caller.
+    auto aux_in  = has_aux ? aux : torch::zeros({1, 4}, fopt);
+    auto out_aux = has_aux ? torch::zeros({H, W, 4}, fopt) : torch::zeros({1, 1, 4}, fopt);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
@@ -77,13 +91,17 @@ std::vector<torch::Tensor> rasterize_forward(
             SETBUF(enc, out_T, 8);        SETBUF(enc, out_n, 9);
             uint dims[4] = {(uint)W, (uint)H, (uint)tile, (uint)tiles_x};
             [enc setBytes:dims length:sizeof(dims) atIndex:10];
+            SETBUF(enc, aux_in, 11);      SETBUF(enc, out_aux, 12);
+            uint has_aux_u = has_aux ? 1u : 0u;
+            [enc setBytes:&has_aux_u length:sizeof(has_aux_u) atIndex:13];
             [enc dispatchThreads:MTLSizeMake(W, H, 1)
               threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
             [enc endEncoding];
             torch::mps::commit();
         });
     }
-    return {out_rgb, out_alpha, out_T, out_n};
+    return {out_rgb, out_alpha, out_T, out_n,
+            has_aux ? out_aux : torch::empty({0}, fopt)};
 }
 
 std::vector<torch::Tensor> pack_intersections(

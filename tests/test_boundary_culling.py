@@ -108,7 +108,8 @@ def test_exact_ellipse_filter_is_bit_exact():
     b = build_tile_lists(uv, rxy[:, 0], depth, valid.bool(), Wl, Hl, tl, ry=rxy[:, 1],
                          conic=conic, opacity=op)
     assert b[0].numel() < a[0].numel(), "filter removed nothing -- is it wired up?"
-    rgb_a, al_a, _, _ = ext.rasterize_forward(*args, a[0], a[1], Wl, Hl, tl, a[2])
-    rgb_b, al_b, _, _ = ext.rasterize_forward(*args, b[0], b[1], Wl, Hl, tl, b[2])
+    noaux = torch.empty(0, 4, device=args[0].device)   # RGB-only path (Tier 2 signature)
+    rgb_a, al_a, _, _, _ = ext.rasterize_forward(*args, noaux, a[0], a[1], Wl, Hl, tl, a[2])
+    rgb_b, al_b, _, _, _ = ext.rasterize_forward(*args, noaux, b[0], b[1], Wl, Hl, tl, b[2])
     assert torch.equal(rgb_a, rgb_b), f"max diff {(rgb_a - rgb_b).abs().max().item():.3e}"
     assert torch.equal(al_a, al_b)

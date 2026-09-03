@@ -285,8 +285,12 @@ class _RasterizeMetal(torch.autograd.Function):
                 tiles_x, absgrad_out=None):
         ext = _load()
         args = [t.contiguous() for t in (uv, conic, opacity, color)]
-        rgb, alpha, T, ncontrib = ext.rasterize_forward(
-            *args, gauss_ids, tile_offsets, W, H, tile, tiles_x)
+        # Empty aux: this is the Tier 1 RGB-only path. The fused-aux path lands its
+        # adjoint in Task 13; until then it is forward-only, via
+        # `rasterize_fused_forward` below.
+        rgb, alpha, T, ncontrib, _aux = ext.rasterize_forward(
+            *args, torch.empty(0, 4, device=uv.device),
+            gauss_ids, tile_offsets, W, H, tile, tiles_x)
         ctx.save_for_backward(*args, gauss_ids, tile_offsets, T, ncontrib)
         ctx.dims = (W, H, tile, tiles_x)
         # absgrad is a statistic produced by the backward, not a gradient, so
@@ -342,6 +346,25 @@ def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
 # Accepted-and-ignored: parameters of torch_ref.render that the fused Metal path has no
 # analogue for. Anything else reaching **_ignored is a caller mistake.
 _TORCH_REF_ONLY_KWARGS = frozenset({"max_per_tile", "tile_chunk", "slab"})
+
+
+def rasterize_fused_forward(uv, conic, opacity, color, aux, gauss_ids, tile_offsets,
+                            W, H, tile, tiles_x):
+    """RGB and up to 4 auxiliary channels composited in ONE rasterisation pass.
+
+    FORWARD ONLY -- no autograd. The fused adjoint is Task 13; calling `.backward()`
+    through this would silently produce nothing, so it deliberately returns plain tensors
+    with no graph rather than an autograd Function that lies about its gradient.
+
+    `aux` is `(N,4)` float32, or an empty tensor for the RGB-only path, in which case the
+    returned aux map is empty too. Channels composite with the same `w = alpha * T` in the
+    same front-to-back order as a separate pass over the same tile lists, so the result is
+    bit-identical to Tier 1's two-pass output -- pinned by tests/test_fused_aux.py.
+    """
+    ext = _load()
+    args = [t.contiguous() for t in (uv, conic, opacity, color)]
+    return ext.rasterize_forward(*args, aux.contiguous(), gauss_ids, tile_offsets,
+                                 W, H, tile, tiles_x)
 
 
 def render(means, quats, scales, opacities, sh, K, viewmat, W, H,

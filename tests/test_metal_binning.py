@@ -53,8 +53,9 @@ def test_metal_binning_renders_identically(tile):
     assert a[2] == b[2] and a[1].shape == b[1].shape
 
     args = [x.contiguous() for x in (uv, conic, s["op"], color)]
-    ra, aa, _, _ = ext.rasterize_forward(*args, a[0], a[1], W, H, tile, a[2])
-    rb, ab, _, _ = ext.rasterize_forward(*args, b[0], b[1], W, H, tile, b[2])
+    noaux = torch.empty(0, 4, device=args[0].device)   # RGB-only path (Tier 2 signature)
+    ra, aa, _, _, _ = ext.rasterize_forward(*args, noaux, a[0], a[1], W, H, tile, a[2])
+    rb, ab, _, _, _ = ext.rasterize_forward(*args, noaux, b[0], b[1], W, H, tile, b[2])
     assert torch.equal(ra, rb), f"image differs, max {(ra - rb).abs().max().item():.3e}"
     assert torch.equal(aa, ab)
 
