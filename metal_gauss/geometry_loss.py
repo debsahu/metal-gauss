@@ -118,7 +118,7 @@ def normal_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     return err.sum() / (3.0 * valid.to(pred.dtype).sum()).clamp_min(1.0)
 
 
-def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
+def _normals_from_depth_torch(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
     """Brush `brush-loss` `normals_from_depth`. Camera-frame, TOWARD-camera, unit.
 
     Integer pixel indices `(u - cx)/fx` (matching Brush and the cross-language fixture).
@@ -155,6 +155,45 @@ def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
     valid = dpos[:-1, :-1] & dpos[:-1, 1:] & dpos[1:, :-1] & (length > 1e-12)
     out[:-1, :-1] = torch.where(valid[..., None], n, torch.zeros_like(n))
     return out
+
+
+class _NormalsFromDepthMetal(torch.autograd.Function):
+    """Metal `normals_from_depth`, with the gather-form adjoint.
+
+    research/normals-from-depth-adjoint.md, verified 31/31 against torch.autograd. The
+    backward is one thread per INPUT pixel with no atomics -- each input is read by up to
+    three output pixels and its own ray multiplies all three roles -- so unlike the
+    rasteriser this lane is deterministic.
+    """
+
+    @staticmethod
+    def forward(ctx, depth, fx, fy, cx, cy):
+        from metal_gauss.metal_backend import _load
+        ctx.save_for_backward(depth)
+        ctx.K = (fx, fy, cx, cy)
+        return _load().nfd_forward(depth.contiguous(), fx, fy, cx, cy)[0]
+
+    @staticmethod
+    def backward(ctx, g):
+        from metal_gauss.metal_backend import _load
+        (depth,) = ctx.saved_tensors
+        fx, fy, cx, cy = ctx.K
+        return _load().nfd_backward(depth.contiguous(), g.contiguous(),
+                                    fx, fy, cx, cy)[0], None, None, None, None
+
+
+def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
+    """Camera-frame TOWARD-camera unit normals differentiated from a depth map.
+
+    Dispatches to the Metal kernel for float32 MPS input and falls back to the torch
+    reference otherwise (float64 fixtures, CPU, degenerate shapes). The two are pinned
+    against each other and against torch.autograd in tests/test_nfd_kernel.py.
+    """
+    if (depth.device.type == "mps" and depth.dtype == torch.float32
+            and depth.dim() == 2 and depth.shape[0] >= 2 and depth.shape[1] >= 2):
+        return _NormalsFromDepthMetal.apply(depth, float(fx), float(fy),
+                                            float(cx), float(cy))
+    return _normals_from_depth_torch(depth, fx, fy, cx, cy)
 
 
 def depth_normal_loss(n_from_depth: torch.Tensor, n_rendered: torch.Tensor,
@@ -234,3 +273,78 @@ def plane_depth_from_features(feat_img: torch.Tensor, fx, fy, cx, cy,
     normal = n_sum / length[..., None]
     normal = torch.where(valid[..., None], normal, torch.zeros_like(normal))
     return depth, normal, valid.to(feat_img.dtype)
+
+
+class _FusedGeometryLosses(torch.autograd.Function):
+    """The three geometry loss terms in one pass over the image.
+
+    Replaces ~30 torch elementwise dispatches, each reading and writing 2.7M x 3 floats at
+    1920x1440. Derivation and every rule honoured here:
+    research/depth-normal-loss-adjoint.md (44/44 against torch.autograd).
+
+    Leaves are `z_img` and `n_sum`. ALPHA IS NOT A LEAF and no cotangent is produced for
+    it: un-detaching alpha gives max|dL/dalpha| = 0.37, all of it from the depth branch.
+
+    DEVIATION FROM THE NOTE, stated: the note shows `ghat_n_d = -m n_r / N` can be formed
+    per reader INSIDE the gather kernel, needing no intermediate buffer. This writes
+    `g_nd` to a buffer and feeds the existing `nfd_backward`. One extra (H,W,3) buffer,
+    reusing a kernel already verified 31/31, in exchange for not re-deriving the gather.
+    Folding it in is the remaining optimisation, not a correctness gap.
+    """
+
+    @staticmethod
+    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, keep, K, space):
+        from metal_gauss.metal_backend import _load
+        ext = _load()
+        a = alpha.detach().contiguous()
+        di = (z_img[..., 0] / a.clamp_min(1e-10)).contiguous()
+        n_d = ext.nfd_forward(di, *K)[0]
+        k = (keep.to(a.dtype).contiguous() if keep is not None
+             else torch.empty(0, device=a.device, dtype=a.dtype))
+        num, cnt, depth_o, nr_o = ext.geom_loss_forward(
+            z_img.contiguous(), n_sum.contiguous(), a, n_d,
+            gt_depth.contiguous(), gt_normal.contiguous(), k, int(space))
+        # Fixed-order host reduce of the per-threadgroup partials. The count is integer:
+        # an f32 sum of ones is exact only to 2^24, which is exactly one 4096^2 face.
+        tot = num.sum(0)
+        N = cnt.to(torch.int64).sum(0)
+        # normal_loss divides by 3 * valid.sum(): the denominator is the COMPONENT count,
+        # not the pixel count, because the numerator is a component-wise L1. Brush:
+        # `abs_err.sum() / (valid.sum() * 3.0).clamp_min(1.0)`.
+        N = torch.stack([N[0], N[1] * 3, N[2]]).clamp_min(1)
+        ctx.save_for_backward(depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k)
+        ctx.meta = (K, int(space), tuple(N.tolist()))
+        return tot / N.to(tot.dtype)
+
+    @staticmethod
+    def backward(ctx, g):
+        from metal_gauss.metal_backend import _load
+        ext = _load()
+        depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k = ctx.saved_tensors
+        K, space, N = ctx.meta
+        # The UPSTREAM COTANGENT already carries the caller's per-term weight -- the
+        # forward returns the three losses UNWEIGHTED. Multiplying by `weights` here too
+        # applied them twice; the error was exactly the weight (0.2 -> rel 0.8,
+        # 0.05 -> rel 0.95), which is what named the bug.
+        w = g.detach().tolist()
+        inv = [1.0 / n for n in N]
+        g_depth, g_nd, g_nsum = ext.geom_loss_backward(
+            depth_o, nr_o, n_sum.contiguous(), a, n_d,
+            gt_depth.contiguous(), gt_normal.contiguous(), k, space, w, inv)
+        # depth_img feeds BOTH the depth loss and normals_from_depth, so the two paths sum.
+        g_depth = g_depth + ext.nfd_backward(depth_o, g_nd, *K)[0]
+        g_z = torch.zeros_like(n_sum)
+        g_z[..., 0] = g_depth / a.clamp_min(1e-10)      # channels 1-2 are exactly zero
+        return g_z, g_nsum, None, None, None, None, None, None
+
+
+def fused_geometry_losses(z_img, n_sum, alpha, gt_depth, gt_normal, K,
+                          keep=None, space="disparity"):
+    """(depth, normal, depth_normal) losses, UNWEIGHTED, as a length-3 tensor.
+
+    The caller applies its own per-term weights to the returned tensor; they must not also
+    be passed in here, or they are applied twice (once by the caller, once by the
+    backward's use of the upstream cotangent)."""
+    return _FusedGeometryLosses.apply(
+        z_img, n_sum, alpha, gt_depth, gt_normal, keep, tuple(float(x) for x in K),
+        0 if space == "disparity" else 1)

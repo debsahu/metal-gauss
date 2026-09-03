@@ -53,10 +53,20 @@ static void checkMPS(const torch::Tensor& t, const char* what) {
 
 std::vector<torch::Tensor> rasterize_forward(
     torch::Tensor uv, torch::Tensor conic, torch::Tensor opacity, torch::Tensor color,
+    torch::Tensor aux,
     torch::Tensor gauss_ids, torch::Tensor tile_offsets,
     int64_t W, int64_t H, int64_t tile, int64_t tiles_x)
 {
     for (auto& t : {uv, conic, opacity, color, gauss_ids, tile_offsets}) checkMPS(t, "input");
+
+    const bool has_aux = aux.numel() > 0;
+    if (has_aux) {
+        checkMPS(aux, "aux");
+        TORCH_CHECK(aux.dim() == 2 && aux.size(1) == 4,
+                    "aux must be (N,4) float32; got ", aux.sizes());
+        TORCH_CHECK(aux.size(0) == uv.size(0),
+                    "aux must have one row per gaussian: ", aux.size(0), " vs ", uv.size(0));
+    }
 
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(uv.device());
     auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(uv.device());
@@ -64,6 +74,10 @@ std::vector<torch::Tensor> rasterize_forward(
     auto out_alpha = torch::zeros({H, W}, fopt);
     auto out_T     = torch::ones({H, W}, fopt);
     auto out_n     = torch::zeros({H, W}, iopt);
+    // Metal needs a bound buffer even on the unused path, so the aux-off case binds
+    // one-element dummies and returns an EMPTY tensor to the caller.
+    auto aux_in  = has_aux ? aux : torch::zeros({1, 4}, fopt);
+    auto out_aux = has_aux ? torch::zeros({H, W, 4}, fopt) : torch::zeros({1, 1, 4}, fopt);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
@@ -77,13 +91,17 @@ std::vector<torch::Tensor> rasterize_forward(
             SETBUF(enc, out_T, 8);        SETBUF(enc, out_n, 9);
             uint dims[4] = {(uint)W, (uint)H, (uint)tile, (uint)tiles_x};
             [enc setBytes:dims length:sizeof(dims) atIndex:10];
+            SETBUF(enc, aux_in, 11);      SETBUF(enc, out_aux, 12);
+            uint has_aux_u = has_aux ? 1u : 0u;
+            [enc setBytes:&has_aux_u length:sizeof(has_aux_u) atIndex:13];
             [enc dispatchThreads:MTLSizeMake(W, H, 1)
               threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
             [enc endEncoding];
             torch::mps::commit();
         });
     }
-    return {out_rgb, out_alpha, out_T, out_n};
+    return {out_rgb, out_alpha, out_T, out_n,
+            has_aux ? out_aux : torch::empty({0}, fopt)};
 }
 
 std::vector<torch::Tensor> pack_intersections(
@@ -120,14 +138,22 @@ std::vector<torch::Tensor> pack_intersections(
 
 std::vector<torch::Tensor> rasterize_backward(
     torch::Tensor uv, torch::Tensor conic, torch::Tensor opacity, torch::Tensor color,
+    torch::Tensor aux,
     torch::Tensor gauss_ids, torch::Tensor tile_offsets,
     torch::Tensor final_T, torch::Tensor n_contrib,
-    torch::Tensor grad_rgb, torch::Tensor grad_alpha,
+    torch::Tensor grad_rgb, torch::Tensor grad_alpha, torch::Tensor grad_aux,
     int64_t W, int64_t H, int64_t tile, int64_t tiles_x,
     bool want_absgrad)
 {
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(uv.device());
     const int64_t N = uv.size(0);
+    const bool has_aux = aux.numel() > 0 && grad_aux.numel() > 0;
+    if (has_aux) {
+        TORCH_CHECK(aux.dim() == 2 && aux.size(1) == 4 && aux.size(0) == N,
+                    "aux must be (N,4); got ", aux.sizes());
+        TORCH_CHECK(grad_aux.dim() == 3 && grad_aux.size(2) == 4,
+                    "grad_aux must be (H,W,4); got ", grad_aux.sizes());
+    }
     auto d_uv      = torch::zeros({N, 2}, fopt);
     auto d_conic   = torch::zeros({N, 3}, fopt);
     auto d_opacity = torch::zeros({N}, fopt);
@@ -136,9 +162,12 @@ std::vector<torch::Tensor> rasterize_backward(
     // Allocated at full size only when asked for; the kernel skips the
     // reduction, the sqrt and the tenth atomic otherwise.
     auto d_absuv   = torch::zeros({want_absgrad ? N : 1}, fopt);
+    auto d_aux     = torch::zeros({has_aux ? N : 1, 4}, fopt);
 
     grad_rgb = grad_rgb.contiguous();
     grad_alpha = grad_alpha.contiguous();
+    auto aux_in  = has_aux ? aux.contiguous() : torch::zeros({1, 4}, fopt);
+    auto gaux_in = has_aux ? grad_aux.contiguous() : torch::zeros({1, 1, 4}, fopt);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
@@ -157,13 +186,18 @@ std::vector<torch::Tensor> rasterize_backward(
             SETBUF(enc, d_absuv, 15);
             uint wa = want_absgrad ? 1u : 0u;
             [enc setBytes:&wa length:sizeof(wa) atIndex:16];
+            SETBUF(enc, aux_in, 17);     SETBUF(enc, gaux_in, 18);
+            SETBUF(enc, d_aux, 19);
+            uint ha = has_aux ? 1u : 0u;
+            [enc setBytes:&ha length:sizeof(ha) atIndex:20];
             [enc dispatchThreads:MTLSizeMake(W, H, 1)
               threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
             [enc endEncoding];
             torch::mps::commit();
         });
     }
-    return {d_uv, d_conic, d_opacity, d_color, d_absuv};
+    return {d_uv, d_conic, d_opacity, d_color, d_absuv,
+            has_aux ? d_aux : torch::empty({0, 4}, fopt)};
 }
 
 void init(const std::string& src) { initLibrary(src); }
@@ -353,6 +387,136 @@ static void ssim_dispatch(const char* kern, std::vector<torch::Tensor> bufs,
     }
 }
 
+std::vector<torch::Tensor> nfd_forward(torch::Tensor depth, double fx, double fy,
+                                       double cx, double cy) {
+    checkMPS(depth, "depth");
+    TORCH_CHECK(depth.dim() == 2, "depth must be (H,W); got ", depth.sizes());
+    const int64_t H = depth.size(0), W = depth.size(1);
+    auto out = torch::zeros({H, W, 3}, depth.options());
+    if (H < 2 || W < 2) return {out};
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("nfd_forward")];
+            SETBUF(enc, depth, 0); SETBUF(enc, out, 1);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:2];
+            float k[4] = {(float)fx, (float)fy, (float)cx, (float)cy};
+            [enc setBytes:k length:sizeof(k) atIndex:3];
+            [enc dispatchThreads:MTLSizeMake(W, H, 1)
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {out};
+}
+
+std::vector<torch::Tensor> nfd_backward(torch::Tensor depth, torch::Tensor g,
+                                        double fx, double fy, double cx, double cy) {
+    checkMPS(depth, "depth");
+    const int64_t H = depth.size(0), W = depth.size(1);
+    auto grad = torch::zeros({H, W}, depth.options());
+    if (H < 2 || W < 2) return {grad};
+    g = g.contiguous();
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("nfd_backward")];
+            SETBUF(enc, depth, 0); SETBUF(enc, g, 1); SETBUF(enc, grad, 2);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:3];
+            float k[4] = {(float)fx, (float)fy, (float)cx, (float)cy};
+            [enc setBytes:k length:sizeof(k) atIndex:4];
+            [enc dispatchThreads:MTLSizeMake(W, H, 1)
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {grad};
+}
+
+std::vector<torch::Tensor> geom_loss_forward(
+    torch::Tensor z_img, torch::Tensor n_sum, torch::Tensor alpha, torch::Tensor n_d,
+    torch::Tensor gt_depth, torch::Tensor gt_norm, torch::Tensor keep, int64_t space)
+{
+    checkMPS(z_img, "z_img");
+    const bool has_keep = keep.numel() > 0;
+    const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
+    const int64_t TG = 256, NG = (NPIX + TG - 1) / TG;
+    auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(z_img.device());
+    auto uopt = torch::TensorOptions().dtype(torch::kInt32).device(z_img.device());
+    auto num = torch::zeros({NG, 3}, fopt), cnt = torch::zeros({NG, 3}, uopt);
+    auto depth_o = torch::zeros({H, W}, fopt), nr_o = torch::zeros({H, W, 3}, fopt);
+    auto keep_in = has_keep ? keep.contiguous() : torch::ones({1}, fopt);
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("geom_loss_forward")];
+            SETBUF(enc, z_img, 0); SETBUF(enc, n_sum, 1); SETBUF(enc, alpha, 2);
+            SETBUF(enc, n_d, 3); SETBUF(enc, gt_depth, 4); SETBUF(enc, gt_norm, 5);
+            SETBUF(enc, num, 6); SETBUF(enc, cnt, 7);
+            SETBUF(enc, depth_o, 8); SETBUF(enc, nr_o, 9);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:10];
+            uint sp = (uint)space;
+            [enc setBytes:&sp length:sizeof(sp) atIndex:11];
+            SETBUF(enc, keep_in, 12);
+            uint hk = has_keep ? 1u : 0u;
+            [enc setBytes:&hk length:sizeof(hk) atIndex:13];
+            [enc dispatchThreads:MTLSizeMake(NG * TG, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(TG, 1, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {num, cnt, depth_o, nr_o};
+}
+
+std::vector<torch::Tensor> geom_loss_backward(
+    torch::Tensor depth_i, torch::Tensor nr_i, torch::Tensor n_sum, torch::Tensor alpha,
+    torch::Tensor n_d, torch::Tensor gt_depth, torch::Tensor gt_norm,
+    torch::Tensor keep, int64_t space, std::vector<double> wts, std::vector<double> invN)
+{
+    const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
+    const bool has_keep = keep.numel() > 0;
+    auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(alpha.device());
+    auto g_depth = torch::zeros({H, W}, fopt);
+    auto g_nd = torch::zeros({H, W, 3}, fopt), g_nsum = torch::zeros({H, W, 3}, fopt);
+    auto keep_in = has_keep ? keep.contiguous() : torch::ones({1}, fopt);
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("geom_loss_backward")];
+            SETBUF(enc, depth_i, 0); SETBUF(enc, nr_i, 1); SETBUF(enc, n_sum, 2);
+            SETBUF(enc, alpha, 3); SETBUF(enc, n_d, 4);
+            SETBUF(enc, gt_depth, 5); SETBUF(enc, gt_norm, 6);
+            SETBUF(enc, g_depth, 7); SETBUF(enc, g_nd, 8); SETBUF(enc, g_nsum, 9);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:10];
+            uint sp = (uint)space;
+            [enc setBytes:&sp length:sizeof(sp) atIndex:11];
+            float w[4] = {(float)wts[0], (float)wts[1], (float)wts[2], 0.f};
+            [enc setBytes:w length:sizeof(w) atIndex:12];
+            float n[4] = {(float)invN[0], (float)invN[1], (float)invN[2], 0.f};
+            [enc setBytes:n length:sizeof(n) atIndex:13];
+            SETBUF(enc, keep_in, 14);
+            uint hk = has_keep ? 1u : 0u;
+            [enc setBytes:&hk length:sizeof(hk) atIndex:15];
+            [enc dispatchThreads:MTLSizeMake(NPIX, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {g_depth, g_nd, g_nsum};
+}
+
 torch::Tensor ssim_tail_forward(torch::Tensor b, int64_t H, int64_t W) {
     checkMPS(b, "blurred stack");
     TORCH_CHECK(b.numel() == 15 * H * W, "ssim_tail_forward: expected 15*H*W");
@@ -491,6 +655,10 @@ std::vector<torch::Tensor> bin_write(torch::Tensor uv, torch::Tensor rxy,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("init", &init, "compile the Metal library from source");
     m.def("rasterize_forward", &rasterize_forward);
+    m.def("nfd_forward", &nfd_forward);
+    m.def("nfd_backward", &nfd_backward);
+    m.def("geom_loss_forward", &geom_loss_forward);
+    m.def("geom_loss_backward", &geom_loss_backward);
     m.def("rasterize_backward", &rasterize_backward);
     m.def("pack_intersections", &pack_intersections);
     m.def("preprocess_forward", &preprocess_forward);

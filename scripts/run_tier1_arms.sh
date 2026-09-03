@@ -23,6 +23,14 @@
 # warning was already here and was not enough: the edit and the run were requested hours
 # apart. The snapshot makes it structural.
 #
+# FREEZE EVERYTHING A RUNNING JOB READS, NOT JUST THIS FILE. The snapshot above protects
+# the script, and that rule proved TOO NARROW on 2026-09-03: equivalence gate #2 launches
+# six sequential training processes, each of which recompiles metal_gauss/csrc/*.metal at
+# startup, and editing that source mid-gate would have split the arms across two binaries
+# -- in a gate whose whole purpose is comparing two binaries. Caught before any arm wrote a
+# report, but nothing enforced it. A long job's inputs include the launch script, shaders
+# it JIT-compiles, config files, prior directories and datasets. Freeze all of them.
+#
 # ORDERING IS LOAD-BEARING AND ENFORCED HERE, NOT BY OPERATOR DISCIPLINE. Floors are run,
 # scored, and WRITTEN before any treatment arm is scored. Checkpoint D verifies this by file
 # mtime, so the phases must not be reordered or parallelised. Never run two scenes at once

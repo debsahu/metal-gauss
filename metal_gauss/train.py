@@ -26,6 +26,7 @@ import torch
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
 from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
+                                      fused_geometry_losses,
                                       normal_loss, normals_from_depth, splat_normals_cam)
 from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
@@ -355,6 +356,12 @@ def geometry_aux(means, quats, scales, viewmat):
     return [n_cam, z]
 
 
+def _use_fused_loss() -> bool:
+    """`MG_TORCH_LOSS=1` forces the pre-Task-17 torch loss chain, for equivalence gating."""
+    import os
+    return os.environ.get("MG_TORCH_LOSS", "0") in ("0", "", "false", "False")
+
+
 def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
     """The depth / normal / depth-normal terms over one view's aux maps.
 
@@ -367,6 +374,22 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
     depths between 0 and the truth, and a smaller depth is a different surface, not a less
     certain one.
     """
+    # Fused path: one pass over the image for the alpha divide, the normal normalise and
+    # all three loss numerators, replacing ~30 torch elementwise dispatches. `keep` is
+    # supported: the kernel multiplies both priors and the dn alpha by it, exactly as the
+    # torch path does, so masked datasets (every Osmo cube-face scene) take it too.
+    if (_use_fused_loss()
+            and gt_depth is not None and gt_normal is not None
+            and args.depth_loss_weight > 0 and args.normal_loss_weight > 0
+            and args.depth_normal_weight > 0
+            and alpha.device.type == "mps" and aux_maps[0].dtype == torch.float32):
+        n_img, z_img = aux_maps
+        vals = fused_geometry_losses(
+            z_img, n_img, alpha, gt_depth, gt_normal,
+            (K[0, 0].item(), K[1, 1].item(), K[0, 2].item(), K[1, 2].item()),
+            keep=keep, space=args.depth_loss_space)
+        return {"depth": vals[0], "normal": vals[1], "depth_normal": vals[2]}
+
     alpha_d = alpha.detach()
     n_img, z_img = aux_maps
     n_img = n_img / alpha_d.clamp_min(1e-10)[..., None]

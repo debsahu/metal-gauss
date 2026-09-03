@@ -22,6 +22,14 @@ kernel void rasterize_forward(
     device float*         out_T         [[buffer(8)]],
     device int*           out_ncontrib  [[buffer(9)]],
     constant uint4&       dims          [[buffer(10)]],  // W, H, tile, tiles_x
+    // Auxiliary channels, composited in THIS pass rather than by re-walking the tile
+    // lists in another one. Task 11 measured the two extra Tier 1 passes at 115.57 ms of
+    // which only 29.3 ms is forward: the rest is their separate BACKWARD traversals.
+    // `has_aux` is a threadgroup-uniform branch, so the aux-off path pays a predicted
+    // branch and no bandwidth.
+    device const float4*  aux           [[buffer(11)]],  // 4 per gaussian
+    device float4*        out_aux       [[buffer(12)]],  // (H, W, 4)
+    constant uint&        has_aux       [[buffer(13)]],
     uint2 gid  [[thread_position_in_grid]],
     uint2 lid  [[thread_position_in_threadgroup]],
     uint2 tgs  [[threads_per_threadgroup]])
@@ -46,10 +54,12 @@ kernel void rasterize_forward(
     threadgroup float3 s_conic[STAGE];
     threadgroup float  s_op[STAGE];
     threadgroup float3 s_col[STAGE];
+    threadgroup float4 s_aux[STAGE];
     threadgroup atomic_int s_done;
 
     float  T   = 1.0f;
     float3 acc = float3(0.0f);
+    float4 acc_aux = float4(0.0f);
     float  a_acc = 0.0f;
     int    stop = start;
     bool   done = !inimg;
@@ -67,6 +77,7 @@ kernel void rasterize_forward(
             s_conic[t] = float3(conic[g]);
             s_op[t] = opacity[g];
             s_col[t] = float3(color[g]);
+            if (has_aux) s_aux[t] = aux[g];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -81,6 +92,7 @@ kernel void rasterize_forward(
                 if (alpha < 1.0f / 255.0f) continue;
                 const float w = alpha * T;
                 acc   += w * s_col[j];
+                if (has_aux) acc_aux += w * s_aux[j];
                 a_acc += w;
                 T     *= (1.0f - alpha);
                 stop   = base + j + 1;
@@ -102,6 +114,9 @@ kernel void rasterize_forward(
     // backward can start its reverse walk directly instead of re-walking the
     // whole list forward to find where the forward pass ended.
     out_ncontrib[o] = stop;
+    // Uncovered pixels keep exactly 0 in every aux channel: "no measurement here", never
+    // a background constant. A depth map with a background baked in reads as a surface.
+    if (has_aux) out_aux[o] = acc_aux;
 }
 
 // Backward pass. Walks the same list BACK to front, reconstructing the
@@ -136,6 +151,19 @@ kernel void rasterize_backward(
     // the reduction, the sqrt and a tenth atomic ran on EVERY backward,
     // including every run that discards the statistic -- which is the default.
     constant uint&        want_absgrad  [[buffer(16)]],
+    // Auxiliary channels. THEIR GRADIENT REACHES THE VALUE ONLY, NEVER THE BLENDING
+    // WEIGHTS. The RGB lanes below fold into `dL_dalpha`; the aux lanes deliberately do
+    // not, mirroring Brush `rasterize_backwards.rs:536-563`, which routes the depth
+    // channel to `grad.depth += vis * v_o_d` and DROPS its `dot_rgb` term so a geometry
+    // loss cannot lower its error by changing opacity or footprint instead of moving the
+    // gaussian. Tier 1 achieved this by detaching uv/conic/opacity for its separate aux
+    // passes; inside one fused kernel the separation must be explicit, because the RGB
+    // lanes legitimately need the coupling the aux lanes must not have.
+    // Getting it wrong reproduces the needle collapse (aspect 0.2957 -> 0.0659).
+    device const float4*  aux           [[buffer(17)]],  // 4 per gaussian
+    device const float4*  grad_aux      [[buffer(18)]],  // (H, W, 4)
+    device atomic_float*  d_aux         [[buffer(19)]],  // 4 per gaussian
+    constant uint&        has_aux       [[buffer(20)]],
     uint2 gid  [[thread_position_in_grid]],
     uint2 lid  [[thread_position_in_threadgroup]],
     uint2 tgs  [[threads_per_threadgroup]],
@@ -154,6 +182,7 @@ kernel void rasterize_backward(
 
     const float3 dL_drgb = inimg ? float3(grad_rgb[o]) : float3(0);
     const float  dL_da   = inimg ? grad_alpha[o] : 0.0f;
+    const float4 dL_daux = (inimg && has_aux) ? grad_aux[o] : float4(0.0f);
     // Forward stored its stop as a list index (Taming-3DGS style).
     const int my_stop = inimg ? n_contrib[o] : start;
 
@@ -168,6 +197,7 @@ kernel void rasterize_backward(
     threadgroup float3 s_conic[STAGE];
     threadgroup float  s_op[STAGE];
     threadgroup float3 s_col[STAGE];
+    threadgroup float4 s_aux[STAGE];
 
     float  T = inimg ? final_T[o] : 1.0f;
     float3 suffix = float3(0.0f);
@@ -184,6 +214,7 @@ kernel void rasterize_backward(
             s_conic[t] = float3(conic[g]);
             s_op[t] = opacity[g];
             s_col[t] = float3(color[g]);
+            if (has_aux) s_aux[t] = aux[g];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -204,11 +235,17 @@ kernel void rasterize_backward(
                                 && (alpha >= 1.0f / 255.0f);
 
             float3 dc = float3(0);
+            float4 daux = float4(0);
             float  dux = 0, duy = 0, dcx = 0, dcy = 0, dcz = 0, dop = 0;
             if (active) {
                 T = T / max(1.0f - alpha, 1e-8f);
                 const float w = alpha * T;
                 dc = w * dL_drgb;
+                // VALUE gradient only. The matching
+                //     dot(dL_daux, T * s_aux[j] - suffix_aux / (1 - alpha))
+                // term is NOT added to dL_dalpha below, on purpose. No aux suffix is
+                // accumulated either, because nothing consumes one.
+                if (has_aux) daux = w * dL_daux;
                 float dL_dalpha = dot(dL_drgb, T * s_col[j] - suffix * (1.0f / max(1.0f - alpha, 1e-8f)))
                                 + dL_da * (T - suffix_a * (1.0f / max(1.0f - alpha, 1e-8f)));
                 suffix   += alpha * T * s_col[j];
@@ -238,6 +275,13 @@ kernel void rasterize_backward(
             // safe here and why a per-lane condition would not be.
             float r_abs = 0.0f;
             if (want_absgrad) r_abs = simd_sum(sqrt(dux * dux + duy * duy));
+            // simd_sum is convergent, so these stay outside any per-lane branch;
+            // `has_aux` is dispatch-uniform, exactly like `want_absgrad` above.
+            float r_a0 = 0.0f, r_a1 = 0.0f, r_a2 = 0.0f, r_a3 = 0.0f;
+            if (has_aux) {
+                r_a0 = simd_sum(daux.x); r_a1 = simd_sum(daux.y);
+                r_a2 = simd_sum(daux.z); r_a3 = simd_sum(daux.w);
+            }
             if (simd_lane == 0 && (r_cx != 0 || r_cy != 0 || r_cz != 0 || r_ux != 0
                                    || r_uy != 0 || r_k0 != 0 || r_k1 != 0 || r_k2 != 0
                                    || r_op != 0)) {
@@ -254,6 +298,17 @@ kernel void rasterize_backward(
                 if (want_absgrad && r_abs != 0)
                     atomic_fetch_add_explicit(&d_absuv[g], r_abs,
                                               memory_order_relaxed);
+            }
+            // Separate lane-0 block so the RGB predicate above is untouched: adding aux
+            // terms to it would change how often the RGB atomics fire and perturb their
+            // (already order-dependent) sums for no reason.
+            if (has_aux && simd_lane == 0
+                && (r_a0 != 0 || r_a1 != 0 || r_a2 != 0 || r_a3 != 0)) {
+                const int g = gauss_ids[i];
+                atomic_fetch_add_explicit(&d_aux[4*g+0], r_a0, memory_order_relaxed);
+                atomic_fetch_add_explicit(&d_aux[4*g+1], r_a1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&d_aux[4*g+2], r_a2, memory_order_relaxed);
+                atomic_fetch_add_explicit(&d_aux[4*g+3], r_a3, memory_order_relaxed);
             }
         }
     }
