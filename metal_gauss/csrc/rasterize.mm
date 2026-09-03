@@ -138,14 +138,22 @@ std::vector<torch::Tensor> pack_intersections(
 
 std::vector<torch::Tensor> rasterize_backward(
     torch::Tensor uv, torch::Tensor conic, torch::Tensor opacity, torch::Tensor color,
+    torch::Tensor aux,
     torch::Tensor gauss_ids, torch::Tensor tile_offsets,
     torch::Tensor final_T, torch::Tensor n_contrib,
-    torch::Tensor grad_rgb, torch::Tensor grad_alpha,
+    torch::Tensor grad_rgb, torch::Tensor grad_alpha, torch::Tensor grad_aux,
     int64_t W, int64_t H, int64_t tile, int64_t tiles_x,
     bool want_absgrad)
 {
     auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(uv.device());
     const int64_t N = uv.size(0);
+    const bool has_aux = aux.numel() > 0 && grad_aux.numel() > 0;
+    if (has_aux) {
+        TORCH_CHECK(aux.dim() == 2 && aux.size(1) == 4 && aux.size(0) == N,
+                    "aux must be (N,4); got ", aux.sizes());
+        TORCH_CHECK(grad_aux.dim() == 3 && grad_aux.size(2) == 4,
+                    "grad_aux must be (H,W,4); got ", grad_aux.sizes());
+    }
     auto d_uv      = torch::zeros({N, 2}, fopt);
     auto d_conic   = torch::zeros({N, 3}, fopt);
     auto d_opacity = torch::zeros({N}, fopt);
@@ -154,9 +162,12 @@ std::vector<torch::Tensor> rasterize_backward(
     // Allocated at full size only when asked for; the kernel skips the
     // reduction, the sqrt and the tenth atomic otherwise.
     auto d_absuv   = torch::zeros({want_absgrad ? N : 1}, fopt);
+    auto d_aux     = torch::zeros({has_aux ? N : 1, 4}, fopt);
 
     grad_rgb = grad_rgb.contiguous();
     grad_alpha = grad_alpha.contiguous();
+    auto aux_in  = has_aux ? aux.contiguous() : torch::zeros({1, 4}, fopt);
+    auto gaux_in = has_aux ? grad_aux.contiguous() : torch::zeros({1, 1, 4}, fopt);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
@@ -175,13 +186,18 @@ std::vector<torch::Tensor> rasterize_backward(
             SETBUF(enc, d_absuv, 15);
             uint wa = want_absgrad ? 1u : 0u;
             [enc setBytes:&wa length:sizeof(wa) atIndex:16];
+            SETBUF(enc, aux_in, 17);     SETBUF(enc, gaux_in, 18);
+            SETBUF(enc, d_aux, 19);
+            uint ha = has_aux ? 1u : 0u;
+            [enc setBytes:&ha length:sizeof(ha) atIndex:20];
             [enc dispatchThreads:MTLSizeMake(W, H, 1)
               threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
             [enc endEncoding];
             torch::mps::commit();
         });
     }
-    return {d_uv, d_conic, d_opacity, d_color, d_absuv};
+    return {d_uv, d_conic, d_opacity, d_color, d_absuv,
+            has_aux ? d_aux : torch::empty({0, 4}, fopt)};
 }
 
 void init(const std::string& src) { initLibrary(src); }

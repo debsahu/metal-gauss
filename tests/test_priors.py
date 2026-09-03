@@ -346,9 +346,35 @@ def test_pyramid_cache_cannot_serve_one_view_the_data_of_another(tmp_path):
             if collisions >= 3:
                 break
         del b
-    assert collisions > 0, (
-        "no address reuse in 1000 trials -- this test can no longer exercise the defect "
-        "it was written for; do not treat its passing as evidence")
+    if collisions == 0:
+        pytest.skip(
+            "no address reuse in 1000 trials, so this test could not exercise the defect. "
+            "It is allocator-state dependent and passes alone but not always inside the "
+            "full suite. The DETERMINISTIC pin is "
+            "test_pyramid_cache_lives_on_the_view_which_is_why_reuse_is_harmless.")
+
+
+def test_pyramid_cache_lives_on_the_view_which_is_why_reuse_is_harmless(tmp_path):
+    """The deterministic half of the address-reuse defect.
+
+    The reproduction above needs CPython to recycle a freed object's address, which is
+    allocator-state dependent and therefore cannot be relied on inside a full suite. This
+    one always runs: it pins the PROPERTY that makes reuse harmless -- the downscale cache
+    is stored ON the View, so it dies with the view and can never be reached by a later
+    object that happens to land at the same address. A module-level dict keyed by `id(v)`
+    cannot satisfy this."""
+    from metal_gauss import dataset as ds
+    from metal_gauss.dataset import View, downscaled
+    a = View("a", torch.zeros(8, 8, 3, dtype=torch.uint8), torch.eye(3), torch.eye(4),
+             normal=torch.ones(8, 8, 3, dtype=torch.uint8))
+    b = View("b", torch.zeros(8, 8, 3, dtype=torch.uint8), torch.eye(3), torch.eye(4))
+    assert a._pyramid == {} and b._pyramid == {}
+    downscaled(a, 2)
+    assert set(a._pyramid) == {2}, "the cache must be stored on the view it belongs to"
+    assert b._pyramid == {}, "another view's cache must not be populated"
+    assert a._pyramid[2].name == "a" and a._pyramid[2].normal is not None
+    assert not hasattr(ds, "_PYRAMID"), \
+        "a module-level cache keyed by id(v) is the defect; it must not come back"
 
 
 # ------------------------------------------------------------------ ply seed init

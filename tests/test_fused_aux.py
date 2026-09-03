@@ -124,3 +124,118 @@ def test_fused_aux_is_zero_where_nothing_is_covered():
     uncovered = alpha < 1e-6
     assert uncovered.any(), "need an uncovered pixel for this test to mean anything"
     assert aux_f[uncovered].abs().max().item() == 0.0
+
+
+# ---------------------------------------------------------------- Task 14: adjoint
+
+def _fwd(sc, aux):
+    from metal_gauss import metal_backend as mb
+    return mb.rasterize_fused_forward(
+        sc["uv"], sc["conic"], sc["opac"], sc["color"], aux,
+        sc["gauss_ids"], sc["tile_offsets"], sc["W"], sc["H"], sc["tile"], sc["tiles_x"])
+
+
+def _bwd(sc, aux, T, ncontrib, g_rgb, g_alpha, g_aux):
+    from metal_gauss import metal_backend as mb
+    ext = mb._load()
+    return ext.rasterize_backward(
+        sc["uv"], sc["conic"], sc["opac"], sc["color"], aux,
+        sc["gauss_ids"], sc["tile_offsets"], T, ncontrib, g_rgb, g_alpha, g_aux,
+        sc["W"], sc["H"], sc["tile"], sc["tiles_x"], False)
+
+
+def _rel(a, b):
+    return ((a - b).abs().max() / b.abs().max().clamp_min(1e-8)).item()
+
+
+def test_fused_aux_value_gradient_matches_a_separate_pass():
+    """d_aux must equal what a separate rasterisation of the same values produces as
+    d_color: the aux VALUE gradient is `w * dL_daux` with `w = alpha*T`, exactly the
+    colour lanes' form. Atomics make the reduction order uncontrolled, so this is a tight
+    relative bound rather than bit-equality (unlike the forward, which has no atomics)."""
+    from metal_gauss import metal_backend as mb
+    sc = _scene(seed=21)
+    torch.manual_seed(0)
+    aux = torch.randn(sc["n"], 4, device="mps")
+    g_rgb = torch.randn(sc["H"], sc["W"], 3, device="mps")
+    g_alpha = torch.randn(sc["H"], sc["W"], device="mps")
+    g_aux = torch.randn(sc["H"], sc["W"], 4, device="mps")
+    _, _, T, nc, _ = _fwd(sc, aux)
+    out = _bwd(sc, aux, T, nc, g_rgb, g_alpha, g_aux)
+    d_aux = out[5]
+    assert d_aux.shape == (sc["n"], 4)
+
+    # Reference: a separate 3-channel pass carrying aux[:, :3], with the SAME grad.
+    col3 = aux[:, :3].contiguous()
+    _, _, T3, nc3, _ = mb.rasterize_fused_forward(
+        sc["uv"], sc["conic"], sc["opac"], col3, torch.empty(0, 4, device="mps"),
+        sc["gauss_ids"], sc["tile_offsets"], sc["W"], sc["H"], sc["tile"], sc["tiles_x"])
+    ref = mb._load().rasterize_backward(
+        sc["uv"], sc["conic"], sc["opac"], col3, torch.empty(0, 4, device="mps"),
+        sc["gauss_ids"], sc["tile_offsets"], T3, nc3,
+        g_aux[..., :3].contiguous(), torch.zeros_like(g_alpha),
+        torch.empty(0, 4, device="mps"),
+        sc["W"], sc["H"], sc["tile"], sc["tiles_x"], False)[3]
+    assert _rel(d_aux[:, :3], ref) < 1e-5, _rel(d_aux[:, :3], ref)
+
+
+def test_aux_gradients_DO_NOT_reach_the_blending_weights():
+    """THE test for this tier. RGB lanes fold into the alpha VJP; AUX LANES MUST NOT.
+
+    Brush drops the `dot_rgb` depth term deliberately (rasterize_backwards.rs:536-563) so
+    a geometry loss cannot lower its error by changing opacity or footprint instead of
+    moving the gaussian. Tier 1 got this by detaching uv/conic/opacity for the separate
+    aux passes; inside ONE fused kernel that separation has to be explicit, because the
+    RGB lanes legitimately need the coupling the aux lanes must not have.
+
+    Getting it wrong reproduces the needle collapse: playroom R1 pre-fix went from
+    in-plane aspect 0.2957 to 0.0659 and needle fraction 16.6% to 56.8%.
+
+    So: hold the RGB gradient fixed, drive the aux gradient from zero to large, and the
+    weight gradients must not move at all."""
+    sc = _scene(seed=23)
+    torch.manual_seed(1)
+    aux = torch.randn(sc["n"], 4, device="mps")
+    g_rgb = torch.randn(sc["H"], sc["W"], 3, device="mps")
+    g_alpha = torch.randn(sc["H"], sc["W"], device="mps")
+    _, _, T, nc, _ = _fwd(sc, aux)
+    zero_aux = torch.zeros(sc["H"], sc["W"], 4, device="mps")
+    big_aux = torch.randn(sc["H"], sc["W"], 4, device="mps") * 100.0
+    a = _bwd(sc, aux, T, nc, g_rgb, g_alpha, zero_aux)
+    b = _bwd(sc, aux, T, nc, g_rgb, g_alpha, big_aux)
+    for i, name in ((0, "d_uv"), (1, "d_conic"), (2, "d_opacity")):
+        assert a[i].abs().max() > 0, f"{name} is all zero; the test would be vacuous"
+        r = _rel(b[i], a[i])
+        assert r < 1e-6, (
+            f"a 100x aux gradient moved {name} by rel {r:.3e} -- the aux lanes are folding "
+            f"into the alpha VJP, which is the needle-collapse coupling")
+    assert b[5].abs().max() > 0, "aux gradient must still reach the aux VALUE"
+
+
+def test_rgb_gradients_are_unchanged_by_the_presence_of_aux():
+    """The RGB adjoint must be untouched by the new lanes, or every photometric result
+    silently depends on whether geometry terms were enabled."""
+    sc = _scene(seed=25)
+    torch.manual_seed(2)
+    g_rgb = torch.randn(sc["H"], sc["W"], 3, device="mps")
+    g_alpha = torch.randn(sc["H"], sc["W"], device="mps")
+    aux = torch.randn(sc["n"], 4, device="mps")
+    _, _, T, nc, _ = _fwd(sc, aux)
+    with_aux = _bwd(sc, aux, T, nc, g_rgb, g_alpha,
+                    torch.randn(sc["H"], sc["W"], 4, device="mps"))
+    no_aux = _bwd(sc, torch.empty(0, 4, device="mps"), T, nc, g_rgb, g_alpha,
+                  torch.empty(0, 4, device="mps"))
+    for i, name in ((0, "d_uv"), (1, "d_conic"), (2, "d_opacity"), (3, "d_color")):
+        r = _rel(with_aux[i], no_aux[i])
+        assert r < 1e-6, f"{name} changed when aux was enabled: rel {r:.3e}"
+
+
+def test_zero_aux_gradient_produces_zero_aux_value_gradient():
+    sc = _scene(seed=27)
+    aux = torch.randn(sc["n"], 4, device="mps")
+    _, _, T, nc, _ = _fwd(sc, aux)
+    out = _bwd(sc, aux, T, nc,
+               torch.randn(sc["H"], sc["W"], 3, device="mps"),
+               torch.randn(sc["H"], sc["W"], device="mps"),
+               torch.zeros(sc["H"], sc["W"], 4, device="mps"))
+    assert out[5].abs().max().item() == 0.0

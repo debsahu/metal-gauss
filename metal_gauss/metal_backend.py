@@ -304,10 +304,12 @@ class _RasterizeMetal(torch.autograd.Function):
         ext = _load()
         uv, conic, opacity, color, gauss_ids, tile_offsets, T, ncontrib = ctx.saved_tensors
         W, H, tile, tiles_x = ctx.dims
-        d_uv, d_conic, d_opacity, d_color, d_absuv = ext.rasterize_backward(
-            uv, conic, opacity, color, gauss_ids, tile_offsets, T, ncontrib,
-            grad_rgb.contiguous(), grad_alpha.contiguous(), W, H, tile, tiles_x,
-            ctx.absgrad_out is not None)
+        d_uv, d_conic, d_opacity, d_color, d_absuv, _d_aux = ext.rasterize_backward(
+            uv, conic, opacity, color, torch.empty(0, 4, device=uv.device),
+            gauss_ids, tile_offsets, T, ncontrib,
+            grad_rgb.contiguous(), grad_alpha.contiguous(),
+            torch.empty(0, device=uv.device),
+            W, H, tile, tiles_x, ctx.absgrad_out is not None)
         if ctx.absgrad_out is not None:
             ctx.absgrad_out[:d_absuv.numel()] += d_absuv
         return (d_uv, d_conic, d_opacity, d_color,
