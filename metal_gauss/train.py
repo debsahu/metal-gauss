@@ -302,6 +302,41 @@ def geometry_coverage_warning(cov: dict) -> str | None:
             "says so (see CLAUDE.md Stage 3, '24 of 276 faces trained photometric-only').")
 
 
+def shape_metrics(log_scales: torch.Tensor) -> dict:
+    """In-plane aspect and needle fraction: WHAT the splats became.
+
+    Sorted activated scales smin <= smid <= smax. `smax` is the surface extent, `smid` the
+    other in-plane axis, `smin` the thickness. Flatten drives smin down and that is a DISC,
+    correctly reported as healthy by thin-axis, opacity and dark fraction. A NEEDLE is smid
+    collapsing while smax holds -- and none of those three metrics can see it. P-GEOM's R1
+    read healthier than baseline on all of them while smid fell 6.62 -> 1.35 mm at smax
+    ~23 mm and the needle fraction went 16.6% -> 56.8%. This is that missing row.
+    """
+    s = torch.exp(log_scales.detach()).sort(dim=-1).values
+    aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
+    return {"aspect_p50": float(aspect.median()),
+            "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
+            "smid_p50_mm": float(s[:, 1].median() * 1000.0),
+            "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
+
+
+@torch.no_grad()
+def depth_normal_floor(gt_depth, gt_normal, alpha, K) -> float | None:
+    """What `depth_normal` could score on this data at all: the same term evaluated on the
+    PRIOR depth and PRIOR normals, i.e. the value a perfect render would reach.
+
+    The term is `1 - cos` between normals differentiated from a depth map and a normal
+    field. Differentiating a discrete depth map is never exact, so the floor is not 0 --
+    on P-GEOM it is 0.04-0.11. A term sitting at 7-15x its own floor AND CLIMBING is
+    broken, which is what R1 did (0.70-0.81, rising) and what nothing in the log said.
+    """
+    if gt_depth is None or gt_normal is None:
+        return None
+    n_d = normals_from_depth(gt_depth, K[0, 0].item(), K[1, 1].item(),
+                             K[0, 2].item(), K[1, 2].item())
+    return float(depth_normal_loss(n_d, gt_normal, alpha))
+
+
 def geometry_aux(means, quats, scales, viewmat):
     """The two aux attribute maps the geometry recipe composites: camera-frame splat
     normals and view-space z.
@@ -562,6 +597,10 @@ def train(args, scene: Scene | None = None) -> dict:
             gt_n = decode_normal(v.normal.to(device)) if v.normal is not None else None
             g = geometry_terms(args, info["aux"], alpha, v.K, gt_d, gt_n, keep)
             terms.update(g)
+            if args.depth_normal_weight > 0:
+                fl = depth_normal_floor(gt_d, gt_n, alpha.detach(), v.K)
+                if fl is not None:
+                    terms["dn_floor"] = fl
             for name, w in (("depth", args.depth_loss_weight),
                             ("normal", args.normal_loss_weight),
                             ("depth_normal", args.depth_normal_weight)):
@@ -698,12 +737,19 @@ def train(args, scene: Scene | None = None) -> dict:
             warn = mask_void_warning(masks_supplied, ev["coverage"])
             if warn:
                 print(warn, flush=True)
-            term_vals = {k: float(t.detach()) for k, t in terms.items()}
+            term_vals = {k: float(t.detach() if torch.is_tensor(t) else t)
+                         for k, t in terms.items()}
             print("  terms  " + "  ".join(f"{k} {t:.5f}" for k, t in term_vals.items()),
+                  flush=True)
+            shape = shape_metrics(p["log_scales"][:active])
+            print(f"  shape  aspect_p50 {shape['aspect_p50']:.4f}  "
+                  f"needle_frac {shape['needle_frac']:.4f}  "
+                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm",
                   flush=True)
             log.append({"step": step, "psnr": ev["psnr"],
                         "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
-                        "wall_s": round(dt, 1), "active": active, "terms": term_vals})
+                        "wall_s": round(dt, 1), "active": active, "terms": term_vals,
+                        "shape": shape})
 
     out = _run_report(args, log, time.perf_counter() - t0, active, env=env)
     out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
@@ -871,6 +917,7 @@ def _run_report(args, log, wall_s, active, env=None):
             "psnr_masked": log[-1].get("psnr_masked") if log else None,
             "coverage": log[-1].get("coverage") if log else None,
             "terms": log[-1].get("terms") if log else None,
+            "shape": log[-1].get("shape") if log else None,
             "wall_s": round(wall_s, 1),
             "n_splats": int(active),
             "ms_per_step": round(ms, 2) if ms else None,

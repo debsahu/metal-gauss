@@ -351,7 +351,11 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step():
 
     def make(name):
         def spy(*a, **kw):
-            calls[name] += 1
+            # Count only calls that can REACH THE TOTAL. Diagnostics -- the depth-normal
+            # floor, which is the same term evaluated on the priors -- run under
+            # torch.no_grad() and build no graph, so they are not multiplicity.
+            if torch.is_grad_enabled():
+                calls[name] += 1
             return originals[name](*a, **kw)
         return spy
 
@@ -369,8 +373,9 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step():
     for name in watched:
         per_step = calls[name] / steps
         assert per_step == 1.0, (
-            f"{name} was evaluated {per_step} times per step, not once -- that term enters "
-            f"the total {per_step}x, so its effective weight is {per_step}x the flag")
+            f"{name} entered the differentiable graph {per_step} times per step, not once "
+            f"-- that term enters the total {per_step}x, so its effective weight is "
+            f"{per_step}x the flag")
 
 
 def test_run_report_uses_the_env_snapshot_it_is_given_not_a_fresh_git_query():
@@ -409,3 +414,67 @@ def test_train_snapshots_the_environment_before_it_starts_training():
     env = out["env"]
     assert env["started_at"] < env["finished_at"]
     assert env["git"] is None or len(env["git"]) >= 7
+
+
+def test_shape_metrics_measure_the_IN_PLANE_aspect_not_the_thinness():
+    """The instrument that was missing. Flatten legitimately drives the SMALLEST axis down
+    -- that is a disc, and thin-axis/opacity/dark all correctly report it as healthy. A
+    NEEDLE is the MIDDLE axis collapsing while the largest holds, and nothing in the
+    battery could see it: P-GEOM's R1 read healthier than baseline on all three of those
+    metrics while smid fell 6.62 -> 1.35 mm at constant smax.
+
+    So the ratio must be smid/smax. Using smin/smax instead would score a perfect disc as a
+    needle and this whole instrument would be noise."""
+    from metal_gauss.train import shape_metrics
+    disc = torch.log(torch.tensor([[0.001, 0.020, 0.020]] * 4))     # flat, NOT a needle
+    m = shape_metrics(disc)
+    assert m["aspect_p50"] == pytest.approx(1.0, rel=1e-5)
+    assert m["needle_frac"] == 0.0
+    needle = torch.log(torch.tensor([[0.001, 0.001, 0.020]] * 4))   # smid collapsed
+    n = shape_metrics(needle)
+    assert n["aspect_p50"] == pytest.approx(0.05, rel=1e-5)
+    assert n["needle_frac"] == 1.0
+    mixed = torch.log(torch.tensor([[0.001, 0.020, 0.020], [0.001, 0.001, 0.020]]))
+    assert shape_metrics(mixed)["needle_frac"] == pytest.approx(0.5)
+
+
+def test_shape_metrics_are_invariant_to_axis_order():
+    """The scales are unordered per splat; the metric must sort."""
+    from metal_gauss.train import shape_metrics
+    a = shape_metrics(torch.log(torch.tensor([[0.02, 0.001, 0.02]])))
+    b = shape_metrics(torch.log(torch.tensor([[0.001, 0.02, 0.02]])))
+    assert a["aspect_p50"] == pytest.approx(b["aspect_p50"])
+
+
+@mps
+def test_training_logs_shape_metrics_and_the_depth_normal_floor():
+    """Two instruments, both absent when the collapse happened.
+
+    `aspect_p50` / `needle_frac` say WHAT the splats became. `dn_floor` says what
+    `depth_normal` could achieve on this data at all: it is the same term evaluated on the
+    PRIOR depth and PRIOR normals, so it is the value a perfect render would score. A term
+    sitting far above its own floor and climbing is broken, and that should be legible
+    during training rather than in a post-mortem."""
+    from metal_gauss import train as T
+    out = T.train(_args(steps=6, eval_every=6, depth_normal_weight=0.05,
+                        depth_loss_weight=1.0, normal_loss_weight=0.2),
+                  scene=_synthetic_scene())
+    e = out["log"][-1]
+    for k in ("aspect_p50", "needle_frac"):
+        assert k in e["shape"] and math.isfinite(e["shape"][k]), k
+    assert 0.0 <= e["shape"]["needle_frac"] <= 1.0
+    assert "dn_floor" in e["terms"], "the depth-normal floor must be logged beside the term"
+    assert math.isfinite(e["terms"]["dn_floor"])
+    assert out["metrics"]["shape"] == e["shape"]
+
+
+@mps
+def test_depth_normal_floor_is_small_on_a_scene_whose_priors_are_exact():
+    """The synthetic wall is fronto-parallel with depth exactly 3.0 and normal exactly
+    (0,0,-1), so normals differentiated from the PRIOR depth agree with the PRIOR normals
+    almost perfectly. A floor near 1.0 would mean the floor itself is meaningless."""
+    from metal_gauss import train as T
+    out = T.train(_args(steps=4, eval_every=4, depth_normal_weight=0.05,
+                        depth_loss_weight=1.0, normal_loss_weight=0.2),
+                  scene=_synthetic_scene())
+    assert out["log"][-1]["terms"]["dn_floor"] < 0.05
