@@ -112,7 +112,11 @@ common=("${source_flags[@]}" --max-resolution "$MAXRES" --steps "$STEPS"
 
 arm_flags() {                    # extra flags per arm NAME
   case "$1" in
-    B0a|B0b|B0c|L0a|L0b|L0c) : ;;
+    # B0d: a baseline repeat on a LATER binary. Reusing floors measured on an earlier
+    # commit is only sound if the drift between them is inert for arms that carry no
+    # geometry weight -- which is an argument, not a measurement. B0d turns it into one:
+    # it must land inside the recorded B0a/B0b repeat floor.
+    B0a|B0b|B0c|B0d|L0a|L0b|L0c) : ;;
     F1|L1)  echo "--flatten-loss-weight 1.0" ;;
     L2)     echo "--depth-normal-weight 0.05" ;;
     # R1 moves THREE weights at once, deliberately: the recipe is tested as a unit, as

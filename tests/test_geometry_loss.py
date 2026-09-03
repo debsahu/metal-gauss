@@ -516,9 +516,16 @@ def test_plane_depth_needs_no_alpha_division():
 
 
 def test_plane_depth_zeroes_a_pixel_with_any_non_finite_channel():
-    """Sanitise on the JOINT finite mask, before any division. A NaN in n_x alone would
-    otherwise decay into a perfectly plausible axis-aligned plane and be reported VALID --
-    and a non-finite value masked out AFTER an op reappears as 0 * inf in that op's VJP."""
+    """JOINT SANITISATION EXISTS FOR THE BACKWARD, NOT THE FORWARD.
+
+    Sanitise on the joint finite mask, before any division. A NaN in n_x alone would
+    otherwise decay into a perfectly plausible axis-aligned plane and be reported VALID.
+
+    Do not "simplify" this to a per-channel mask on the strength of the forward behaviour:
+    with a per-channel mask every forward assertion below STILL PASSES, because the
+    validity cascade zeroes the bad pixel downstream anyway. Only the gradient check at the
+    end can see the difference -- a value masked out AFTER an op reappears as 0 * inf in
+    that op's VJP and poisons the map."""
     from metal_gauss.geometry_loss import plane_depth_from_features
     feat = _plane_feat(4, 4, (0.0, 0.0, -1.0), -3.0)
     feat[1, 1, 0] = float("nan")
