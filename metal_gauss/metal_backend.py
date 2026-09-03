@@ -511,18 +511,43 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     # in torch autograd and re-bins; its backward is the expensive half. Sharing the lists
     # is what makes the geometry recipe affordable here.
     #
-    # `absgrad_out` is deliberately NOT forwarded: it accumulates a densification signal,
-    # and an aux pass must not vote on which gaussians get split.
+    # THE BLENDING WEIGHTS ARE DETACHED; THE AUX VALUE IS NOT. This is the second half of
+    # Brush `ae2ec651`, and omitting it is what collapsed P-GEOM's R1 into needles.
+    #
+    # `rasterize_backwards.rs:536-563` routes the depth channel to the per-splat value
+    # (`grad.depth += vis * v_o_d`, with `vis` a constant) and deliberately DROPS its
+    # `dot_rgb` alpha-VJP term, so a geometry loss cannot reduce its error by changing
+    # opacity or footprint instead of moving the gaussian. Detaching uv / conic / opacity
+    # here reproduces that contract exactly: `means` still learns through `z`, `quats`
+    # still learn through the normal, and nothing reaches the weights.
+    #
+    # Why it matters: centre depth is constant across a footprint but wrong by
+    # +-r*tan(theta) at each end along the depth gradient, so with the weights live the
+    # cheapest descent is to SHRINK the splat along that axis -- measured at 38.6x
+    # flatten's per-splat thin-axis gradient for the depth term at 45 deg, and ~280-300x
+    # for depth-normal. The predicted signature, mid-axis collapse with s_max held, is
+    # what R1 produced: smid 6.62 -> 1.35 mm against smax 25.66 -> 22.44 mm.
+    #
+    # PORTING NOTE: gsplat, LichtFeld Studio and spirula all keep these weights LIVE.
+    # Brush alone detaches them. ("LFS detaches the blending weights" is repeated in
+    # ae2ec651's own message and in upstream PR #497, and is false -- LFS emits a live
+    # grad_alpha at depth_loss.cu:425-426; our fork retracted the attribution 2026-08-22.)
+    # CLAUDE.md's recipe weights were tuned under THIS contract, so the weights and the
+    # contract are coupled and must not be transplanted independently.
+    #
+    # `absgrad_out` is deliberately NOT forwarded either: it accumulates a densification
+    # signal, and an aux pass must not vote on which gaussians get split.
     #
     # No background is composited into an aux map. A background constant added to a depth
     # map turns "nothing here" into a plausible measurement.
     aux_maps = []
     if aux_colors:
+        uv_d, conic_d, opac_d = uv.detach(), conic.detach(), opacities.detach()
         for a in aux_colors:
             if a.shape != (means.shape[0], 3):
                 raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
             aux_maps.append(_RasterizeMetal.apply(
-                uv, conic, opacities, a.contiguous(), gauss_ids, tile_offsets,
+                uv_d, conic_d, opac_d, a.contiguous(), gauss_ids, tile_offsets,
                 W, H, tile, tiles_x, None)[0])
 
     if background is not None:

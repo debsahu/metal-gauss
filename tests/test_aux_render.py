@@ -37,7 +37,34 @@ def _z(m, vm):
     return (m @ vm[:3, :3].T + vm[:3, 3])[:, 2:3].expand(-1, 3)
 
 
-def test_aux_maps_and_gradients_match_oracle():
+def test_aux_maps_and_gradients_match_the_CLOSED_WEIGHT_PATH_oracle():
+    """The aux maps composite with DETACHED blending weights.
+
+    Brush `ae2ec651` ("Detach alpha from depth normalization...") does two things; this
+    project carried only the first. The detached DENOMINATOR (Checkpoint C's check 1) stops
+    the loss dividing by a differentiable coverage. The second half closes the WEIGHT path:
+    `rasterize_backwards.rs:536-563` routes the depth channel to the per-splat value
+    (`grad.depth += vis * v_o_d`) but deliberately drops its `dot_rgb` alpha-VJP term, so
+    depth error cannot reduce itself by changing opacity or footprint instead of moving.
+
+    With the weights live, centre depth is constant across a footprint but wrong by
+    +-r*tan(theta) at each end along the depth gradient, so the cheapest descent is to
+    SHRINK the splat along that axis. Measured: at 45 deg the depth term alone drives the
+    in-plane downhill axis at 38.6x flatten's per-splat thin-axis gradient, and
+    depth-normal at ~280-300x. Predicted signature -- mid-axis collapse with s_max held --
+    is exactly what P-GEOM's R1 produced (smid 6.62 -> 1.35 mm, smax 25.66 -> 22.44 mm).
+
+    THIS TEST PREVIOUSLY ASSERTED THE OPEN PATH WAS CORRECT, so the suite was pinning the
+    bug. The oracle now detaches the geometry inputs of the aux renders while keeping the
+    aux VALUE live, which is the contract the Metal path must match.
+
+    NOTE for anyone porting weights: gsplat, LichtFeld Studio and spirula all keep the
+    blending weights LIVE; Brush alone detaches them. ("LFS detaches the blending weights"
+    is false -- LFS emits a live grad_alpha at depth_loss.cu:425-426 -- and our own fork
+    retracted that attribution on 2026-08-22.) CLAUDE.md's recipe weights were therefore
+    tuned in the one trainer where these terms cannot touch footprints; the weights and
+    this contract are coupled and do not transfer independently.
+    """
     W, H = 64, 48
     K = _K(W, H)
     vm = torch.eye(4)
@@ -53,10 +80,12 @@ def test_aux_maps_and_gradients_match_oracle():
         else:
             rgb, alpha, _ = render(L["m"], L["q"], L["s"], L["o"], L["sh"], K.to("mps"),
                                    vmd, W, H, sh_degree=3, backend="torch_ref")
-            nrm = render(L["m"], L["q"], L["s"], L["o"], None, K.to("mps"), vmd, W, H,
+            # Closed weight path: the PROJECTION inputs are detached, the aux VALUE is not.
+            det = (L["m"].detach(), L["q"].detach(), L["s"].detach(), L["o"].detach())
+            nrm = render(*det, None, K.to("mps"), vmd, W, H,
                          colors=_normals(L["m"], L["q"], L["s"], vmd),
                          backend="torch_ref", background=None)[0]
-            dep = render(L["m"], L["q"], L["s"], L["o"], None, K.to("mps"), vmd, W, H,
+            dep = render(*det, None, K.to("mps"), vmd, W, H,
                          colors=_z(L["m"], vmd), backend="torch_ref", background=None)[0]
         depth = dep[..., 0] / alpha.detach().clamp_min(1e-10)
         return rgb.square().mean() + nrm.square().mean() + 0.1 * depth.mean(), (rgb, nrm, dep)
@@ -71,6 +100,58 @@ def test_aux_maps_and_gradients_match_oracle():
         rel = ((a - b).abs().max() / a.abs().max().clamp_min(1e-8)).item()
         cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
         assert torch.isfinite(b).all() and rel < 1e-5 and cos > 1 - 1e-6, (k, rel, cos)
+
+
+def test_depth_aux_does_not_touch_opacity():
+    """Ported from Brush `depth_loss_does_not_touch_opacity` (train.rs:4129).
+
+    Positions MUST receive gradient; opacity must receive none. A live opacity gradient
+    means depth error can still be reduced by fading a splat rather than moving it."""
+    from metal_gauss.geometry_loss import depth_loss
+    W = H = 48
+    L = _leaves(n=120, seed=41)
+    vm = torch.eye(4)
+    _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
+                            sh_degree=3, backend="metal",
+                            aux_colors=[_normals(L["m"], L["q"], L["s"], vm.to("mps")),
+                                        _z(L["m"], vm.to("mps"))])
+    depth = info["aux"][1][..., 0] / alpha.detach().clamp_min(1e-10)
+    gt = torch.full_like(depth, 3.0)
+    depth_loss(depth, gt, "disparity").backward()
+    assert L["m"].grad is not None and L["m"].grad.abs().max() > 1e-8, \
+        "depth must reach gaussian positions"
+    for name in ("o", "s", "q"):
+        g = L[name].grad
+        amax = 0.0 if g is None else g.abs().max().item()
+        assert amax < 1e-8, f"depth loss must not push {name}, got {amax}"
+
+
+def test_normal_aux_moves_rotations_only():
+    """Ported from Brush `normal_loss_moves_rotations_only` (train.rs:4480).
+
+    Rotations must receive gradient; positions and scales must not. The normal of a splat
+    is a column of R(quat), so anything else moving means the loss is reaching geometry
+    through the blending weights."""
+    from metal_gauss.geometry_loss import normal_loss
+    W = H = 48
+    L = _leaves(n=120, seed=43)
+    vm = torch.eye(4)
+    _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
+                            sh_degree=3, backend="metal",
+                            aux_colors=[_normals(L["m"], L["q"], L["s"], vm.to("mps")),
+                                        _z(L["m"], vm.to("mps"))])
+    n_img = info["aux"][0] / alpha.detach().clamp_min(1e-10)[..., None]
+    n_img = n_img / n_img.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    gt = torch.zeros_like(n_img); gt[..., 2] = -1.0
+    loss = normal_loss(n_img, gt)
+    assert loss.item() > 1e-6 and torch.isfinite(loss), f"need a real normal loss, got {loss}"
+    loss.backward()
+    assert L["q"].grad is not None and L["q"].grad.abs().max() > 1e-8, \
+        "normal loss must reach rotations"
+    for name in ("m", "s", "o"):
+        g = L[name].grad
+        amax = 0.0 if g is None else g.abs().max().item()
+        assert amax < 1e-8, f"normal loss must not move {name}, got {amax}"
 
 
 def test_aux_maps_are_not_all_zero():

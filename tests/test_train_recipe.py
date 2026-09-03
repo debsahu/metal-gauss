@@ -14,7 +14,7 @@ mps = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MP
 
 
 def _synthetic_scene(n_views=6, W=64, H=48, with_depth=True, with_normal=True,
-                     masked=True, mask_value=255):
+                     masked=True, mask_value=255, seed_z_offset=0.0):
     """A fronto-parallel textured wall at z=3: exact depth (3.0 everywhere), exact normal
     (0,0,-1). Priors are stored in the same quantized residency the loader produces."""
     from metal_gauss.dataset import Scene, View
@@ -43,7 +43,7 @@ def _synthetic_scene(n_views=6, W=64, H=48, with_depth=True, with_normal=True,
                           mask=mask, depth=depth, normal=normal))
     pts = rng.random((400, 3)).astype(np.float32)
     pts[:, :2] = (pts[:, :2] - 0.5) * 4
-    pts[:, 2] = 3.0
+    pts[:, 2] = 3.0 + seed_z_offset      # displace the SEED, not the prior
     return Scene(views[:-1], views[-1:], pts, rng.random((400, 3)).astype(np.float32))
 
 
@@ -114,16 +114,26 @@ def test_depth_normal_weight_needs_no_prior_at_all():
 
 
 @mps
-def test_depth_term_falls_toward_zero_on_a_scene_whose_prior_is_exact():
-    """The wall is at z=3 and the prior says 3.0 everywhere, so the depth term is
-    optimisable to ~0. If it were wired to the wrong tensor -- the preprocess's gradient-less
-    `depth` output, say -- it would sit at a constant instead of descending."""
+def test_depth_term_descends_when_the_seed_starts_at_the_wrong_depth():
+    """The depth loss must MOVE GAUSSIANS ALONG Z. Seed at z = 2.9, prior says 3.0.
+
+    This test used to seed at exactly z = 3.0 with a prior of 3.0, so the depth term began
+    AT ITS OWN FLOOR (~0.009) with nowhere to descend, and it only "descended" because the
+    open blending-weight path let the loss reshape splats -- it was measuring the
+    needle-collapse bug. With the weight path closed (Brush ae2ec651's second half) the
+    only route left is the one that should exist: means_z.
+
+    The displacement is sized to what the optimiser can actually traverse. The default
+    position LR on this 0.40-extent scene is 8e-5, so 300 Adam steps command roughly
+    0.024 m of travel and a 0.3 m error barely moves (measured: 7% over 300 steps). At
+    lr 1e-2 with a 0.1 m displacement the term falls to 0.37 of its start.
+    """
     from metal_gauss import train as T
-    out = T.train(_args(depth_loss_weight=1.0, steps=200, eval_every=20),
-                  scene=_synthetic_scene())
+    out = T.train(_args(depth_loss_weight=1.0, steps=300, eval_every=30, lr_means=1e-2),
+                  scene=_synthetic_scene(seed_z_offset=-0.1))
     d = [e["terms"]["depth"] for e in out["log"] if "terms" in e]
     assert len(d) >= 4
-    assert d[-1] < d[0], f"depth term did not descend: {d[0]:.4g} -> {d[-1]:.4g}"
+    assert d[-1] < 0.6 * d[0], f"depth term did not descend: {d[0]:.4g} -> {d[-1]:.4g}"
 
 
 @mps
