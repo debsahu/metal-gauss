@@ -349,3 +349,83 @@ def test_pyramid_cache_cannot_serve_one_view_the_data_of_another(tmp_path):
     assert collisions > 0, (
         "no address reuse in 1000 trials -- this test can no longer exercise the defect "
         "it was written for; do not treat its passing as evidence")
+
+
+# ------------------------------------------------------------------ ply seed init
+
+def _write_ply(path, xyz, f_dc=None, rgb=None):
+    import plyfile
+    names = ["x", "y", "z"]
+    if f_dc is not None:
+        names += [f"f_dc_{i}" for i in range(3)]
+    if rgb is not None:
+        names += ["red", "green", "blue"]
+    dt = [(n, "u1" if n in ("red", "green", "blue") else "f4") for n in names]
+    d = np.zeros(len(xyz), dtype=dt)
+    d["x"], d["y"], d["z"] = np.asarray(xyz, np.float32).T
+    if f_dc is not None:
+        for i in range(3):
+            d[f"f_dc_{i}"] = np.asarray(f_dc, np.float32)[:, i]
+    if rgb is not None:
+        for i, n in enumerate(("red", "green", "blue")):
+            d[n] = np.asarray(rgb, np.uint8)[:, i]
+    plyfile.PlyData([plyfile.PlyElement.describe(d, "vertex")]).write(str(path))
+    return path
+
+
+def test_init_ply_supplies_the_seed_when_colmap_has_no_points(tmp_path):
+    """ARKitScenes' COLMAP model carries poses and ZERO points3D -- its seed is a separate
+    1.13M-point ply. Without this the trainer dies in cKDTree on an empty array, which is
+    what 'the scene needs no new code' turned out to cost."""
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)                       # writes an EMPTY points3D.txt
+    xyz = np.random.default_rng(0).normal(size=(40, 3))
+    _write_ply(tmp_path / "seed.ply", xyz, f_dc=np.zeros((40, 3), np.float32))
+    sc = load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                    eval_split_every=1000, init_ply=tmp_path / "seed.ply")
+    assert sc.points.shape == (40, 3)
+    assert np.allclose(sc.points, xyz, atol=1e-5)
+    assert sc.colors.shape == (40, 3)
+    assert np.all((sc.colors >= 0.0) & (sc.colors <= 1.0))
+
+
+def test_init_ply_decodes_f_dc_as_spherical_harmonics_not_raw(tmp_path):
+    """An INRIA ply stores colour as the SH DC band: rgb = f_dc * C0 + 0.5. Reading f_dc as
+    if it were already rgb makes a mid-grey seed (f_dc = 0) come out BLACK, which is a
+    silently darker initialisation, not an error."""
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)
+    _write_ply(tmp_path / "s.ply", np.zeros((4, 3)), f_dc=np.zeros((4, 3), np.float32))
+    sc = load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                    eval_split_every=1000, init_ply=tmp_path / "s.ply")
+    assert np.allclose(sc.colors, 0.5, atol=1e-6), "f_dc = 0 must decode to mid-grey"
+
+
+def test_init_ply_accepts_a_plain_rgb_point_cloud(tmp_path):
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)
+    _write_ply(tmp_path / "s.ply", np.zeros((3, 3)),
+               rgb=np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], np.uint8))
+    sc = load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                    eval_split_every=1000, init_ply=tmp_path / "s.ply")
+    assert np.allclose(sc.colors[0], [1.0, 0.0, 0.0], atol=1e-6)
+
+
+def test_init_ply_overrides_colmap_points_and_says_so(tmp_path, capsys):
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)
+    (tmp_path / "sparse" / "points3D.txt").write_text(
+        "\n".join(f"{i} {i} 0 0 128 128 128 0.5" for i in range(1, 6)) + "\n")
+    _write_ply(tmp_path / "s.ply", np.ones((7, 3)), f_dc=np.zeros((7, 3), np.float32))
+    sc = load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                    eval_split_every=1000, init_ply=tmp_path / "s.ply")
+    assert len(sc.points) == 7, "the ply must win; a silent fallback to 5 COLMAP points is worse"
+    assert "init_ply" in capsys.readouterr().out
+
+
+def test_missing_init_ply_is_an_error_not_a_silent_fallback(tmp_path):
+    from metal_gauss.dataset import load_scene
+    _sparse(tmp_path, 16, 8)
+    with pytest.raises(FileNotFoundError):
+        load_scene(tmp_path / "sparse", tmp_path / "images", max_resolution=16,
+                   eval_split_every=1000, init_ply=tmp_path / "nope.ply")

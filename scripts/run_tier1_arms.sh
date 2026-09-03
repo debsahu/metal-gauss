@@ -2,6 +2,7 @@
 # Tier 0+1 pre-registered measurement protocol (plan Task 10), any scene.
 #
 #   scripts/run_tier1_arms.sh --dataset DIR   --out DIR [--seed-cloud PATH]
+#                             [--colmap DIR] [--images DIR]
 #                             [--depth-dir DIR] [--normal-dir DIR]
 #                             [--arms A,B,..] [--floors A,B[,C]]
 #                             [--steps N] [--budget N] [--max-resolution N] [--seed N]
@@ -53,6 +54,7 @@
 set -euo pipefail
 
 DATASET=""; BLENDER=""; OUT=""; SEED_CLOUD=""; DEPTH_DIR=""; NORMAL_DIR=""
+COLMAP_DIR=""; IMAGES_DIR=""; INIT_PLY=""
 STEPS=30000; BUDGET=500000; MAXRES=1920; SEED=42
 ARMS="B0a,B0b,B0c,F1,R1"; FLOORS="B0a,B0b,B0c"
 MG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -61,6 +63,13 @@ SPLATSTATS="$(cd "$MG/../../analyze/splatstats" 2>/dev/null && pwd || echo "")"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) DATASET="$2"; shift 2;;
+    # A dataset does not always lay itself out as <root>/sparse/0 + <root>/images:
+    # ARKitScenes keeps poses in sparse_colmap_for_moge/0 and images in ds/images.
+    --colmap) COLMAP_DIR="$2"; shift 2;;
+    --images) IMAGES_DIR="$2"; shift 2;;
+    # Poses and seed do not always live together: ARKitScenes has 656 posed images with
+    # ZERO points3D and its 1.13M-point seed in a separate ply.
+    --init-ply) INIT_PLY="$2"; shift 2;;
     --blender) BLENDER="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --seed-cloud) SEED_CLOUD="$2"; shift 2;;
@@ -89,7 +98,9 @@ SEEDFLOOR_ARM="${FLOOR_LIST[2]:-}"
 
 if [[ -n "$DATASET" ]]; then
   DATASET="$(cd "$DATASET" && pwd)"
-  source_flags=(--colmap "$DATASET/sparse/0" --images "$DATASET/images")
+  source_flags=(--colmap "${COLMAP_DIR:-$DATASET/sparse/0}"
+                --images "${IMAGES_DIR:-$DATASET/images}")
+  [[ -n "$INIT_PLY" ]] && source_flags+=(--init-ply "$INIT_PLY")
   [[ -n "$DEPTH_DIR" ]] && source_flags+=(--depth-dir "$DEPTH_DIR")
   [[ -n "$NORMAL_DIR" ]] && source_flags+=(--normal-dir "$NORMAL_DIR")
 else

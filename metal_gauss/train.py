@@ -420,7 +420,8 @@ def train(args, scene: Scene | None = None) -> dict:
                            depth_dir=getattr(args, "depth_dir", None),
                            normal_dir=getattr(args, "normal_dir", None),
                            prior_resident=getattr(args, "prior_resident", "quantized"),
-                           use_priors=not getattr(args, "no_priors", False))
+                           use_priors=not getattr(args, "no_priors", False),
+                           init_ply=getattr(args, "init_ply", None))
         bg = (0.0, 0.0, 0.0)
     print(f"{len(scene.train)} train views, {len(scene.heldout)} held out, "
           f"{len(scene.points):,} sparse points, budget {args.budget:,}")
@@ -922,6 +923,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "codes, 5 bytes/px against 16, and is training-equivalent per "
                          "the WS-G gate (0.0128 dB vs a 0.0317 dB same-seed repeat). "
                          "'float32' is the lossless escape hatch.")
+    ap.add_argument("--init-ply", default=None,
+                    help="seed the gaussians from this ply instead of the COLMAP model's "
+                         "points3D. Needed when poses and seed live apart -- ARKitScenes "
+                         "keeps 656 posed images with ZERO points3D and a separate 1.13M "
+                         "point seed.ply. Colour is read from f_dc_* (SH DC) or red/green/blue.")
     ap.add_argument("--no-priors", action="store_true",
                     help="ignore depth/normal priors entirely, including the sibling "
                          "auto-detect. Without this, a dataset that HAS priors refuses to "

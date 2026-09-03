@@ -89,7 +89,8 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
                depth_dir: str | Path | None = None,
                normal_dir: str | Path | None = None,
                prior_resident: str = "quantized",
-               use_priors: bool = True) -> Scene:
+               use_priors: bool = True,
+               init_ply: str | Path | None = None) -> Scene:
     import pycolmap
     from PIL import Image
 
@@ -164,6 +165,46 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
     heldout_names = {v.name for v in heldout}
     train = [v for v in views if v.name not in heldout_names]
 
-    pts = np.array([p.xyz for p in rec.points3D.values()], np.float32)
-    cols = np.array([p.color for p in rec.points3D.values()], np.float32) / 255.0
+    if init_ply is not None:
+        pts, cols = load_seed_ply(init_ply)
+        print(f"init_ply: {init_ply} -> {len(pts):,} seed points "
+              f"(COLMAP model contributed {len(rec.points3D):,}, ignored)")
+    else:
+        pts = np.array([p.xyz for p in rec.points3D.values()], np.float32)
+        cols = np.array([p.color for p in rec.points3D.values()], np.float32) / 255.0
     return Scene(train, heldout, pts, cols)
+
+
+# Spherical-harmonics DC normalisation, as in the INRIA ply convention.
+_SH_C0 = 0.28209479177387814
+
+
+def load_seed_ply(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """(P,3) float32 positions and (P,3) colours in [0,1] from a point-cloud or splat ply.
+
+    Some datasets carry poses in a COLMAP model and their SEED somewhere else entirely --
+    ARKitScenes' `sparse_colmap_for_moge/0` has 656 images and ZERO points3D, with the
+    1,129,403-point seed in `ds/seed.ply`. Without this the trainer dies inside cKDTree on
+    an empty array.
+
+    Colour comes from `f_dc_*` when present, decoded as the SH DC band
+    (`rgb = f_dc * C0 + 0.5`) -- reading it raw makes a mid-grey seed come out BLACK, which
+    is a quietly darker initialisation rather than an error. A plain `red/green/blue` cloud
+    is accepted too; anything else seeds mid-grey.
+    """
+    import plyfile
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"--init-ply {path} does not exist")
+    v = plyfile.PlyData.read(str(path))["vertex"]
+    names = set(v.data.dtype.names or ())
+    pts = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float32)
+    if {"f_dc_0", "f_dc_1", "f_dc_2"} <= names:
+        dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], 1).astype(np.float32)
+        cols = np.clip(dc * _SH_C0 + 0.5, 0.0, 1.0)
+    elif {"red", "green", "blue"} <= names:
+        cols = np.stack([v["red"], v["green"], v["blue"]], 1).astype(np.float32) / 255.0
+    else:
+        cols = np.full((len(pts), 3), 0.5, np.float32)
+    return pts, cols
