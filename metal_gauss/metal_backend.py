@@ -349,7 +349,7 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
            near: float = 0.01, far: float = 100.0,
            background=(0.0, 0.0, 0.0), colors=None, max_radius_frac: float = 1.0,
            sh_rest=None, antialias: bool = False, absgrad_out=None,
-           aux_colors=None,
+           aux_colors=None, aux_detach_weights=None,
            **_ignored):
     """Same positional signature as torch_ref.render. Returns (rgb, alpha, info).
 
@@ -542,12 +542,29 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     # map turns "nothing here" into a plausible measurement.
     aux_maps = []
     if aux_colors:
+        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth channel
+        # and deliberately FOLDS IT IN for the PGSR plane channels, so there is no correct
+        # blanket answer -- and an unstated inherited default is exactly how the original
+        # needle-collapse defect happened. The caller states it or gets an error.
+        if aux_detach_weights is None:
+            raise ValueError(
+                "aux_colors requires aux_detach_weights (a bool per aux channel). "
+                "Detached = the geometry loss cannot move opacity or footprint (the depth "
+                "and normal contract, Brush ae2ec651); live = it can (the PGSR plane "
+                "contract). There is no safe default; say which.")
+        if isinstance(aux_detach_weights, bool):
+            aux_detach_weights = [aux_detach_weights] * len(aux_colors)
+        if len(aux_detach_weights) != len(aux_colors):
+            raise ValueError(
+                f"aux_detach_weights must have one per aux channel: got "
+                f"{len(aux_detach_weights)} for {len(aux_colors)} aux colours")
         uv_d, conic_d, opac_d = uv.detach(), conic.detach(), opacities.detach()
-        for a in aux_colors:
+        for a, det in zip(aux_colors, aux_detach_weights):
             if a.shape != (means.shape[0], 3):
                 raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
+            wu, wc, wo = (uv_d, conic_d, opac_d) if det else (uv, conic, opacities)
             aux_maps.append(_RasterizeMetal.apply(
-                uv_d, conic_d, opac_d, a.contiguous(), gauss_ids, tile_offsets,
+                wu, wc, wo, a.contiguous(), gauss_ids, tile_offsets,
                 W, H, tile, tiles_x, None)[0])
 
     if background is not None:

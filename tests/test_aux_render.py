@@ -75,7 +75,8 @@ def test_aux_maps_and_gradients_match_the_CLOSED_WEIGHT_PATH_oracle():
             rgb, alpha, info = render(
                 L["m"], L["q"], L["s"], L["o"], L["sh"][:, :1].contiguous(), K, vm, W, H,
                 sh_degree=3, sh_rest=L["sh"][:, 1:].contiguous(), backend="metal",
-                aux_colors=[_normals(L["m"], L["q"], L["s"], vmd), _z(L["m"], vmd)])
+                aux_colors=[_normals(L["m"], L["q"], L["s"], vmd), _z(L["m"], vmd)],
+                aux_detach_weights=[True, True])
             nrm, dep = info["aux"]
         else:
             rgb, alpha, _ = render(L["m"], L["q"], L["s"], L["o"], L["sh"], K.to("mps"),
@@ -114,7 +115,8 @@ def test_depth_aux_does_not_touch_opacity():
     _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                             sh_degree=3, backend="metal",
                             aux_colors=[_normals(L["m"], L["q"], L["s"], vm.to("mps")),
-                                        _z(L["m"], vm.to("mps"))])
+                                        _z(L["m"], vm.to("mps"))],
+                            aux_detach_weights=[True, True])
     depth = info["aux"][1][..., 0] / alpha.detach().clamp_min(1e-10)
     gt = torch.full_like(depth, 3.0)
     depth_loss(depth, gt, "disparity").backward()
@@ -139,7 +141,8 @@ def test_normal_aux_moves_rotations_only():
     _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                             sh_degree=3, backend="metal",
                             aux_colors=[_normals(L["m"], L["q"], L["s"], vm.to("mps")),
-                                        _z(L["m"], vm.to("mps"))])
+                                        _z(L["m"], vm.to("mps"))],
+                            aux_detach_weights=[True, True])
     n_img = info["aux"][0] / alpha.detach().clamp_min(1e-10)[..., None]
     n_img = n_img / n_img.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     gt = torch.zeros_like(n_img); gt[..., 2] = -1.0
@@ -163,7 +166,8 @@ def test_aux_maps_are_not_all_zero():
     _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                             sh_degree=3, backend="metal",
                             aux_colors=[_normals(L["m"], L["q"], L["s"], vm.to("mps")),
-                                        _z(L["m"], vm.to("mps"))])
+                                        _z(L["m"], vm.to("mps"))],
+                            aux_detach_weights=[True, True])
     nrm, dep = info["aux"]
     assert alpha.max() > 0.5, "the scene did not render; nothing below is meaningful"
     assert nrm.abs().max() > 0.1 and dep.abs().max() > 1.0
@@ -176,7 +180,7 @@ def test_aux_alpha_is_the_rgb_alpha_bit_for_bit():
     vm = torch.eye(4)
     rgb, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                               sh_degree=3, backend="metal",
-                              aux_colors=[_z(L["m"], vm.to("mps"))])
+                              aux_colors=[_z(L["m"], vm.to("mps"))], aux_detach_weights=[True])
     # IDENTITY, not merely equality: the aux maps are divided by this, and it must be the
     # very tensor the RGB pass produced rather than a recomputed lookalike.
     assert info["aux_alpha"] is alpha
@@ -207,7 +211,8 @@ def test_aux_passes_do_not_vote_on_densification():
         buf = torch.zeros(L["m"].shape[0], device="mps")
         aux = [_z(L["m"], vm.to("mps"))] if with_aux else None
         rgb, _, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
-                              sh_degree=3, backend="metal", absgrad_out=buf, aux_colors=aux)
+                              sh_degree=3, backend="metal", absgrad_out=buf, aux_colors=aux,
+                           aux_detach_weights=None if aux is None else [True] * len(aux))
         loss = rgb.square().mean()
         if with_aux:
             loss = loss + info["aux"][0].square().mean()      # supervise it, or this is vacuous
@@ -234,7 +239,7 @@ def test_aux_alpha_is_the_PRE_composite_alpha_under_a_white_background():
     vm = torch.eye(4)
     _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                             sh_degree=3, backend="metal", background=(1.0, 1.0, 1.0),
-                            aux_colors=[_z(L["m"], vm.to("mps"))])
+                            aux_colors=[_z(L["m"], vm.to("mps"))], aux_detach_weights=[True])
     assert torch.equal(info["aux_alpha"], alpha)
     assert alpha.max() <= 1.0 and alpha.min() >= 0.0
 
@@ -248,7 +253,7 @@ def test_no_background_is_added_to_aux_maps():
     aux = torch.full((L["m"].shape[0], 3), 7.0, device="mps")
     _, alpha, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                             sh_degree=3, backend="metal", background=(1.0, 1.0, 1.0),
-                            aux_colors=[aux])
+                            aux_colors=[aux], aux_detach_weights=[True])
     uncovered = alpha < 1e-6
     assert uncovered.any(), "need an uncovered pixel for this test to mean anything"
     assert info["aux"][0][uncovered].abs().max().item() == 0.0
@@ -261,7 +266,7 @@ def test_aux_colors_empty_list_and_none_behave_identically():
     a = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
                sh_degree=3, backend="metal")
     b = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
-               sh_degree=3, backend="metal", aux_colors=[])
+               sh_degree=3, backend="metal", aux_colors=[], aux_detach_weights=[])
     assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
     assert b[2].get("aux") == []
 
@@ -276,7 +281,8 @@ def test_rgb_is_bit_identical_with_and_without_aux():
                                W, H, sh_degree=3, backend="metal")
     rgb_b, alpha_b, _ = render(Lb["m"], Lb["q"], Lb["s"], Lb["o"], Lb["sh"], _K(W, H), vm,
                                W, H, sh_degree=3, backend="metal",
-                               aux_colors=[_z(Lb["m"], vm.to("mps"))])
+                               aux_colors=[_z(Lb["m"], vm.to("mps"))],
+                               aux_detach_weights=[True])
     assert torch.equal(rgb_a, rgb_b) and torch.equal(alpha_a, alpha_b)
 
 
@@ -285,7 +291,7 @@ def test_aux_on_explicit_colors_path_is_rejected():
     vm = torch.eye(4)
     with pytest.raises(ValueError, match="aux_colors"):
         render(L["m"], L["q"], L["s"], L["o"], None, _K(32, 32), vm, 32, 32,
-               colors=L["m"], backend="metal", aux_colors=[L["m"]])
+               colors=L["m"], backend="metal", aux_colors=[L["m"]], aux_detach_weights=[True])
 
 
 def test_aux_wrong_shape_is_rejected():
@@ -294,7 +300,8 @@ def test_aux_wrong_shape_is_rejected():
     with pytest.raises(ValueError, match=r"\(N,3\)"):
         render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(32, 32), vm, 32, 32,
                sh_degree=3, backend="metal",
-               aux_colors=[torch.zeros(L["m"].shape[0], 4, device="mps")])
+               aux_colors=[torch.zeros(L["m"].shape[0], 4, device="mps")],
+               aux_detach_weights=[True])
 
 
 def test_depth_from_preprocess_output_has_no_gradient_trap_is_documented():
@@ -330,3 +337,50 @@ def test_unknown_kwargs_are_rejected_but_torch_ref_only_ones_are_tolerated():
     render(*args, sh_degree=3, backend="metal", max_per_tile=4096, tile_chunk=32, slab=256)
     with pytest.raises(TypeError, match="aux_colours"):
         render(*args, sh_degree=3, backend="metal", aux_colours=[])
+
+
+def test_aux_detach_weights_must_be_stated_explicitly():
+    """NO IMPLICIT DEFAULT. Whether an aux channel's blending weights are detached is the
+    difference between a working geometry term and one that collapses splats into needles,
+    and the original defect was precisely an unstated inherited default. Brush drops the
+    alpha VJP for the DEPTH channel and deliberately FOLDS IT IN for the PGSR plane
+    channels (rasterize_backwards.rs, plane_channel_bwd), so there is no correct blanket
+    answer -- the caller has to say."""
+    L = _leaves(seed=51)
+    vm = torch.eye(4)
+    args = (L["m"], L["q"], L["s"], L["o"], L["sh"], _K(32, 32), vm, 32, 32)
+    with pytest.raises(ValueError, match="aux_detach_weights"):
+        render(*args, sh_degree=3, backend="metal", aux_colors=[_z(L["m"], vm.to("mps"))])
+    with pytest.raises(ValueError, match="one per aux"):
+        render(*args, sh_degree=3, backend="metal",
+               aux_colors=[_z(L["m"], vm.to("mps"))], aux_detach_weights=[True, False])
+
+
+def test_live_and_detached_aux_weights_give_DIFFERENT_gradients():
+    """The distinction must be observable, or it can be silently collapsed later.
+
+    Same aux value, same everything, only the weight contract differs. Detached: gradient
+    reaches `means` through the aux VALUE alone and nothing reaches `opac`. Live: opacity
+    picks up a gradient and the means gradient changes. If these ever come out equal, the
+    per-channel plumbing has stopped working and both plane-aux and the centre path are
+    silently sharing one contract."""
+    W = H = 48
+    vm = torch.eye(4)
+
+    def grads(detach):
+        L = _leaves(n=150, seed=53)
+        _, _, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], _K(W, H), vm, W, H,
+                            sh_degree=3, backend="metal",
+                            aux_colors=[_z(L["m"], vm.to("mps"))],
+                            aux_detach_weights=[detach])
+        info["aux"][0].square().mean().backward()
+        return {k: (None if L[k].grad is None else L[k].grad.detach().clone())
+                for k in ("m", "o")}
+
+    det, live = grads(True), grads(False)
+    assert det["o"] is None or det["o"].abs().max() < 1e-8, "detached must not touch opacity"
+    assert live["o"] is not None and live["o"].abs().max() > 1e-8, \
+        "live weights must reach opacity, or the two contracts are indistinguishable"
+    assert det["m"] is not None and live["m"] is not None
+    assert (det["m"] - live["m"]).abs().max() > 1e-8, \
+        "the means gradient must differ between the two contracts"

@@ -411,7 +411,10 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
         v.K, v.viewmat, W, H,
         sh_degree=sh_deg, backend="metal", sh_rest=p["sh_rest"][:active],
         background=background, antialias=antialias, absgrad_out=absgrad_out,
-        aux_colors=aux)
+        aux_colors=aux,
+        # Centre-depth contract: both channels detached, so a geometry loss cannot buy its
+        # error down by moving opacity or footprint. See metal_backend.render.
+        aux_detach_weights=None if aux is None else [True] * len(aux))
 
 
 # ---------------------------------------------------------------- training
