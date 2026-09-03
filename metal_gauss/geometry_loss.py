@@ -273,3 +273,76 @@ def plane_depth_from_features(feat_img: torch.Tensor, fx, fy, cx, cy,
     normal = n_sum / length[..., None]
     normal = torch.where(valid[..., None], normal, torch.zeros_like(normal))
     return depth, normal, valid.to(feat_img.dtype)
+
+
+class _FusedGeometryLosses(torch.autograd.Function):
+    """The three geometry loss terms in one pass over the image.
+
+    Replaces ~30 torch elementwise dispatches, each reading and writing 2.7M x 3 floats at
+    1920x1440. Derivation and every rule honoured here:
+    research/depth-normal-loss-adjoint.md (44/44 against torch.autograd).
+
+    Leaves are `z_img` and `n_sum`. ALPHA IS NOT A LEAF and no cotangent is produced for
+    it: un-detaching alpha gives max|dL/dalpha| = 0.37, all of it from the depth branch.
+
+    DEVIATION FROM THE NOTE, stated: the note shows `ghat_n_d = -m n_r / N` can be formed
+    per reader INSIDE the gather kernel, needing no intermediate buffer. This writes
+    `g_nd` to a buffer and feeds the existing `nfd_backward`. One extra (H,W,3) buffer,
+    reusing a kernel already verified 31/31, in exchange for not re-deriving the gather.
+    Folding it in is the remaining optimisation, not a correctness gap.
+    """
+
+    @staticmethod
+    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, K, space):
+        from metal_gauss.metal_backend import _load
+        ext = _load()
+        a = alpha.detach().contiguous()
+        di = (z_img[..., 0] / a.clamp_min(1e-10)).contiguous()
+        n_d = ext.nfd_forward(di, *K)[0]
+        num, cnt, depth_o, nr_o = ext.geom_loss_forward(
+            z_img.contiguous(), n_sum.contiguous(), a, n_d,
+            gt_depth.contiguous(), gt_normal.contiguous(), int(space))
+        # Fixed-order host reduce of the per-threadgroup partials. The count is integer:
+        # an f32 sum of ones is exact only to 2^24, which is exactly one 4096^2 face.
+        tot = num.sum(0)
+        N = cnt.to(torch.int64).sum(0)
+        # normal_loss divides by 3 * valid.sum(): the denominator is the COMPONENT count,
+        # not the pixel count, because the numerator is a component-wise L1. Brush:
+        # `abs_err.sum() / (valid.sum() * 3.0).clamp_min(1.0)`.
+        N = torch.stack([N[0], N[1] * 3, N[2]]).clamp_min(1)
+        ctx.save_for_backward(depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal)
+        ctx.meta = (K, int(space), tuple(N.tolist()))
+        return tot / N.to(tot.dtype)
+
+    @staticmethod
+    def backward(ctx, g):
+        from metal_gauss.metal_backend import _load
+        ext = _load()
+        depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal = ctx.saved_tensors
+        K, space, N = ctx.meta
+        # The UPSTREAM COTANGENT already carries the caller's per-term weight -- the
+        # forward returns the three losses UNWEIGHTED. Multiplying by `weights` here too
+        # applied them twice; the error was exactly the weight (0.2 -> rel 0.8,
+        # 0.05 -> rel 0.95), which is what named the bug.
+        w = g.detach().tolist()
+        inv = [1.0 / n for n in N]
+        g_depth, g_nd, g_nsum = ext.geom_loss_backward(
+            depth_o, nr_o, n_sum.contiguous(), a, n_d,
+            gt_depth.contiguous(), gt_normal.contiguous(), space, w, inv)
+        # depth_img feeds BOTH the depth loss and normals_from_depth, so the two paths sum.
+        g_depth = g_depth + ext.nfd_backward(depth_o, g_nd, *K)[0]
+        g_z = torch.zeros_like(n_sum)
+        g_z[..., 0] = g_depth / a.clamp_min(1e-10)      # channels 1-2 are exactly zero
+        return g_z, g_nsum, None, None, None, None, None, None
+
+
+def fused_geometry_losses(z_img, n_sum, alpha, gt_depth, gt_normal, K,
+                          space="disparity"):
+    """(depth, normal, depth_normal) losses, UNWEIGHTED, as a length-3 tensor.
+
+    The caller applies its own per-term weights to the returned tensor; they must not also
+    be passed in here, or they are applied twice (once by the caller, once by the
+    backward's use of the upstream cotangent)."""
+    return _FusedGeometryLosses.apply(
+        z_img, n_sum, alpha, gt_depth, gt_normal, tuple(float(x) for x in K),
+        0 if space == "disparity" else 1)

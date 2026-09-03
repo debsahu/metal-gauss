@@ -111,3 +111,170 @@ kernel void nfd_backward(device const float* depth [[buffer(0)]],
     // One dot with the INPUT pixel's own ray -- the same r multiplies all three roles.
     grad[v * w + u] = dot(nfd_ray(v, u, K), acc);
 }
+
+// ---------------------------------------------------------------- fused geometry losses
+//
+// One pass over the image for the alpha divide, the normal normalise, and all three loss
+// numerators + counts. Replaces ~30 torch elementwise dispatches, each of which read and
+// wrote 2.7M x 3 floats at 1920x1440.
+//
+// Derivation and every rule below: research/depth-normal-loss-adjoint.md (44/44 against
+// torch.autograd; composed chain f32 3.4e-8..1.13e-6, cosine 1.0000000000).
+//
+// N IS COUNTED IN uint. An f32 sum of ones is exact only to 2^24, which is EXACTLY one
+// 4096^2 face -- and our cube faces are that size. The value sum is a two-level
+// fixed-order reduction (per-threadgroup partials, then a fixed-order final pass): a
+// sequential f32 accumulate over 2.7M pixels errs 6.0e-4 on the loss VALUE while every
+// gradient check still passes.
+//
+// SUBSTITUTE, NEVER MULTIPLY BY A MASK. `err = 1 - dot(n_d, n_r)` computed first and
+// multiplied by m afterwards turns a non-finite n_d into a NaN sum. Branch instead.
+
+#define GL_TG 256
+
+struct GLPartial { float d_num; float n_num; float dn_num; uint d_cnt; uint n_cnt; uint dn_cnt; };
+
+kernel void geom_loss_forward(
+    device const float* z_img    [[buffer(0)]],   // (H,W,3), aux depth; channel 0 used
+    device const float* n_sum    [[buffer(1)]],   // (H,W,3), aux normals, alpha-weighted
+    device const float* alpha    [[buffer(2)]],   // (H,W), DETACHED upstream
+    device const float* n_d      [[buffer(3)]],   // (H,W,3) from nfd_forward
+    device const float* gt_depth [[buffer(4)]],   // (H,W), 0 = invalid
+    device const float* gt_norm  [[buffer(5)]],   // (H,W,3), (0,0,0) = invalid
+    device float*       out_num  [[buffer(6)]],   // 3 per threadgroup
+    device uint*        out_cnt  [[buffer(7)]],   // 3 per threadgroup
+    device float*       depth_o  [[buffer(8)]],   // (H,W)   depth_img, saved for backward
+    device float*       nr_o     [[buffer(9)]],   // (H,W,3) n_r,       saved for backward
+    constant uint2&     dim      [[buffer(10)]],
+    constant uint&      space    [[buffer(11)]],  // 0 = disparity, 1 = metric
+    uint  gidx [[thread_position_in_grid]],
+    uint  lidx [[thread_index_in_threadgroup]],
+    uint  tgid [[threadgroup_position_in_grid]])
+{
+    threadgroup float s_d[GL_TG], s_n[GL_TG], s_dn[GL_TG];
+    threadgroup uint  c_d[GL_TG], c_n[GL_TG], c_dn[GL_TG];
+
+    const uint H = dim.x, W = dim.y, NPIX = H * W;
+    float d_num = 0.0f, n_num = 0.0f, dn_num = 0.0f;
+    uint  d_cnt = 0u,   n_cnt = 0u,   dn_cnt = 0u;
+
+    if (gidx < NPIX) {
+        const uint o3 = gidx * 3u;
+        const float a  = max(alpha[gidx], 1e-10f);
+        const float di = z_img[o3] / a;
+        depth_o[gidx] = di;
+
+        float3 nr = float3(n_sum[o3], n_sum[o3+1], n_sum[o3+2]) / a;
+        nr = nr / max(length(nr), 1e-6f);
+        nr_o[o3] = nr.x; nr_o[o3+1] = nr.y; nr_o[o3+2] = nr.z;
+
+        // ---- depth loss: valid = gt > 0; uncovered pred scores the FULL disparity ----
+        const float gd = gt_depth[gidx];
+        if (gd > 0.0f) {
+            float r;
+            if (space == 0u) {                       // disparity
+                const float dp = (di > 0.0f) ? (1.0f / di) : 0.0f;
+                r = dp - 1.0f / gd;
+            } else {
+                r = di - gd;
+            }
+            d_num = fabs(r); d_cnt = 1u;
+        }
+
+        // ---- normal loss: component L1 over pixels whose PRIOR is valid ----
+        const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]);
+        if (length(gn) > 0.5f) {
+            const float3 e = abs(nr - gn);
+            n_num = e.x + e.y + e.z; n_cnt = 1u;
+        }
+
+        // ---- depth-normal consistency: gate on alpha AND both magnitudes ----
+        const float3 nd = float3(n_d[o3], n_d[o3+1], n_d[o3+2]);
+        if (alpha[gidx] > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
+            dn_num = 1.0f - dot(nd, nr); dn_cnt = 1u;   // branch, never `* m`
+        }
+    }
+
+    s_d[lidx] = d_num; s_n[lidx] = n_num; s_dn[lidx] = dn_num;
+    c_d[lidx] = d_cnt; c_n[lidx] = n_cnt; c_dn[lidx] = dn_cnt;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Fixed-order tree reduction: deterministic, and pairwise rather than sequential.
+    for (uint s = GL_TG / 2u; s > 0u; s >>= 1u) {
+        if (lidx < s) {
+            s_d[lidx] += s_d[lidx+s]; s_n[lidx] += s_n[lidx+s]; s_dn[lidx] += s_dn[lidx+s];
+            c_d[lidx] += c_d[lidx+s]; c_n[lidx] += c_n[lidx+s]; c_dn[lidx] += c_dn[lidx+s];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lidx == 0u) {
+        out_num[tgid*3u+0u] = s_d[0]; out_num[tgid*3u+1u] = s_n[0]; out_num[tgid*3u+2u] = s_dn[0];
+        out_cnt[tgid*3u+0u] = c_d[0]; out_cnt[tgid*3u+1u] = c_n[0]; out_cnt[tgid*3u+2u] = c_dn[0];
+    }
+}
+
+// Pointwise backward. N arrives as a saved scalar per term -- it is an integer count under
+// the same predicate as the sum and is never differentiated.
+//
+// NO ALPHA COTANGENT IS PRODUCED. Un-detaching alpha gives max|dL/dalpha| = 0.37, all of it
+// from the depth branch; the trainer detaches it and this kernel must not reintroduce it.
+kernel void geom_loss_backward(
+    device const float* depth_i  [[buffer(0)]],   // (H,W) depth_img from the forward
+    device const float* nr_i     [[buffer(1)]],   // (H,W,3) n_r from the forward
+    device const float* n_sum    [[buffer(2)]],
+    device const float* alpha    [[buffer(3)]],
+    device const float* n_d      [[buffer(4)]],
+    device const float* gt_depth [[buffer(5)]],
+    device const float* gt_norm  [[buffer(6)]],
+    device float*       g_depth  [[buffer(7)]],   // (H,W)   dL/d depth_img
+    device float*       g_nd     [[buffer(8)]],   // (H,W,3) dL/d n_d  -> feeds nfd_backward
+    device float*       g_nsum   [[buffer(9)]],   // (H,W,3) dL/d n_sum
+    constant uint2&     dim      [[buffer(10)]],
+    constant uint&      space    [[buffer(11)]],
+    constant float4&    wts      [[buffer(12)]],  // w_depth, w_normal, w_dn, unused
+    constant float4&    invN     [[buffer(13)]],  // 1/Nd, 1/Nn, 1/Ndn, unused
+    uint gidx [[thread_position_in_grid]])
+{
+    const uint H = dim.x, W = dim.y;
+    if (gidx >= H * W) return;
+    const uint o3 = gidx * 3u;
+    const float a  = max(alpha[gidx], 1e-10f);
+    const float di = depth_i[gidx];
+    const float3 nr = float3(nr_i[o3], nr_i[o3+1], nr_i[o3+2]);
+
+    float gd_acc = 0.0f;
+    float3 gnr = float3(0.0f), gnd = float3(0.0f);
+
+    const float gd = gt_depth[gidx];
+    if (gd > 0.0f) {
+        if (space == 0u) {
+            if (di > 0.0f) {
+                const float r = 1.0f / di - 1.0f / gd;
+                gd_acc += wts.x * invN.x * sign(r) * (-1.0f / (di * di));
+            }
+            // di <= 0: the uncovered lane's value gradient is exactly 0 (Brush Count mode
+            // produces NaN here; guarding before the reciprocal is a deliberate divergence)
+        } else {
+            gd_acc += wts.x * invN.x * sign(di - gd);
+        }
+    }
+    const float3 gn = float3(gt_norm[o3], gt_norm[o3+1], gt_norm[o3+2]);
+    if (length(gn) > 0.5f) gnr += wts.y * invN.y * sign(nr - gn);
+
+    const float3 nd = float3(n_d[o3], n_d[o3+1], n_d[o3+2]);
+    if (alpha[gidx] > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
+        gnd += -wts.z * invN.z * nr;          // ghat_n_d = -m n_r / N
+        gnr += -wts.z * invN.z * nd;          // ghat_n_r = -m n_d / N
+    }
+
+    // n_r chain: x = n_sum/a, n_r = x/|x|. Alpha cancels exactly, so
+    // dL/dn_sum = (I - n_r n_r^T) ghat_n_r / |x|, unclamped.
+    float3 x = float3(n_sum[o3], n_sum[o3+1], n_sum[o3+2]) / a;
+    const float xl = length(x);
+    float3 gx;
+    if (xl < 1e-6f) gx = gnr / 1e-6f;                       // clamped branch: NO projection
+    else            gx = (gnr - nr * dot(nr, gnr)) / xl;
+    g_nsum[o3] = gx.x / a; g_nsum[o3+1] = gx.y / a; g_nsum[o3+2] = gx.z / a;
+
+    g_depth[gidx] = gd_acc;
+    g_nd[o3] = gnd.x; g_nd[o3+1] = gnd.y; g_nd[o3+2] = gnd.z;
+}

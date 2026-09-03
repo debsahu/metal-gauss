@@ -439,6 +439,74 @@ std::vector<torch::Tensor> nfd_backward(torch::Tensor depth, torch::Tensor g,
     return {grad};
 }
 
+std::vector<torch::Tensor> geom_loss_forward(
+    torch::Tensor z_img, torch::Tensor n_sum, torch::Tensor alpha, torch::Tensor n_d,
+    torch::Tensor gt_depth, torch::Tensor gt_norm, int64_t space)
+{
+    checkMPS(z_img, "z_img");
+    const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
+    const int64_t TG = 256, NG = (NPIX + TG - 1) / TG;
+    auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(z_img.device());
+    auto uopt = torch::TensorOptions().dtype(torch::kInt32).device(z_img.device());
+    auto num = torch::zeros({NG, 3}, fopt), cnt = torch::zeros({NG, 3}, uopt);
+    auto depth_o = torch::zeros({H, W}, fopt), nr_o = torch::zeros({H, W, 3}, fopt);
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("geom_loss_forward")];
+            SETBUF(enc, z_img, 0); SETBUF(enc, n_sum, 1); SETBUF(enc, alpha, 2);
+            SETBUF(enc, n_d, 3); SETBUF(enc, gt_depth, 4); SETBUF(enc, gt_norm, 5);
+            SETBUF(enc, num, 6); SETBUF(enc, cnt, 7);
+            SETBUF(enc, depth_o, 8); SETBUF(enc, nr_o, 9);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:10];
+            uint sp = (uint)space;
+            [enc setBytes:&sp length:sizeof(sp) atIndex:11];
+            [enc dispatchThreads:MTLSizeMake(NG * TG, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(TG, 1, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {num, cnt, depth_o, nr_o};
+}
+
+std::vector<torch::Tensor> geom_loss_backward(
+    torch::Tensor depth_i, torch::Tensor nr_i, torch::Tensor n_sum, torch::Tensor alpha,
+    torch::Tensor n_d, torch::Tensor gt_depth, torch::Tensor gt_norm,
+    int64_t space, std::vector<double> wts, std::vector<double> invN)
+{
+    const int64_t H = alpha.size(0), W = alpha.size(1), NPIX = H * W;
+    auto fopt = torch::TensorOptions().dtype(torch::kFloat).device(alpha.device());
+    auto g_depth = torch::zeros({H, W}, fopt);
+    auto g_nd = torch::zeros({H, W, 3}, fopt), g_nsum = torch::zeros({H, W, 3}, fopt);
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("geom_loss_backward")];
+            SETBUF(enc, depth_i, 0); SETBUF(enc, nr_i, 1); SETBUF(enc, n_sum, 2);
+            SETBUF(enc, alpha, 3); SETBUF(enc, n_d, 4);
+            SETBUF(enc, gt_depth, 5); SETBUF(enc, gt_norm, 6);
+            SETBUF(enc, g_depth, 7); SETBUF(enc, g_nd, 8); SETBUF(enc, g_nsum, 9);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:10];
+            uint sp = (uint)space;
+            [enc setBytes:&sp length:sizeof(sp) atIndex:11];
+            float w[4] = {(float)wts[0], (float)wts[1], (float)wts[2], 0.f};
+            [enc setBytes:w length:sizeof(w) atIndex:12];
+            float n[4] = {(float)invN[0], (float)invN[1], (float)invN[2], 0.f};
+            [enc setBytes:n length:sizeof(n) atIndex:13];
+            [enc dispatchThreads:MTLSizeMake(NPIX, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {g_depth, g_nd, g_nsum};
+}
+
 torch::Tensor ssim_tail_forward(torch::Tensor b, int64_t H, int64_t W) {
     checkMPS(b, "blurred stack");
     TORCH_CHECK(b.numel() == 15 * H * W, "ssim_tail_forward: expected 15*H*W");
@@ -579,6 +647,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rasterize_forward", &rasterize_forward);
     m.def("nfd_forward", &nfd_forward);
     m.def("nfd_backward", &nfd_backward);
+    m.def("geom_loss_forward", &geom_loss_forward);
+    m.def("geom_loss_backward", &geom_loss_backward);
     m.def("rasterize_backward", &rasterize_backward);
     m.def("pack_intersections", &pack_intersections);
     m.def("preprocess_forward", &preprocess_forward);
