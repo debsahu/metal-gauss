@@ -169,6 +169,10 @@ score_arm() {
   [[ -f "$OUT/$arm.dump/lpips.json" ]] || \
     ( cd "$MG" && caffeinate -i uv run scripts/lpips_eval.py "$OUT/$arm.dump" ) \
       >> "$OUT/$arm.log" 2>&1
+  # Merge LPIPS into the report so it is self-contained. Without this the Stage 4 gate is
+  # only half-checked: the number exists on disk but metrics.lpips reads absent.
+  ( cd "$MG" && uv run --frozen python scripts/backfill_lpips.py "$OUT" "$arm" ) \
+      >> "$OUT/$arm.log" 2>&1
   echo "[$(date +%T)] $arm: scored"
 }
 

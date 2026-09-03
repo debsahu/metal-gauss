@@ -70,6 +70,29 @@ def ply_shape_metrics(path: Path) -> dict:
             "ply.smin_p50_mm": float(np.median(s[:, 0]) * 1000.0)}
 
 
+def is_report(path: Path) -> bool:
+    """Is this JSON a training report, as opposed to something else the protocol wrote?
+
+    The directory also holds floors.json, collected.json (WHICH THIS SCRIPT WRITES) and
+    per-arm stats.json. The auto-glob used to take collected.json for an arm, so running
+    the collector once made the next run die with KeyError: 'metrics' and no clue which
+    file caused it. Duck-type instead of blacklisting names: a report has resolved config
+    and metrics.
+    """
+    try:
+        d = json.loads(path.read_text())
+    except Exception:
+        return False
+    return isinstance(d, dict) and isinstance(d.get("metrics"), dict) \
+        and isinstance(d.get("resolved"), dict)
+
+
+def discover_arms(out: Path) -> list[str]:
+    """Every arm in `out`, in name order, skipping non-reports and derived files."""
+    return [p.stem for p in sorted(out.glob("*.json"))
+            if not p.name.endswith(".stats.json") and is_report(p)]
+
+
 def load(out: Path, arm: str) -> dict:
     v: dict = {}
     rep = json.loads((out / f"{arm}.json").read_text())
@@ -82,9 +105,14 @@ def load(out: Path, arm: str) -> dict:
         v.update({f"stats.{k}": x for k, x in st["metrics"].items()
                   if isinstance(x, (int, float))})
         v["_seed_cloud"] = st.get("seed_cloud")
-    lp = out / f"{arm}.dump" / "lpips.json"
-    if lp.exists():
-        v["run.lpips"] = json.loads(lp.read_text())["mean"]
+    # The report wins: an arm re-scored after a backfill must not be shadowed by a stale
+    # dump. Before backfill the number exists only in the dump, so both paths are read.
+    if isinstance(rep["metrics"].get("lpips"), (int, float)):
+        v["run.lpips"] = rep["metrics"]["lpips"]
+    else:
+        lp = out / f"{arm}.dump" / "lpips.json"
+        if lp.exists():
+            v["run.lpips"] = json.loads(lp.read_text())["mean"]
     ply = out / f"{arm}.ply"
     if ply.exists():
         v.update(ply_shape_metrics(ply))
@@ -100,13 +128,12 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     out = Path(sys.argv[1])
-    arms = sys.argv[2:] or [p.stem for p in sorted(out.glob("*.json"))
-                            if not p.name.endswith((".stats.json", "floors.json"))]
-    missing = [a for a in arms if not (out / f"{a}.json").exists()]
-    if missing:
-        print(f"!! no report JSON for: {', '.join(missing)} (looked in {out})",
+    arms = sys.argv[2:] or discover_arms(out)
+    bad = [a for a in arms if not is_report(out / f"{a}.json")]
+    if bad:
+        print(f"!! skipping (missing or not a training report): {', '.join(bad)}",
               file=sys.stderr)
-    data = {a: load(out, a) for a in arms if (out / f"{a}.json").exists()}
+    data = {a: load(out, a) for a in arms if is_report(out / f"{a}.json")}
     if not data:
         sys.exit(f"no arms found in {out}; asked for {arms or '<auto>'}")
 
