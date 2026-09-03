@@ -16,8 +16,39 @@ not mean the kernels are fine** — run the full suite locally.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[bench,train]" pytest lpips scikit-image imageio tqdm torchvision
-.venv/bin/python -m pytest -q          # 166 tests, needs an Apple GPU
+uv run --frozen python scripts/fix_openmp.py   # REQUIRED -- see below
+.venv/bin/python -m pytest -q          # 362 tests, needs an Apple GPU
 ```
+
+**The dedup step is not optional, and it is not one-time.** Four of those wheels
+(torch, pycolmap, sklearn, open3d) each vendor their own `libomp.dylib`, and
+importing more than one in a process aborts with `OMP: Error #15`. Without the
+step, the `pytest` line above hard-crashes rather than failing a test.
+`scripts/fix_openmp.py` points every copy at a single real library; we do not
+use `KMP_DUPLICATE_LIB_OK=TRUE`, which LLVM documents as able to "silently
+produce incorrect results" — exactly the failure class this repo exists to catch.
+
+Re-run it after **any** dependency change. `uv run --frozen` reconciles the venv
+against the lockfile and restores the vendored copy over the symlink, so an
+out-of-lock install (including the one above) leaves the next run broken.
+
+### If a run hangs at 0% CPU with an empty log
+
+Delete `~/Library/Caches/torch_extensions/py312_cpu/metal_gauss_metal/lock`
+— but only if `lsof` on it shows nothing, since a held lock means a real
+concurrent build.
+
+`metal_gauss/metal_backend.py` builds the Metal extension through
+`torch.utils.cpp_extension.load`, which serialises builds with a `FileBaton`:
+create the lock `O_EXCL`, build, release. A process that is killed or `abort()`s
+in between never releases it, and `FileBaton.wait()` is `while
+os.path.exists(lock): time.sleep(0.1)` with no timeout — so one dead run makes
+every later run spin forever, even though the `.so` is already built. The
+symptom is distinctive: sleeping, 0% CPU, ~150 MB RSS, and no output at all.
+
+`sample <pid>` confirms it in one command — the main thread sits in `time_sleep`
+under `THPFunction_apply`. The parked `__kmp_*` worker threads in that output are
+the normal idle state, not the problem.
 
 ## Performance claims need a warm machine and an idle one
 
