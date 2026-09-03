@@ -107,6 +107,13 @@ arm_flags() {                    # extra flags per arm NAME
     # R1 moves THREE weights at once, deliberately: the recipe is tested as a unit, as
     # CLAUDE.md's "Indoor haze" measurement did. Nobody may later call it one-variable.
     R1)     echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2 --depth-normal-weight 0.05" ;;
+    # R1p: the recipe WITHOUT depth-normal consistency. That term was measured on
+    # 2026-09-02 to diverge on its own -- lego arm L2 ran it alone, at weight 0.05, on a
+    # scene with no priors at all, and lost 17.7 dB against a 0.108 dB repeat floor while
+    # its own logged value climbed monotonically. Until --depth-source plane-aux lands, a
+    # run with --depth-normal-weight > 0 in `center` mode is a known-broken configuration,
+    # so this arm gives the first clean read on the depth and normal PRIORS in isolation.
+    R1p)    echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
 }
