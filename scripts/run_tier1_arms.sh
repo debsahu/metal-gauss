@@ -63,7 +63,10 @@ DATASET=""; BLENDER=""; OUT=""; SEED_CLOUD=""; DEPTH_DIR=""; NORMAL_DIR=""
 COLMAP_DIR=""; IMAGES_DIR=""; INIT_PLY=""
 STEPS=30000; BUDGET=500000; MAXRES=1920; SEED=42
 ARMS="B0a,B0b,B0c,F1,R1"; FLOORS="B0a,B0b,B0c"
-MG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# MG_ROOT is set by launch_tier1.sh. The snapshot it executes lives in the OUTPUT
+# directory, so deriving the repo root from ${BASH_SOURCE[0]} would point at the output
+# tree and every helper script would vanish -- which is exactly what happened first try.
+MG="${MG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SPLATSTATS="$(cd "$MG/../../analyze/splatstats" 2>/dev/null && pwd || echo "")"
 
 while [[ $# -gt 0 ]]; do
@@ -174,8 +177,13 @@ for a in "${FLOOR_LIST[@]}"; do run_arm "$a"; done
 
 echo "=== PHASE 2: score floors, then WRITE floors.json (must predate any treatment) ==="
 for a in "${FLOOR_LIST[@]}"; do score_arm "$a"; done
-( cd "$MG" && uv run --frozen python scripts/tier1_floors.py "$OUT" "${FLOOR_LIST[@]}" ) \
-  | tee -a "$OUT/floors.log"
+rm -f "$OUT/floors.json"          # never let a STALE floors.json satisfy the guard below
+if ! ( cd "$MG" && uv run --frozen python scripts/tier1_floors.py "$OUT" "${FLOOR_LIST[@]}" ) \
+     >> "$OUT/floors.log" 2>&1; then
+  echo "floors computation FAILED; refusing to grade arms (see $OUT/floors.log)" >&2
+  tail -5 "$OUT/floors.log" >&2; exit 1
+fi
+tail -6 "$OUT/floors.log"
 [[ -f "$OUT/floors.json" ]] || { echo "floors.json missing; refusing to grade arms" >&2; exit 1; }
 touch "$OUT/FLOORS_DONE"
 

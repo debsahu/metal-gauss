@@ -35,6 +35,7 @@ mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 SNAP="$OUT/runner.snapshot.$STAMP.sh"
+rm -f "$SNAP"              # a chmod 500 snapshot from an earlier second would block the cp
 cp "$RUNNER" "$SNAP"
 chmod 500 "$SNAP"          # read+execute only: the snapshot is evidence, not a scratch file
 {
@@ -43,5 +44,8 @@ chmod 500 "$SNAP"          # read+execute only: the snapshot is evidence, not a 
   echo "         args: $*"
 } >> "$OUT/runner.provenance.log"
 
-echo "[launch] executing snapshot $SNAP"
+# The snapshot lives in the OUTPUT directory, so it cannot find the repo from its own
+# path. Hand it the real root explicitly.
+export MG_ROOT="$MG"
+echo "[launch] executing snapshot $SNAP (MG_ROOT=$MG)"
 exec bash "$SNAP" "$@"
