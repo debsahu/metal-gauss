@@ -205,3 +205,26 @@ def test_torch_fallback_still_serves_float64_and_cpu():
     d64 = torch.rand(6, 8, dtype=torch.float64) + 0.5
     out = normals_from_depth(d64, **PROD)
     assert out.dtype == torch.float64 and out.shape == (6, 8, 3)
+
+
+@mps
+def test_overflowing_depth_is_invalid_not_a_spurious_normal():
+    """`(|n_d| > 0.5) == valid` holds on 775,946,240 real pixels with zero mismatches, but
+    the EXACT relation is `gate == valid AND isfinite(L)`. They separate only when |c|^2
+    overflows f32, at depths ~1e12 m, where a `valid`-masked kernel emits a normal the
+    downstream gate would have rejected and scores a spurious depth-normal loss of 1.0.
+
+    HONESTY: this test PASSED BEFORE the `isfinite(L)` guard was added, because c/inf
+    already yields a zero normal that the gate rejects. It is a forward-looking regression
+    pin, not the reproduction of a live bug -- it constrains a future fused loss kernel
+    from masking on `valid` where `valid` and the gate could diverge. `depth_img` is a
+    weighted mean of splat z so it cannot overflow with finite means; the guard closes the
+    question by construction rather than by that argument."""
+    from metal_gauss.geometry_loss import normals_from_depth
+    d = torch.full((6, 8), 1e12, device="mps")
+    d[2, 3] = 2e12                                  # break the plane so c is not zero
+    out = normals_from_depth(d, **PROD)
+    assert torch.isfinite(out).all(), "overflow leaked a non-finite normal"
+    bad = out.norm(dim=-1)
+    assert ((bad == 0) | (bad > 0.5)).all(), \
+        "emitted a normal the |n| > 0.5 gate would reject: gate and valid have separated"

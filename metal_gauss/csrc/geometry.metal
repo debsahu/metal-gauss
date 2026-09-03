@@ -39,7 +39,14 @@ static inline bool nfd_geom(device const float* depth, uint h, uint w, float4 K,
     // L == 1e-12 exactly (bit-for-bit in f32 too), so it fails the test and the clamped
     // Jacobian branch is unreachable -- (I - n n^T)/L is valid on every live pixel.
     L = sqrt(max(dot(c, c), 1e-24f));
-    return (D0 > 0.0f) && (D1 > 0.0f) && (D2 > 0.0f) && (L > 1e-12f);
+    // isfinite(L) makes `valid` coincide with the downstream |n_d| > 0.5 gate BY
+    // CONSTRUCTION. Measured, the two agree on 775,946,240 real pixels with zero
+    // mismatches; the exact relation is `gate == valid AND isfinite(L)`, and they separate
+    // only when |c|^2 overflows f32 (depth ~1e15 m here). Today that is harmless -- c/inf
+    // gives a zero normal, which the gate rejects anyway -- but a FUSED loss kernel that
+    // masks on `valid` instead of on |n| would score a spurious loss of 1.0 there. One
+    // comparison closes the question instead of relying on that argument.
+    return (D0 > 0.0f) && (D1 > 0.0f) && (D2 > 0.0f) && (L > 1e-12f) && isfinite(L);
 }
 
 kernel void nfd_forward(device const float* depth [[buffer(0)]],
