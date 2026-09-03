@@ -441,3 +441,157 @@ def test_depth_normal_loss_with_nothing_valid_is_zero_not_nan():
     from metal_gauss.geometry_loss import depth_normal_loss
     l = depth_normal_loss(torch.zeros(2, 2, 3), torch.zeros(2, 2, 3), torch.zeros(2, 2))
     assert l.item() == 0.0 and torch.isfinite(l)
+
+
+# ------------------------------------------------------- PGSR plane-aux (Task 16 / 10b)
+
+def _plane_feat(H, W, n_cam, d, alpha=1.0):
+    """[H,W,5] = n_sum(3) + offset_sum(1) + alpha(1), constant over the frame."""
+    f = torch.zeros(H, W, 5, dtype=torch.float64)
+    f[..., :3] = torch.tensor(n_cam, dtype=torch.float64)
+    f[..., 3] = d
+    f[..., 4] = alpha
+    return f
+
+
+def test_plane_depth_recovers_a_fronto_parallel_plane_exactly():
+    """The whole point of PGSR: intersect each camera ray with the splat's tangent plane
+    instead of taking its centre depth. For a plane at z = 3 with normal (0,0,-1), the
+    offset is n.(p) = -3 and every ray must read exactly 3.0 -- unlike centre depth, which
+    is constant across a footprint and therefore wrong by +-r*tan(theta) at its ends."""
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    H = W = 8
+    feat = _plane_feat(H, W, (0.0, 0.0, -1.0), -3.0)
+    depth, normal, valid = plane_depth_from_features(feat, 4.0, 4.0, W / 2, H / 2)
+    assert valid.all()
+    assert torch.allclose(depth, torch.full((H, W), 3.0, dtype=torch.float64), atol=1e-12)
+    assert torch.allclose(normal[0, 0], torch.tensor([0.0, 0.0, -1.0], dtype=torch.float64))
+
+
+def test_plane_depth_matches_the_analytic_tilted_plane_and_uses_PIXEL_CENTRE_rays():
+    """A tilted plane makes the ray direction matter, so this is where the +0.5 shows.
+
+    Brush uses pixel CENTRES here -- `(u + 0.5 - cx)/fx` -- and INTEGER indices in
+    `normals_from_depth`. Both are replicated deliberately: the fixture that pins
+    normals_from_depth across languages uses integer indices, and changing either side of a
+    cross-language contract to match the other is how they silently diverge. The analytic
+    check below fails by ~5% under integer indices at this focal length."""
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    H = W = 8
+    fx = fy = 5.0
+    cx, cy = W / 2, H / 2
+    n = torch.tensor([0.3, -0.2, -1.0], dtype=torch.float64)
+    n = n / n.norm()
+    d = -2.5                                            # n . p = d for points on the plane
+    feat = _plane_feat(H, W, tuple(n.tolist()), d)
+    depth, _, valid = plane_depth_from_features(feat, fx, fy, cx, cy)
+    v, u = torch.meshgrid(torch.arange(H, dtype=torch.float64),
+                          torch.arange(W, dtype=torch.float64), indexing="ij")
+    ray = torch.stack([(u + 0.5 - cx) / fx, (v + 0.5 - cy) / fy, torch.ones_like(u)], -1)
+    want = d / (ray * n).sum(-1)                        # t such that n.(t*ray) = d
+    assert valid.all()
+    assert torch.allclose(depth, want, atol=1e-12)
+    ray_int = torch.stack([(u - cx) / fx, (v - cy) / fy, torch.ones_like(u)], -1)
+    want_int = d / (ray_int * n).sum(-1)
+    assert not torch.allclose(depth, want_int, atol=1e-3), \
+        "this configuration cannot tell pixel-centre rays from integer ones"
+
+
+def test_plane_depth_needs_no_alpha_division():
+    """Alpha cancels: numerator and denominator are composited with the SAME weights, so
+    scaling every channel by a common factor must leave the depth unchanged. Dividing by
+    alpha here -- as the centre-depth path must -- would make the depth alpha-dependent."""
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    H = W = 6
+    base = _plane_feat(H, W, (0.2, 0.1, -0.97), -2.0, alpha=1.0)
+    scaled = base.clone()
+    # 0.6, not 0.37: alpha is ALSO the coverage gate (min_alpha defaults to 0.5), so a
+    # factor below it makes the pixel invalid for a reason unrelated to the cancellation.
+    scaled[..., :4] *= 0.6                              # partly-covered pixel, same geometry
+    scaled[..., 4] = 0.6
+    d0, _, v0 = plane_depth_from_features(base, 5.0, 5.0, 3.0, 3.0)
+    d1, _, v1 = plane_depth_from_features(scaled, 5.0, 5.0, 3.0, 3.0)
+    assert v0.all() and v1.all()
+    assert torch.allclose(d0, d1, atol=1e-12)
+
+
+def test_plane_depth_zeroes_a_pixel_with_any_non_finite_channel():
+    """Sanitise on the JOINT finite mask, before any division. A NaN in n_x alone would
+    otherwise decay into a perfectly plausible axis-aligned plane and be reported VALID --
+    and a non-finite value masked out AFTER an op reappears as 0 * inf in that op's VJP."""
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    feat = _plane_feat(4, 4, (0.0, 0.0, -1.0), -3.0)
+    feat[1, 1, 0] = float("nan")
+    feat[2, 2, 3] = float("inf")
+    depth, normal, valid = plane_depth_from_features(feat, 4.0, 4.0, 2.0, 2.0)
+    for px in ((1, 1), (2, 2)):
+        assert valid[px] == 0.0 and depth[px] == 0.0 and (normal[px] == 0).all()
+    assert torch.isfinite(depth).all() and torch.isfinite(normal).all()
+    assert valid[0, 0] == 1.0
+
+    # THE BACKWARD is why sanitisation must be JOINT and must happen BEFORE any division.
+    # The forward alone does not discriminate: with a per-channel mask the NaN survives
+    # into depth_raw, and the validity cascade then zeroes the pixel anyway, so every
+    # forward assertion above still passes. It is the VJP that breaks -- a value masked
+    # out AFTER an op reappears as 0 * inf in that op's gradient and poisons the map.
+    f2 = _plane_feat(4, 4, (0.0, 0.0, -1.0), -3.0).requires_grad_(True)
+    bad = f2.clone()
+    bad = torch.where(torch.zeros_like(bad, dtype=torch.bool), bad, bad)   # keep the graph
+    inject = torch.zeros_like(f2)
+    inject[1, 1, 0] = float("nan")
+    d2, n2, _ = plane_depth_from_features(f2 + inject, 4.0, 4.0, 2.0, 2.0)
+    (d2.sum() + n2.sum()).backward()
+    assert torch.isfinite(f2.grad).all(), \
+        "a non-finite channel poisoned the gradient: sanitise jointly, before the divide"
+
+
+def test_plane_depth_rejects_grazing_denominators_and_out_of_range_depths():
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    H = W = 4
+    # n = +x, so denom = (u + 0.5 - cx)/fx, which at fx = 50 over a 4-px frame spans only
+    # +-0.03. min_denom must exceed that for the gate to bite; at 1e-2 half the frame is
+    # still "valid" and this assertion would pass for the wrong reason.
+    grazing = _plane_feat(H, W, (1.0, 0.0, 0.0), -3.0)      # n . ray ~ 0 near the axis
+    _, _, v = plane_depth_from_features(grazing, 50.0, 50.0, 2.0, 2.0, min_denom=5e-2)
+    assert v.sum() == 0
+    far = _plane_feat(H, W, (0.0, 0.0, -1.0), -500.0)
+    d, _, v2 = plane_depth_from_features(far, 4.0, 4.0, 2.0, 2.0, max_depth=100.0)
+    assert v2.sum() == 0 and (d == 0).all()
+    near = _plane_feat(H, W, (0.0, 0.0, -1.0), -1e-4)
+    _, _, v3 = plane_depth_from_features(near, 4.0, 4.0, 2.0, 2.0, min_depth=1e-3)
+    assert v3.sum() == 0
+
+
+def test_plane_depth_rejects_uncovered_pixels_by_alpha():
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    feat = _plane_feat(4, 4, (0.0, 0.0, -1.0), -3.0, alpha=0.2)
+    _, _, v = plane_depth_from_features(feat, 4.0, 4.0, 2.0, 2.0, min_alpha=0.5)
+    assert v.sum() == 0
+
+
+def test_plane_features_offset_is_the_world_normal_dotted_with_mean_minus_camera():
+    """d = n_world . (mean - cam_pos), which is exactly n_cam . p_cam in camera
+    coordinates -- a rotation preserves dot products. Both are live so `quats` learns
+    through n and `means` through d."""
+    from metal_gauss.geometry_loss import plane_features, splat_normals_cam
+    torch.manual_seed(0)
+    m = torch.randn(6, 3) + torch.tensor([0.0, 0.0, 4.0])
+    q = torch.randn(6, 4)
+    s = torch.rand(6, 3) * 0.1 + 0.01
+    vm = torch.eye(4); vm[:3, 3] = torch.tensor([0.1, -0.2, 0.3])
+    n_cam, d = plane_features(m, q, s, vm)
+    assert torch.allclose(n_cam, splat_normals_cam(m, q, s, vm))
+    p_cam = m @ vm[:3, :3].T + vm[:3, 3]
+    assert torch.allclose(d, (n_cam * p_cam).sum(-1), atol=1e-5)
+
+
+def test_plane_features_gradient_reaches_quats_and_means_but_not_scales():
+    from metal_gauss.geometry_loss import plane_features
+    torch.manual_seed(1)
+    m = (torch.randn(5, 3) + torch.tensor([0.0, 0.0, 4.0])).requires_grad_(True)
+    q = torch.randn(5, 4, requires_grad=True)
+    s = (torch.rand(5, 3) * 0.1 + 0.01).requires_grad_(True)
+    n_cam, d = plane_features(m, q, s, torch.eye(4))
+    (n_cam.sum() + d.sum()).backward()
+    assert q.grad.abs().sum() > 0 and m.grad.abs().sum() > 0
+    assert s.grad is None or s.grad.abs().sum() == 0

@@ -170,3 +170,67 @@ def depth_normal_loss(n_from_depth: torch.Tensor, n_rendered: torch.Tensor,
     nr = torch.where(v3, n_rendered, torch.zeros_like(n_rendered))
     err = (1.0 - (nd * nr).sum(-1)) * valid.to(nd.dtype)
     return err.sum() / valid.to(nd.dtype).sum().clamp_min(1.0)
+
+
+def plane_features(means: torch.Tensor, quats: torch.Tensor, scales: torch.Tensor,
+                   viewmat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """PGSR per-splat plane features: camera-frame normal and plane offset.
+
+    `d = n_world . (mean - cam_pos)`, which in camera coordinates is exactly
+    `n_cam . p_cam` -- a rotation preserves dot products, so the two forms agree and this
+    one needs no camera centre. Both outputs are live: `quats` learns through `n`, `means`
+    through `d`. `scales` gets nothing (the thin-axis choice is a detached argmin).
+
+    Composited over a pixel these give the plane whose intersection with the ray is the
+    unbiased surface depth -- see `plane_depth_from_features`.
+    """
+    n_cam = splat_normals_cam(means, quats, scales, viewmat)
+    Rc = viewmat[:3, :3].to(means)
+    t = viewmat[:3, 3].to(means)
+    p_cam = means @ Rc.T + t
+    return n_cam, (n_cam * p_cam).sum(-1)
+
+
+def plane_depth_from_features(feat_img: torch.Tensor, fx, fy, cx, cy,
+                              min_alpha: float = 0.5, min_denom: float = 1e-3,
+                              min_depth: float = 1e-3, max_depth: float = 1e3):
+    """PGSR unbiased surface depth from composited plane features.
+
+    `feat_img` is (H,W,5): composited `n_sum` (3), `offset_sum` (1), `alpha` (1). Port of
+    Brush `plane_depth_from_features` (brush-loss/src/lib.rs:2426).
+
+    NO ALPHA DIVISION. Numerator and denominator carry the SAME blending weights, so alpha
+    cancels exactly -- unlike the centre-depth path, which must divide. Pixel-CENTRE rays
+    `(u + 0.5 - cx)/fx` here, while `normals_from_depth` uses INTEGER indices; both match
+    Brush, and both are kept deliberately, because changing one side of a cross-language
+    contract to match the other is how the two silently diverge.
+
+    Every channel is sanitised up front on the JOINT finite mask, BEFORE any division. One
+    non-finite channel makes the whole pixel meaningless -- a NaN in `n_x` alone would
+    otherwise decay into a plausible axis-aligned plane and be reported valid -- and a
+    non-finite value masked out AFTER an op reappears as `0 * inf` in that op's VJP.
+
+    Returns `(depth, normal, valid)`; invalid pixels are exactly 0 in both maps, which is
+    what `depth_loss` scores as uncovered.
+    """
+    h, w, c = feat_img.shape
+    if c != 5:
+        raise ValueError(f"plane feature image must be (H,W,5) = n_sum(3)+offset(1)+alpha(1), got {c}")
+    finite = torch.isfinite(feat_img).all(dim=-1)
+    f = torch.where(finite[..., None], feat_img, torch.zeros_like(feat_img))
+    n_sum, offset, alpha = f[..., :3], f[..., 3], f[..., 4].detach()
+
+    u = (torch.arange(w, dtype=feat_img.dtype, device=feat_img.device) + 0.5 - cx) / fx
+    v = (torch.arange(h, dtype=feat_img.dtype, device=feat_img.device) + 0.5 - cy) / fy
+    denom = n_sum[..., 0] * u[None, :] + n_sum[..., 1] * v[:, None] + n_sum[..., 2]
+    denom_ok = denom.abs() >= min_denom
+    safe = torch.where(denom_ok, denom, torch.ones_like(denom))
+    depth_raw = offset / safe
+    in_range = (depth_raw >= min_depth) & (depth_raw <= max_depth)
+    valid = (alpha >= min_alpha) & finite & denom_ok & in_range
+
+    depth = torch.where(valid, depth_raw, torch.zeros_like(depth_raw))
+    length = (n_sum * n_sum).sum(-1).clamp_min(1e-24).sqrt()
+    normal = n_sum / length[..., None]
+    normal = torch.where(valid[..., None], normal, torch.zeros_like(normal))
+    return depth, normal, valid.to(feat_img.dtype)
