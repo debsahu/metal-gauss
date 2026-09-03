@@ -59,7 +59,8 @@ def _load():
               + (_HERE / "csrc" / "preprocess.metal").read_text() + "\n"
               + (_HERE / "csrc" / "adam.metal").read_text() + "\n"
               + (_HERE / "csrc" / "ssim.metal").read_text() + "\n"
-              + (_HERE / "csrc" / "binning.metal").read_text())
+              + (_HERE / "csrc" / "binning.metal").read_text() + "\n"
+              + (_HERE / "csrc" / "geometry.metal").read_text())
     return _ext
 
 

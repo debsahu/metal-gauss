@@ -387,6 +387,58 @@ static void ssim_dispatch(const char* kern, std::vector<torch::Tensor> bufs,
     }
 }
 
+std::vector<torch::Tensor> nfd_forward(torch::Tensor depth, double fx, double fy,
+                                       double cx, double cy) {
+    checkMPS(depth, "depth");
+    TORCH_CHECK(depth.dim() == 2, "depth must be (H,W); got ", depth.sizes());
+    const int64_t H = depth.size(0), W = depth.size(1);
+    auto out = torch::zeros({H, W, 3}, depth.options());
+    if (H < 2 || W < 2) return {out};
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("nfd_forward")];
+            SETBUF(enc, depth, 0); SETBUF(enc, out, 1);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:2];
+            float k[4] = {(float)fx, (float)fy, (float)cx, (float)cy};
+            [enc setBytes:k length:sizeof(k) atIndex:3];
+            [enc dispatchThreads:MTLSizeMake(W, H, 1)
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {out};
+}
+
+std::vector<torch::Tensor> nfd_backward(torch::Tensor depth, torch::Tensor g,
+                                        double fx, double fy, double cx, double cy) {
+    checkMPS(depth, "depth");
+    const int64_t H = depth.size(0), W = depth.size(1);
+    auto grad = torch::zeros({H, W}, depth.options());
+    if (H < 2 || W < 2) return {grad};
+    g = g.contiguous();
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = torch::mps::get_command_buffer();
+        dispatch_sync(torch::mps::get_dispatch_queue(), ^{
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:pso("nfd_backward")];
+            SETBUF(enc, depth, 0); SETBUF(enc, g, 1); SETBUF(enc, grad, 2);
+            uint d[2] = {(uint)H, (uint)W};
+            [enc setBytes:d length:sizeof(d) atIndex:3];
+            float k[4] = {(float)fx, (float)fy, (float)cx, (float)cy};
+            [enc setBytes:k length:sizeof(k) atIndex:4];
+            [enc dispatchThreads:MTLSizeMake(W, H, 1)
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [enc endEncoding];
+            torch::mps::commit();
+        });
+    }
+    return {grad};
+}
+
 torch::Tensor ssim_tail_forward(torch::Tensor b, int64_t H, int64_t W) {
     checkMPS(b, "blurred stack");
     TORCH_CHECK(b.numel() == 15 * H * W, "ssim_tail_forward: expected 15*H*W");
@@ -525,6 +577,8 @@ std::vector<torch::Tensor> bin_write(torch::Tensor uv, torch::Tensor rxy,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("init", &init, "compile the Metal library from source");
     m.def("rasterize_forward", &rasterize_forward);
+    m.def("nfd_forward", &nfd_forward);
+    m.def("nfd_backward", &nfd_backward);
     m.def("rasterize_backward", &rasterize_backward);
     m.def("pack_intersections", &pack_intersections);
     m.def("preprocess_forward", &preprocess_forward);

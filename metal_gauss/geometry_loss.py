@@ -118,7 +118,7 @@ def normal_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     return err.sum() / (3.0 * valid.to(pred.dtype).sum()).clamp_min(1.0)
 
 
-def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
+def _normals_from_depth_torch(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
     """Brush `brush-loss` `normals_from_depth`. Camera-frame, TOWARD-camera, unit.
 
     Integer pixel indices `(u - cx)/fx` (matching Brush and the cross-language fixture).
@@ -155,6 +155,45 @@ def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
     valid = dpos[:-1, :-1] & dpos[:-1, 1:] & dpos[1:, :-1] & (length > 1e-12)
     out[:-1, :-1] = torch.where(valid[..., None], n, torch.zeros_like(n))
     return out
+
+
+class _NormalsFromDepthMetal(torch.autograd.Function):
+    """Metal `normals_from_depth`, with the gather-form adjoint.
+
+    research/normals-from-depth-adjoint.md, verified 31/31 against torch.autograd. The
+    backward is one thread per INPUT pixel with no atomics -- each input is read by up to
+    three output pixels and its own ray multiplies all three roles -- so unlike the
+    rasteriser this lane is deterministic.
+    """
+
+    @staticmethod
+    def forward(ctx, depth, fx, fy, cx, cy):
+        from metal_gauss.metal_backend import _load
+        ctx.save_for_backward(depth)
+        ctx.K = (fx, fy, cx, cy)
+        return _load().nfd_forward(depth.contiguous(), fx, fy, cx, cy)[0]
+
+    @staticmethod
+    def backward(ctx, g):
+        from metal_gauss.metal_backend import _load
+        (depth,) = ctx.saved_tensors
+        fx, fy, cx, cy = ctx.K
+        return _load().nfd_backward(depth.contiguous(), g.contiguous(),
+                                    fx, fy, cx, cy)[0], None, None, None, None
+
+
+def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
+    """Camera-frame TOWARD-camera unit normals differentiated from a depth map.
+
+    Dispatches to the Metal kernel for float32 MPS input and falls back to the torch
+    reference otherwise (float64 fixtures, CPU, degenerate shapes). The two are pinned
+    against each other and against torch.autograd in tests/test_nfd_kernel.py.
+    """
+    if (depth.device.type == "mps" and depth.dtype == torch.float32
+            and depth.dim() == 2 and depth.shape[0] >= 2 and depth.shape[1] >= 2):
+        return _NormalsFromDepthMetal.apply(depth, float(fx), float(fy),
+                                            float(cx), float(cy))
+    return _normals_from_depth_torch(depth, fx, fy, cx, cy)
 
 
 def depth_normal_loss(n_from_depth: torch.Tensor, n_rendered: torch.Tensor,
