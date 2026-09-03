@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from metal_gauss.masks import alpha_to_mask, decide_polarity, find_mask, load_sidecar_mask
+from metal_gauss.priors import load_view_priors, resolve_dirs
+
 
 @dataclass
 class View:
     name: str
-    image: torch.Tensor      # (H,W,3) float32 in [0,1], cpu
+    image: torch.Tensor      # (H,W,3) uint8, cpu
     K: torch.Tensor          # (3,3)
     viewmat: torch.Tensor    # (4,4) world2cam
-
-
-_PYRAMID: dict = {}
+    mask: torch.Tensor | None = None    # (H,W) uint8, 255 = KEEP, cpu
+    depth: torch.Tensor | None = None   # (H,W) uint16 mm (0 = invalid), or float32 metres
+    normal: torch.Tensor | None = None  # (H,W,3) uint8 codes (128 = invalid), or float32
+    # Downscale cache, per view. It used to be a module-level dict keyed by `id(v)`, which
+    # is unsafe: CPython reuses a freed object's address for the next allocation of the
+    # same size, so a View created after another was collected inherited its cached
+    # downscale -- wrong image, wrong intrinsics, and since Task 5, wrong PRIORS.
+    # Reproduced on trial 2 of 200. Holding the cache on the view makes the collision
+    # impossible by construction and lets it die with the view.
+    _pyramid: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 def downscaled(v: View, factor: int) -> View:
@@ -36,8 +46,7 @@ def downscaled(v: View, factor: int) -> View:
     """
     if factor <= 1:
         return v
-    key = (id(v), factor)
-    hit = _PYRAMID.get(key)
+    hit = v._pyramid.get(factor)
     if hit is not None:
         return hit
 
@@ -52,10 +61,16 @@ def downscaled(v: View, factor: int) -> View:
     K[0, 0] *= sx; K[0, 2] *= sx
     K[1, 1] *= sy; K[1, 2] *= sy
 
-    out = View(v.name, img.contiguous(), K, v.viewmat)
-    if len(_PYRAMID) > 4096:          # bounded; scenes have a few hundred views
-        _PYRAMID.clear()
-    _PYRAMID[key] = out
+    # Strided NEAREST on the mask, never `interpolate`: a mask is labels, and an
+    # area-averaged label is not a label. The slice bounds give exactly (h, w).
+    # Strided NEAREST on mask and priors, never `interpolate`: a mask is labels, and an
+    # area-averaged depth blends the 0 invalid-sentinel into its valid neighbours, which
+    # invents a measurement the sensor never made. The slice bounds give exactly (h, w).
+    def _sub(t):
+        return None if t is None else t[:h * factor:factor, :w * factor:factor].contiguous()
+    out = View(v.name, img.contiguous(), K, v.viewmat,
+               mask=_sub(v.mask), depth=_sub(v.depth), normal=_sub(v.normal))
+    v._pyramid[factor] = out
     return out
 
 
@@ -68,22 +83,65 @@ class Scene:
 
 
 def load_scene(colmap_dir: str | Path, images_dir: str | Path,
-               max_resolution: int = 1600, eval_split_every: int = 8) -> Scene:
+               max_resolution: int = 1600, eval_split_every: int = 8,
+               masks_dir: str | Path | None = None,
+               mask_polarity: str = "auto",
+               depth_dir: str | Path | None = None,
+               normal_dir: str | Path | None = None,
+               prior_resident: str = "quantized",
+               use_priors: bool = True,
+               init_ply: str | Path | None = None) -> Scene:
     import pycolmap
     from PIL import Image
 
     rec = pycolmap.Reconstruction(str(colmap_dir))
     cam = list(rec.cameras.values())[0]
 
+    # Resolved ONCE for the directory, before any frame is read -- see masks.py.
+    polarity, mask_stats = "drop", None
+    if masks_dir is not None:
+        if mask_polarity == "auto":
+            polarity, mask_stats = decide_polarity(masks_dir)
+        else:
+            polarity = mask_polarity
+        print(f"masks: {masks_dir} polarity={polarity} {mask_stats}")
+
+    d_dir, n_dir = resolve_dirs(images_dir, depth_dir, normal_dir, enabled=use_priors)
+    if d_dir is not None or n_dir is not None:
+        print(f"priors: depth={d_dir or 'none'} normal={n_dir or 'none'} "
+              f"resident={prior_resident}")
+    n_depth = n_normal = 0
+
     views = []
     for im in sorted(rec.images.values(), key=lambda i: i.name):
         p = Path(images_dir) / im.name
         if not p.exists():
             continue
-        img = Image.open(p).convert("RGB")
+        # Capture the alpha BEFORE .convert("RGB") -- that call silently discards a
+        # baked mask, which is how an alpha-masked dataset trains unmasked.
+        src = Image.open(p)
+        alpha = src.getchannel("A") if src.mode in ("RGBA", "LA") else None
+        img = src.convert("RGB")
         scale = min(1.0, max_resolution / max(img.size))
         W, H = int(round(img.width * scale)), int(round(img.height * scale))
         img = img.resize((W, H), Image.LANCZOS)
+
+        side = find_mask(masks_dir, Path(im.name).stem) if masks_dir is not None else None
+        if alpha is not None and side is not None:
+            raise ValueError(
+                f"{im.name}: both a baked alpha channel and a sidecar mask {side} "
+                f"-- pick one source")
+        mask = None
+        if alpha is not None:
+            mask = alpha_to_mask(np.asarray(alpha.resize((W, H), Image.NEAREST)))
+        elif side is not None:
+            mask = load_sidecar_mask(side, (W, H), polarity)
+
+        depth, normal = load_view_priors(Path(im.name).stem, (W, H), d_dir, n_dir,
+                                        resident=prior_resident)
+        n_depth += depth is not None
+        n_normal += normal is not None
+
         sx, sy = W / cam.width, H / cam.height
         K = torch.tensor([[cam.params[0] * sx, 0, cam.params[2] * sx],
                           [0, cam.params[1] * sy, cam.params[3] * sy],
@@ -96,12 +154,57 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
         # OOMed a 24GB M5 alongside the 1M-splat Adam state. Convert per step.
         views.append(View(im.name,
                           torch.from_numpy(np.asarray(img, dtype=np.uint8).copy()),
-                          K, vm))
+                          K, vm,
+                          mask=None if mask is None else torch.from_numpy(mask),
+                          depth=depth, normal=normal))
+
+    if d_dir is not None or n_dir is not None:
+        print(f"priors attached: depth {n_depth}/{len(views)}, normal {n_normal}/{len(views)}")
 
     heldout = views[::eval_split_every]
     heldout_names = {v.name for v in heldout}
     train = [v for v in views if v.name not in heldout_names]
 
-    pts = np.array([p.xyz for p in rec.points3D.values()], np.float32)
-    cols = np.array([p.color for p in rec.points3D.values()], np.float32) / 255.0
+    if init_ply is not None:
+        pts, cols = load_seed_ply(init_ply)
+        print(f"init_ply: {init_ply} -> {len(pts):,} seed points "
+              f"(COLMAP model contributed {len(rec.points3D):,}, ignored)")
+    else:
+        pts = np.array([p.xyz for p in rec.points3D.values()], np.float32)
+        cols = np.array([p.color for p in rec.points3D.values()], np.float32) / 255.0
     return Scene(train, heldout, pts, cols)
+
+
+# Spherical-harmonics DC normalisation, as in the INRIA ply convention.
+_SH_C0 = 0.28209479177387814
+
+
+def load_seed_ply(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """(P,3) float32 positions and (P,3) colours in [0,1] from a point-cloud or splat ply.
+
+    Some datasets carry poses in a COLMAP model and their SEED somewhere else entirely --
+    ARKitScenes' `sparse_colmap_for_moge/0` has 656 images and ZERO points3D, with the
+    1,129,403-point seed in `ds/seed.ply`. Without this the trainer dies inside cKDTree on
+    an empty array.
+
+    Colour comes from `f_dc_*` when present, decoded as the SH DC band
+    (`rgb = f_dc * C0 + 0.5`) -- reading it raw makes a mid-grey seed come out BLACK, which
+    is a quietly darker initialisation rather than an error. A plain `red/green/blue` cloud
+    is accepted too; anything else seeds mid-grey.
+    """
+    import plyfile
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"--init-ply {path} does not exist")
+    v = plyfile.PlyData.read(str(path))["vertex"]
+    names = set(v.data.dtype.names or ())
+    pts = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float32)
+    if {"f_dc_0", "f_dc_1", "f_dc_2"} <= names:
+        dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], 1).astype(np.float32)
+        cols = np.clip(dc * _SH_C0 + 0.5, 0.0, 1.0)
+    elif {"red", "green", "blue"} <= names:
+        cols = np.stack([v["red"], v["green"], v["blue"]], 1).astype(np.float32) / 255.0
+    else:
+        cols = np.full((len(pts), 3), 0.5, np.float32)
+    return pts, cols

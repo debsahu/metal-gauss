@@ -28,7 +28,7 @@ metal-gauss-render = "metal_gauss.render_path:main"
 
 [project.optional-dependencies]
 bench = ["pycolmap>=3.10"]
-train = ["pycolmap>=3.10", "pillow>=10.0", "scipy>=1.11"]
+train = ["pycolmap>=3.10", "pillow>=10.0", "scipy>=1.11", "tifffile>=2024.1", "imagecodecs>=2024.1"]
 test = ["pytest>=8.0"]
 
 [build-system]

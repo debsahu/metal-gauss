@@ -17,6 +17,7 @@ import math
 import platform
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,9 @@ import torch
 
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
+from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
+                                      normal_loss, normals_from_depth, splat_normals_cam)
+from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
 from metal_gauss.mcmc import add_noise, grow, relocate
@@ -57,8 +61,89 @@ def ssim(a: torch.Tensor, b: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor
     than the rasteriser -- almost all of it dispatch overhead rather than
     arithmetic.
     """
+    return ssim_map(a, b, kernel).mean()
+
+
+def ssim_map(a: torch.Tensor, b: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Per-pixel SSIM, before the mean. `ssim_tail_forward` returns (1,3,H,W) -- NOT
+    the (H,W,3) layout the images are in -- so anything multiplied into it has to be
+    broadcast to that layout, which `_bcast` does."""
     return _SSIMFused.apply(a.contiguous(), b.contiguous(),
-                            kernel[0, 0, 0].contiguous()).mean()
+                            kernel[0, 0, 0].contiguous())
+
+
+def _bcast(mask01: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """(H,W) keep-mask reshaped to multiply `like` elementwise.
+
+    (H,W,3) images take a trailing axis; the SSIM map's (1,3,H,W) takes two LEADING
+    axes. Using the trailing form on the SSIM map silently mis-broadcasts -- and on a
+    square image it does not even raise, it just multiplies the wrong pixels.
+    """
+    if like.ndim == 4:                      # (1,3,H,W) SSIM map
+        return mask01[None, None]
+    if like.ndim == 3:                      # (H,W,3) image
+        return mask01[..., None]
+    return mask01
+
+
+def photometric_loss(rgb_c: torch.Tensor, gt: torch.Tensor,
+                     mask01: torch.Tensor | None, kernel: torch.Tensor,
+                     return_terms: bool = False):
+    """0.8 L1 + 0.2 (1 - SSIM), per pixel, multiplied by the KEEP mask (1 = keep),
+    then meaned over ALL pixels.
+
+    The mask zeroes the NUMERATOR only -- there is deliberately no division by
+    coverage here, matching Brush's `image_loss`. `masked_mse` below DOES divide,
+    because a PSNR that did not would be inflated by -10 log10(coverage). The
+    asymmetry is intentional: a training loss is a descent direction whose overall
+    scale is absorbed by the learning rate, while a reported metric is a number
+    someone compares against a 24 dB gate.
+
+    Masking cannot be exact at a mask boundary: SSIM's 11-tap window means a kept
+    pixel within 5 px of a dropped one still sees it. That is a property of windowed
+    SSIM, not of this implementation (CLAUDE.md Stage 4 says the same of masked SSIM).
+    """
+    l1 = (rgb_c - gt).abs()
+    ds = 1.0 - ssim_map(rgb_c, gt, kernel)
+    if mask01 is not None:
+        l1 = l1 * _bcast(mask01, l1)
+        ds = ds * _bcast(mask01, ds)
+    terms = {"l1": l1.mean(), "ssim": ds.mean()}
+    loss = 0.8 * terms["l1"] + 0.2 * terms["ssim"]
+    return (loss, terms) if return_terms else loss
+
+
+def masked_mse(err2: torch.Tensor, mask01: torch.Tensor | None) -> torch.Tensor:
+    """mean(err2 * keep) / mean(keep). `mask01` None -> plain mean.
+
+    The divisor is the whole point. Without it, masked-out pixels leave the numerator
+    but not the denominator, so PSNR reads -10 log10(coverage) too high: +2.3 dB at
+    59% coverage. Coverage is clamped so a fully dropped frame scores 0 rather than
+    an infinite PSNR that would drag the held-out mean up.
+    """
+    if mask01 is None:
+        return err2.mean()
+    cov = mask01.mean().clamp_min(1e-6)
+    return (err2 * _bcast(mask01, err2)).mean() / cov
+
+
+def mask_void_warning(masks_supplied: bool, coverage: float) -> str | None:
+    """The one-line instrument that makes CLAUDE.md's 49.561 dB impossible to repeat.
+
+    `mean coverage 100.0%` on a run that supplied masks means the masks never reached
+    the loss: the trainer scored every pixel, trained the operator and the monopod in,
+    and its "masked" PSNR is identical to its unmasked one by construction. That run
+    (splat_3840v2_full) spent 47,037 s of GPU and its 2,500-step authorising gate was
+    measured on the same maskless dataset.
+
+    Silent when no masks were supplied -- an unmasked dataset legitimately reads 100%,
+    and a warning there just teaches operators to ignore the line.
+    """
+    if not masks_supplied or coverage < 0.9999:
+        return None
+    return ("  [MASKS] mean coverage 100.0% on a run that supplied masks: the masks "
+            "did not reach the loss. Treat this run as VOID "
+            "(see CLAUDE.md Stage 3, splat_3840v2_full).")
 
 
 class _SSIMFused(torch.autograd.Function):
@@ -181,9 +266,130 @@ def make_optimizer(p: dict, lr_means0: float, *, lr_opac: float = 1e-2,
     return torch.optim.Adam(groups, eps=1e-15)
 
 
+def geometry_view_coverage(args, views) -> dict:
+    """{term: (n_views_actually_supervised, n_views)} for each ENABLED geometry term.
+
+    The startup check proves at least ONE view carries each prior; it says nothing about
+    how many. A dataset with 10 of 196 views carrying depth passes it, trains with depth
+    supervision on 5% of steps, and produces a log indistinguishable from full coverage.
+    CLAUDE.md records exactly this in production -- "24 of 276 faces trained
+    photometric-only", caused by a stale gate and found long after the fact.
+
+    `depth_normal` compares the render against itself and needs no prior, so it is always
+    fully covered.
+    """
+    n = len(views)
+    cov = {}
+    if args.depth_loss_weight > 0:
+        cov["depth"] = (sum(v.depth is not None for v in views), n)
+    if args.normal_loss_weight > 0:
+        cov["normal"] = (sum(v.normal is not None for v in views), n)
+    if args.depth_normal_weight > 0:
+        cov["depth_normal"] = (n, n)
+    return cov
+
+
+def geometry_coverage_warning(cov: dict) -> str | None:
+    """Loud line when a term supervises only some views. Silent at full coverage, as the
+    mask warning is silent on an unmasked dataset -- a warning that always fires is one
+    operators learn to skip."""
+    partial = [(k, a, b) for k, (a, b) in cov.items() if 0 < a < b]
+    if not partial:
+        return None
+    bits = ", ".join(f"{k} {a}/{b} views ({100.0 * a / b:.1f}%)" for k, a, b in partial)
+    return ("  [PRIORS] PARTIAL geometry supervision: " + bits +
+            ". The remaining views train photometric-only and nothing else in this log "
+            "says so (see CLAUDE.md Stage 3, '24 of 276 faces trained photometric-only').")
+
+
+def shape_metrics(log_scales: torch.Tensor) -> dict:
+    """In-plane aspect and needle fraction: WHAT the splats became.
+
+    Sorted activated scales smin <= smid <= smax. `smax` is the surface extent, `smid` the
+    other in-plane axis, `smin` the thickness. Flatten drives smin down and that is a DISC,
+    correctly reported as healthy by thin-axis, opacity and dark fraction. A NEEDLE is smid
+    collapsing while smax holds -- and none of those three metrics can see it. P-GEOM's R1
+    read healthier than baseline on all of them while smid fell 6.62 -> 1.35 mm at smax
+    ~23 mm and the needle fraction went 16.6% -> 56.8%. This is that missing row.
+    """
+    s = torch.exp(log_scales.detach()).sort(dim=-1).values
+    aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
+    return {"aspect_p50": float(aspect.median()),
+            "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
+            "smid_p50_mm": float(s[:, 1].median() * 1000.0),
+            "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
+
+
+@torch.no_grad()
+def depth_normal_floor(gt_depth, gt_normal, alpha, K) -> float | None:
+    """What `depth_normal` could score on this data at all: the same term evaluated on the
+    PRIOR depth and PRIOR normals, i.e. the value a perfect render would reach.
+
+    The term is `1 - cos` between normals differentiated from a depth map and a normal
+    field. Differentiating a discrete depth map is never exact, so the floor is not 0 --
+    on P-GEOM it is 0.04-0.11. A term sitting at 7-15x its own floor AND CLIMBING is
+    broken, which is what R1 did (0.70-0.81, rising) and what nothing in the log said.
+    """
+    if gt_depth is None or gt_normal is None:
+        return None
+    n_d = normals_from_depth(gt_depth, K[0, 0].item(), K[1, 1].item(),
+                             K[0, 2].item(), K[1, 2].item())
+    return float(depth_normal_loss(n_d, gt_normal, alpha))
+
+
+def geometry_aux(means, quats, scales, viewmat):
+    """The two aux attribute maps the geometry recipe composites: camera-frame splat
+    normals and view-space z.
+
+    `scales` MUST be the same tensor handed to `render` (post-`filter_3d`), so the
+    thin-axis choice describes the ellipsoid actually rasterized.
+
+    z comes from torch, NEVER from the preprocess's own `depth` output.
+    `_PreprocessMetal.backward` accepts `d_depth` and DROPS it (metal_backend.py:267-279),
+    so a depth map built on that output has no gradient path: it trains nothing and does
+    not error. Pinned by tests/test_aux_render.py.
+    """
+    vmd = viewmat.to(means.device)
+    n_cam = splat_normals_cam(means, quats, scales, vmd)
+    z = (means @ vmd[:3, :3].T + vmd[:3, 3])[:, 2:3].expand(-1, 3)
+    return [n_cam, z]
+
+
+def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
+    """The depth / normal / depth-normal terms over one view's aux maps.
+
+    ALPHA IS DETACHED. The terms divide by coverage to recover an attribute from its
+    alpha-weighted composite; a differentiable divisor would make FADING A SPLAT OUT a
+    cheaper way to satisfy a depth loss than moving it. That is the mechanism behind
+    Brush's banned `--depth-source plane-fused`, where opacity p50 collapses ~30%.
+
+    `keep` is a BINARY mask. Multiplying a metric depth by a fractional alpha would invent
+    depths between 0 and the truth, and a smaller depth is a different surface, not a less
+    certain one.
+    """
+    alpha_d = alpha.detach()
+    n_img, z_img = aux_maps
+    n_img = n_img / alpha_d.clamp_min(1e-10)[..., None]
+    n_img = n_img / n_img.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    depth_img = z_img[..., 0] / alpha_d.clamp_min(1e-10)
+    terms = {}
+    if args.depth_loss_weight > 0 and gt_depth is not None:
+        gt_d = gt_depth if keep is None else gt_depth * keep
+        terms["depth"] = depth_loss(depth_img, gt_d, args.depth_loss_space)
+    if args.normal_loss_weight > 0 and gt_normal is not None:
+        gt_n = gt_normal if keep is None else gt_normal * keep[..., None]
+        terms["normal"] = normal_loss(n_img, gt_n)
+    if args.depth_normal_weight > 0:
+        n_d = normals_from_depth(depth_img, K[0, 0].item(), K[1, 1].item(),
+                                 K[0, 2].item(), K[1, 2].item())
+        terms["depth_normal"] = depth_normal_loss(
+            n_d, n_img, alpha_d if keep is None else alpha_d * keep)
+    return terms
+
+
 def render_view(p: dict, v, active: int, sh_deg: int = 3,
                 background=(0.0, 0.0, 0.0), antialias: bool = False,
-                absgrad_out=None, filter_3d=None):
+                absgrad_out=None, filter_3d=None, want_geometry: bool = False):
     """One rendered view, exactly as training renders it.
 
     v.K and v.viewmat stay on the HOST on purpose: the kernel reads both there,
@@ -197,17 +403,24 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
         # because it is a plain reparameterisation of scale and opacity, so
         # autograd carries it and no adjoint has to be written.
         scales, opac = apply_3d_filter(scales, opac, filter_3d[:active])
+    aux = geometry_aux(p["means"][:active], p["quats"][:active], scales,
+                       v.viewmat) if want_geometry else None
     return render(
         p["means"][:active], p["quats"][:active],
         scales, opac, p["sh_dc"][:active],
         v.K, v.viewmat, W, H,
         sh_degree=sh_deg, backend="metal", sh_rest=p["sh_rest"][:active],
-        background=background, antialias=antialias, absgrad_out=absgrad_out)
+        background=background, antialias=antialias, absgrad_out=absgrad_out,
+        aux_colors=aux,
+        # Centre-depth contract: both channels detached, so a geometry loss cannot buy its
+        # error down by moving opacity or footprint. See metal_backend.render.
+        aux_detach_weights=None if aux is None else [True] * len(aux))
 
 
 # ---------------------------------------------------------------- training
 
-def train(args) -> dict:
+def train(args, scene: Scene | None = None) -> dict:
+    env = _env_snapshot()          # BEFORE any work: this is the provenance of the run
     device = "mps"
     # Seed every torch RNG the run touches: the init jitter, relocate/grow's
     # multinomial, and add_noise's randn. The numpy streams (point subsample,
@@ -225,7 +438,11 @@ def train(args) -> dict:
     torch.manual_seed(args.seed)
     if hasattr(torch.mps, "manual_seed"):
         torch.mps.manual_seed(args.seed)
-    if args.blender:
+    if scene is not None:
+        # A pre-built Scene (tests, and any caller that already has one). Blender's white
+        # background is not implied here; a supplied scene uses the COLMAP convention.
+        bg = (0.0, 0.0, 0.0)
+    elif args.blender:
         from metal_gauss.blender import load_blender
         scene = load_blender(args.blender, args.max_resolution)
         # The Blender PNGs are composited over WHITE, so the renderer must
@@ -235,10 +452,43 @@ def train(args) -> dict:
         bg = (1.0, 1.0, 1.0)
     else:
         scene = load_scene(args.colmap, args.images, args.max_resolution,
-                           args.eval_split_every)
+                           args.eval_split_every,
+                           masks_dir=getattr(args, "masks", None),
+                           mask_polarity=getattr(args, "mask_polarity", "auto"),
+                           depth_dir=getattr(args, "depth_dir", None),
+                           normal_dir=getattr(args, "normal_dir", None),
+                           prior_resident=getattr(args, "prior_resident", "quantized"),
+                           use_priors=not getattr(args, "no_priors", False),
+                           init_ply=getattr(args, "init_ply", None))
         bg = (0.0, 0.0, 0.0)
     print(f"{len(scene.train)} train views, {len(scene.heldout)} held out, "
           f"{len(scene.points):,} sparse points, budget {args.budget:,}")
+    # "supplied" means a mask source was present, from EITHER convention: an explicit
+    # --masks directory, or alpha baked into the images (which needs no flag at all).
+    masks_supplied = any(v.mask is not None for v in scene.train + scene.heldout)
+    if masks_supplied:
+        n_m = sum(v.mask is not None for v in scene.train + scene.heldout)
+        print(f"masked supervision active on {n_m}/"
+              f"{len(scene.train) + len(scene.heldout)} views")
+
+    # Refuse to start rather than silently train without the supervision the run was
+    # configured for: a run that quietly drops a term looks exactly like one that kept it.
+    for flag, attr in (("--depth-loss-weight", "depth"), ("--normal-loss-weight", "normal")):
+        w = getattr(args, flag[2:].replace("-", "_"))
+        if w > 0 and not any(getattr(v, attr) is not None for v in scene.train):
+            raise RuntimeError(
+                f"{flag} {w} but no view carries a {attr} prior -- refusing to train "
+                f"without the supervision it was configured for. Point --{attr}-dir at "
+                f"the priors, or set the weight to 0.")
+    want_geometry = (args.depth_loss_weight > 0 or args.normal_loss_weight > 0
+                     or args.depth_normal_weight > 0)
+    term_cov = geometry_view_coverage(args, scene.train)
+    if term_cov:
+        print("geometry supervision: " + ", ".join(
+            f"{k} {a}/{b} views" for k, (a, b) in term_cov.items()))
+        cov_warn = geometry_coverage_warning(term_cov)
+        if cov_warn:
+            print(cov_warn, flush=True)
 
     # Selective Adam was built, validated, and MEASURED SLOWER here: at this
     # scene's per-view visibility (well above 50%), 15 gather/scatter launches
@@ -327,13 +577,38 @@ def train(args) -> dict:
         rgb, alpha, info = render_view(p, v, active, sh_deg, bg,
                                        antialias=args.antialias,
                                        absgrad_out=grad_sum if use_absgrad else None,
-                                       filter_3d=filter_3d)
+                                       filter_3d=filter_3d,
+                                       want_geometry=want_geometry)
         gt = v.image.to(device).float() / 255.0
         # Correct the RENDER (not the ground truth) so the exported splat stays
         # in the true photometric space and held-out views need no transform.
         rgb_c = appearance(rgb, view_idx) if appearance is not None else rgb
-        l1 = (rgb_c - gt).abs().mean()
-        loss = 0.8 * l1 + 0.2 * (1.0 - ssim(rgb_c, gt, kernel))
+        m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
+
+        loss, terms = photometric_loss(rgb_c, gt, m01, kernel, return_terms=True)
+        # PlanarGS flatten. NOT ramped down with `aux`: it is a geometry prior on the
+        # final model, not an early-growth regulariser, and Brush applies it at constant
+        # weight for the whole schedule. ADDED EXACTLY ONCE -- a second add lived below
+        # the MCMC regularisers until 2026-09-02 and doubled every flatten run in this
+        # project; tests pin term multiplicity now.
+        if args.flatten_loss_weight > 0.0:
+            terms["flatten"] = flatten_loss(p["log_scales"][:active])
+            loss = loss + args.flatten_loss_weight * terms["flatten"]
+        if want_geometry:
+            keep = None if m01 is None else (m01 > 0.5)
+            gt_d = decode_depth(v.depth.to(device)) if v.depth is not None else None
+            gt_n = decode_normal(v.normal.to(device)) if v.normal is not None else None
+            g = geometry_terms(args, info["aux"], alpha, v.K, gt_d, gt_n, keep)
+            terms.update(g)
+            if args.depth_normal_weight > 0:
+                fl = depth_normal_floor(gt_d, gt_n, alpha.detach(), v.K)
+                if fl is not None:
+                    terms["dn_floor"] = fl
+            for name, w in (("depth", args.depth_loss_weight),
+                            ("normal", args.normal_loss_weight),
+                            ("depth_normal", args.depth_normal_weight)):
+                if name in g:
+                    loss = loss + w * g[name]
         if appearance is not None:
             loss = loss + args.appearance_reg * appearance.regulariser()
         # MCMC regularisers: keep opacity and scale mass in check
@@ -451,17 +726,37 @@ def train(args) -> dict:
 
         if step % args.eval_every == 0 or step == args.steps:
             torch.mps.empty_cache()
-            psnr = evaluate(p, scene, device, sh_degree=sh_deg, active=active,
-                            background=bg, antialias=args.antialias,
-                            filter_3d=filter_3d)
+            ev = evaluate(p, scene, device, sh_degree=sh_deg, active=active,
+                          background=bg, antialias=args.antialias,
+                          filter_3d=filter_3d,
+                          dump_dir=getattr(args, "eval_dump", None))
             dt = time.perf_counter() - t0
-            print(f"step {step:>6}  loss {loss.item():.4f}  heldout PSNR {psnr:.2f} dB  "
+            print(f"step {step:>6}  loss {loss.item():.4f}  "
+                  f"heldout masked PSNR {ev['psnr_masked']:.2f} dB | "
+                  f"unmasked (legacy) PSNR {ev['psnr']:.2f} | "
+                  f"mean coverage {100 * ev['coverage']:.1f}%  "
                   f"{active/1000:.0f}k splats  {dt:.0f}s  ({1000 * dt / step:.0f} ms/step)",
                   flush=True)
-            log.append({"step": step, "psnr": psnr, "wall_s": round(dt, 1),
-                        "active": active})
+            warn = mask_void_warning(masks_supplied, ev["coverage"])
+            if warn:
+                print(warn, flush=True)
+            term_vals = {k: float(t.detach() if torch.is_tensor(t) else t)
+                         for k, t in terms.items()}
+            print("  terms  " + "  ".join(f"{k} {t:.5f}" for k, t in term_vals.items()),
+                  flush=True)
+            shape = shape_metrics(p["log_scales"][:active])
+            print(f"  shape  aspect_p50 {shape['aspect_p50']:.4f}  "
+                  f"needle_frac {shape['needle_frac']:.4f}  "
+                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm",
+                  flush=True)
+            log.append({"step": step, "psnr": ev["psnr"],
+                        "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
+                        "wall_s": round(dt, 1), "active": active, "terms": term_vals,
+                        "shape": shape})
 
-    out = _run_report(args, log, time.perf_counter() - t0, active)
+    out = _run_report(args, log, time.perf_counter() - t0, active, env=env)
+    out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
+    out["metrics"]["term_coverage_warning"] = geometry_coverage_warning(term_cov)
     for dest in (args.out, getattr(args, "report", None)):
         if dest:
             Path(dest).parent.mkdir(parents=True, exist_ok=True)
@@ -477,14 +772,19 @@ def train(args) -> dict:
 def evaluate(p, scene: Scene, device: str, max_views: int | None = None,
              background=(0.0, 0.0, 0.0),
              sh_degree: int = 3, active: int | None = None,
-             antialias: bool = False, filter_3d=None) -> float:
+             antialias: bool = False, filter_3d=None, dump_dir=None) -> dict:
     """Held-out PSNR over ALL held-out views by default.
 
     This used to default to the first 10 of 21 views, which biased every
     number we reported by up to ~0.5 dB depending on which views happened to
     be easy. Metrics get fixed before levers get credited.
+
+    Returns masked PSNR (the gate figure -- scored over KEPT pixels only), the
+    legacy unmasked PSNR (every pixel, kept comparable with every number recorded
+    before masks existed), and mean coverage. On an unmasked dataset all three are
+    the old number, 1.0 and each other.
     """
-    psnrs = []
+    psnrs_m, psnrs_u, covs = [], [], []
     for v in (scene.heldout if max_views is None else scene.heldout[:max_views]):
         H, W = v.image.shape[:2]
         a = len(p["means"]) if active is None else active
@@ -498,9 +798,24 @@ def evaluate(p, scene: Scene, device: str, max_views: int | None = None,
                            sh_degree=sh_degree, backend="metal", background=background,
                            antialias=antialias)
         gt = v.image.to(device).float() / 255.0
-        mse = ((rgb.clamp(0, 1) - gt) ** 2).mean().item()
-        psnrs.append(-10 * math.log10(max(mse, 1e-10)))
-    return float(np.mean(psnrs))
+        m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
+        err2 = (rgb.clamp(0, 1) - gt) ** 2
+        psnrs_u.append(-10 * math.log10(max(err2.mean().item(), 1e-10)))
+        psnrs_m.append(-10 * math.log10(max(masked_mse(err2, m01).item(), 1e-10)))
+        covs.append(1.0 if m01 is None else m01.mean().item())
+        if dump_dir is not None:
+            from PIL import Image as _Im
+            d = Path(dump_dir); d.mkdir(parents=True, exist_ok=True)
+            stem = Path(v.name).stem
+            def _u8(t):
+                return (t.clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
+            _Im.fromarray(_u8(rgb)).save(d / f"{stem}_render.png")
+            _Im.fromarray(_u8(gt)).save(d / f"{stem}_gt.png")
+            if v.mask is not None:
+                _Im.fromarray(v.mask.cpu().numpy()).save(d / f"{stem}_mask.png")
+    return {"psnr_masked": float(np.mean(psnrs_m)),
+            "psnr": float(np.mean(psnrs_u)),
+            "coverage": float(np.mean(covs))}
 
 
 @torch.no_grad()
@@ -548,7 +863,36 @@ def export_ply(p, path: str, filter_3d=None) -> None:
     plyfile.PlyData([plyfile.PlyElement.describe(data, "vertex")]).write(path)
 
 
-def _run_report(args, log, wall_s, active):
+def _env_snapshot() -> dict:
+    """What code is about to run, captured BEFORE it runs.
+
+    `_run_report` used to query git when it WROTE the report, which answers "what was
+    checked out when this stopped?" -- not "what produced this number?". On 2026-09-02 an
+    arm that started at 16:53 and finished at 17:09 recorded a commit made at 16:59, six
+    minutes after Python had already imported the module it was executing. The report was
+    the provenance mechanism for a five-arm measurement protocol, so it has to be right.
+    """
+    def _git(*a):
+        try:
+            return subprocess.run(("git",) + a, cwd=Path(__file__).resolve().parent,
+                                  capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except Exception:
+            return None
+
+    return {
+        "git": _git("rev-parse", "--short", "HEAD") or None,
+        "dirty": bool(_git("status", "--porcelain")),
+        "torch": torch.__version__,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        # Microseconds, not seconds: a short run starts and finishes inside the same
+        # second, and a timestamp pair that cannot order two events is not provenance.
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
+def _run_report(args, log, wall_s, active, env=None):
     """Everything needed to reproduce this run, recorded by the process that ran it.
 
     Records ALL of vars(args), not a curated subset. Curation is how knobs go
@@ -562,28 +906,21 @@ def _run_report(args, log, wall_s, active):
     start_active clamping and the steps-scaler, so these are the values that
     actually ran, by construction rather than by convention.
     """
-    def _git(*a):
-        try:
-            return subprocess.run(("git",) + a, cwd=Path(__file__).resolve().parent,
-                                  capture_output=True, text=True,
-                                  timeout=5).stdout.strip()
-        except Exception:
-            return None
-
+    env = dict(env) if env is not None else _env_snapshot()
+    env["finished_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     resolved = {k: v for k, v in sorted(vars(args).items())}
     ms = (1000.0 * wall_s / args.steps) if args.steps else None
     return {
         "schema": 1,
         "resolved": resolved,
-        "env": {
-            "git": _git("rev-parse", "--short", "HEAD"),
-            "dirty": bool(_git("status", "--porcelain")),
-            "torch": torch.__version__,
-            "platform": platform.platform(),
-            "machine": platform.machine(),
-        },
+        "env": env,
         "metrics": {
+            # `psnr` stays the UNMASKED number: readers of --out predate masks.
             "psnr": log[-1]["psnr"] if log else None,
+            "psnr_masked": log[-1].get("psnr_masked") if log else None,
+            "coverage": log[-1].get("coverage") if log else None,
+            "terms": log[-1].get("terms") if log else None,
+            "shape": log[-1].get("shape") if log else None,
             "wall_s": round(wall_s, 1),
             "n_splats": int(active),
             "ms_per_step": round(ms, 2) if ms else None,
@@ -597,7 +934,10 @@ def _run_report(args, log, wall_s, active):
     }
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as a value. Tests build arms through THIS so they inherit every default
+    from the one place the command line does -- a hand-written namespace is how a sweep
+    once ran with settings other than the ones it reported."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--colmap")
     ap.add_argument("--blender", help="NeRF-synthetic scene dir (transforms_*.json). "
@@ -610,12 +950,64 @@ def main():
                          "auto_budget(). Set explicitly to override.")
     ap.add_argument("--max-resolution", type=int, default=1600)
     ap.add_argument("--eval-split-every", type=int, default=8)
+    ap.add_argument("--masks", default=None,
+                    help="directory of sidecar masks, one per image by stem. Polarity "
+                         "is decided for the DIRECTORY (see --mask-polarity). Images "
+                         "that carry a baked RGBA alpha need no flag and must NOT also "
+                         "have a sidecar -- that combination is an error, not a merge.")
+    ap.add_argument("--mask-polarity", choices=["auto", "drop", "keep"], default="auto",
+                    help="what 255 means in --masks. Every masks*/ directory in "
+                         "earthbyte/slam is 255 = DROP; 'auto' reads the median white "
+                         "fraction over a sample and picks, then prints what it picked.")
+    ap.add_argument("--depth-dir", default=None,
+                    help="directory of depth priors, one per image by stem (tiff-f32, "
+                         "tiff-f32-deflate or png-quantized; formats may mix per frame). "
+                         "Default: the sibling <images>/../depth if it exists. A prior "
+                         "whose size differs from the LOADED image size is a hard error.")
+    ap.add_argument("--normal-dir", default=None,
+                    help="directory of normal priors. Default: the sibling "
+                         "<images>/../normal if it exists.")
+    ap.add_argument("--prior-resident", choices=["quantized", "float32"],
+                    default="quantized",
+                    help="how priors are held in RAM. 'quantized' is uint16 mm / uint8 "
+                         "codes, 5 bytes/px against 16, and is training-equivalent per "
+                         "the WS-G gate (0.0128 dB vs a 0.0317 dB same-seed repeat). "
+                         "'float32' is the lossless escape hatch.")
+    ap.add_argument("--init-ply", default=None,
+                    help="seed the gaussians from this ply instead of the COLMAP model's "
+                         "points3D. Needed when poses and seed live apart -- ARKitScenes "
+                         "keeps 656 posed images with ZERO points3D and a separate 1.13M "
+                         "point seed.ply. Colour is read from f_dc_* (SH DC) or red/green/blue.")
+    ap.add_argument("--no-priors", action="store_true",
+                    help="ignore depth/normal priors entirely, including the sibling "
+                         "auto-detect. Without this, a dataset that HAS priors refuses to "
+                         "start at any --max-resolution below the prior size; this is the "
+                         "no-prior control arm.")
+    ap.add_argument("--depth-loss-weight", type=float, default=0.0,
+                    help="L1 on rendered vs prior depth. earthbyte indoor recipe: 1.0")
+    ap.add_argument("--depth-loss-space", choices=["disparity", "metric"],
+                    default="disparity",
+                    help="disparity (1/z, Brush's default) weights near geometry more")
+    ap.add_argument("--normal-loss-weight", type=float, default=0.0,
+                    help="component L1 on rendered vs prior normals. Recipe: 0.2")
+    ap.add_argument("--depth-normal-weight", type=float, default=0.0,
+                    help="1 - cos between normals differentiated from the rendered depth "
+                         "and the rendered normals. Needs NO prior data, so it is the "
+                         "cheapest of the three to switch on. Recipe: 0.05")
+    ap.add_argument("--eval-dump", default=None,
+                    help="write <stem>_render.png / _gt.png / _mask.png per held-out "
+                         "view at every eval, for LPIPS and for looking at.")
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--relocate-every", type=int, default=100)
     ap.add_argument("--lr-means", type=float, default=2e-4)
     ap.add_argument("--noise-weight", type=float, default=4e4)
     ap.add_argument("--opac-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
+    ap.add_argument("--flatten-loss-weight", type=float, default=0.0,
+                    help="PlanarGS flatten: weight on the mean smallest ACTIVATED scale. "
+                         "The earthbyte indoor recipe is 1.0, applied at constant weight "
+                         "with no metric normalisation. Dominant measured geometry lever "
+                         "in Brush (-14.3 deg thin-axis on playroom, -8.9 on ARKitScenes).")
     ap.add_argument("--appearance", choices=["off", "gain_bias", "affine"],
                     default="off",
                     help="per-training-image photometric correction; held-out "
@@ -692,6 +1084,11 @@ def main():
                          "convergence comparison: the checkpoint's mtime gives "
                          "its real elapsed time, which beats interpolating from "
                          "the step count when per-step cost is not constant.")
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
     if not args.blender and not (args.colmap and args.images):
         ap.error("need --blender, or --colmap with --images")

@@ -339,11 +339,17 @@ def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
     return (det_before.clamp_min(0.0) / det_after).clamp(0.0, 1.0).sqrt()
 
 
+# Accepted-and-ignored: parameters of torch_ref.render that the fused Metal path has no
+# analogue for. Anything else reaching **_ignored is a caller mistake.
+_TORCH_REF_ONLY_KWARGS = frozenset({"max_per_tile", "tile_chunk", "slab"})
+
+
 def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
            sh_degree: int = 3, tile: int | None = None,
            near: float = 0.01, far: float = 100.0,
            background=(0.0, 0.0, 0.0), colors=None, max_radius_frac: float = 1.0,
            sh_rest=None, antialias: bool = False, absgrad_out=None,
+           aux_colors=None, aux_detach_weights=None,
            **_ignored):
     """Same positional signature as torch_ref.render. Returns (rgb, alpha, info).
 
@@ -354,6 +360,18 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     """
     from metal_gauss.sh import eval_sh, num_sh_bases
     from metal_gauss.torch_ref import build_cov3d, project
+
+    # `**_ignored` exists so `api.render(..., backend="metal")` can carry kwargs that only
+    # `torch_ref.render` accepts. It must not become a place typos go to die: it silently
+    # swallowed `aux_colors=` before that parameter existed, which made two tests pass
+    # vacuously in their RED phase. Tolerate the known torch_ref-only set; reject the rest.
+    if _ignored:
+        unknown = set(_ignored) - _TORCH_REF_ONLY_KWARGS
+        if unknown:
+            raise TypeError(
+                f"render() got unexpected keyword argument(s) {sorted(unknown)}. "
+                f"Only torch_ref-only kwargs {sorted(_TORCH_REF_ONLY_KWARGS)} are ignored "
+                f"here, for api.render() signature compatibility.")
 
     # `colors` is REASSIGNED below by the fused preprocess (it returns the
     # SH-evaluated colours under the same name), so the caller's intent has to
@@ -394,6 +412,11 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     fx, fy, cx, cy = K_h[0, 0].item(), K_h[1, 1].item(), K_h[0, 2].item(), K_h[1, 2].item()
 
     if colors is not None:
+        if aux_colors:
+            raise ValueError(
+                "aux_colors is only supported on the fused SH path. The explicit-colours "
+                "path re-projects in torch and re-bins per call, and its BACKWARD is where "
+                "the cost lands -- that is the design aux_colors exists to avoid.")
         # explicit-colour path (used by depth rendering etc.): torch projection.
         # Unlike the fused preprocess, this one runs the projection in torch, so
         # the pose has to be on the same device as the gaussians -- callers may
@@ -482,6 +505,68 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
         uv, conic, opacities, colors, gauss_ids, tile_offsets, W, H, tile, tiles_x,
         absgrad_out)
 
+    # Extra attribute maps -- normals, view-space z -- composited over the SAME projection,
+    # the SAME conics and opacities, and the SAME tile lists the RGB pass just used. The
+    # naive alternative is another `render(colors=...)` call, which re-runs the projection
+    # in torch autograd and re-bins; its backward is the expensive half. Sharing the lists
+    # is what makes the geometry recipe affordable here.
+    #
+    # THE BLENDING WEIGHTS ARE DETACHED; THE AUX VALUE IS NOT. This is the second half of
+    # Brush `ae2ec651`, and omitting it is what collapsed P-GEOM's R1 into needles.
+    #
+    # `rasterize_backwards.rs:536-563` routes the depth channel to the per-splat value
+    # (`grad.depth += vis * v_o_d`, with `vis` a constant) and deliberately DROPS its
+    # `dot_rgb` alpha-VJP term, so a geometry loss cannot reduce its error by changing
+    # opacity or footprint instead of moving the gaussian. Detaching uv / conic / opacity
+    # here reproduces that contract exactly: `means` still learns through `z`, `quats`
+    # still learn through the normal, and nothing reaches the weights.
+    #
+    # Why it matters: centre depth is constant across a footprint but wrong by
+    # +-r*tan(theta) at each end along the depth gradient, so with the weights live the
+    # cheapest descent is to SHRINK the splat along that axis -- measured at 38.6x
+    # flatten's per-splat thin-axis gradient for the depth term at 45 deg, and ~280-300x
+    # for depth-normal. The predicted signature, mid-axis collapse with s_max held, is
+    # what R1 produced: smid 6.62 -> 1.35 mm against smax 25.66 -> 22.44 mm.
+    #
+    # PORTING NOTE: gsplat, LichtFeld Studio and spirula all keep these weights LIVE.
+    # Brush alone detaches them. ("LFS detaches the blending weights" is repeated in
+    # ae2ec651's own message and in upstream PR #497, and is false -- LFS emits a live
+    # grad_alpha at depth_loss.cu:425-426; our fork retracted the attribution 2026-08-22.)
+    # CLAUDE.md's recipe weights were tuned under THIS contract, so the weights and the
+    # contract are coupled and must not be transplanted independently.
+    #
+    # `absgrad_out` is deliberately NOT forwarded either: it accumulates a densification
+    # signal, and an aux pass must not vote on which gaussians get split.
+    #
+    # No background is composited into an aux map. A background constant added to a depth
+    # map turns "nothing here" into a plausible measurement.
+    aux_maps = []
+    if aux_colors:
+        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth channel
+        # and deliberately FOLDS IT IN for the PGSR plane channels, so there is no correct
+        # blanket answer -- and an unstated inherited default is exactly how the original
+        # needle-collapse defect happened. The caller states it or gets an error.
+        if aux_detach_weights is None:
+            raise ValueError(
+                "aux_colors requires aux_detach_weights (a bool per aux channel). "
+                "Detached = the geometry loss cannot move opacity or footprint (the depth "
+                "and normal contract, Brush ae2ec651); live = it can (the PGSR plane "
+                "contract). There is no safe default; say which.")
+        if isinstance(aux_detach_weights, bool):
+            aux_detach_weights = [aux_detach_weights] * len(aux_colors)
+        if len(aux_detach_weights) != len(aux_colors):
+            raise ValueError(
+                f"aux_detach_weights must have one per aux channel: got "
+                f"{len(aux_detach_weights)} for {len(aux_colors)} aux colours")
+        uv_d, conic_d, opac_d = uv.detach(), conic.detach(), opacities.detach()
+        for a, det in zip(aux_colors, aux_detach_weights):
+            if a.shape != (means.shape[0], 3):
+                raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
+            wu, wc, wo = (uv_d, conic_d, opac_d) if det else (uv, conic, opacities)
+            aux_maps.append(_RasterizeMetal.apply(
+                wu, wc, wo, a.contiguous(), gauss_ids, tile_offsets,
+                W, H, tile, tiles_x, None)[0])
+
     if background is not None:
         bg = torch.as_tensor(background, device=rgb.device, dtype=rgb.dtype)
         rgb = rgb + (1.0 - alpha).clamp_min(0)[..., None] * bg
@@ -502,5 +587,10 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
         "isect_dropped_frac": 0.0,
         "valid_mask": valid_b,          # tensor, no sync; selective-Adam hook
         "backend": "metal",
+        "aux": aux_maps,
+        # The coverage the aux maps must be divided by. Identical to the RGB alpha by
+        # construction (same lists, same opacities) and captured BEFORE the background
+        # composite -- though the composite only touches rgb, never alpha.
+        "aux_alpha": alpha,
     }
 
