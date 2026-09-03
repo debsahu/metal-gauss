@@ -23,6 +23,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import os
+
 import torch
 
 _HERE = Path(__file__).parent
@@ -350,6 +352,58 @@ def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
 _TORCH_REF_ONLY_KWARGS = frozenset({"max_per_tile", "tile_chunk", "slab"})
 
 
+class _RasterizeMetalAux(torch.autograd.Function):
+    """RGB + 4 fused auxiliary channels, forward and backward in one traversal each.
+
+    Separate from `_RasterizeMetal` rather than a superset of it so the RGB-only path --
+    which every existing caller and several tests use -- keeps its exact signature.
+
+    CONTRACT: the aux channels' gradient reaches their VALUE only, never the blending
+    weights. That is fixed in the kernel and cannot be varied per call, which is why
+    `_use_fused_aux` refuses live-weight requests instead of silently serving them.
+    """
+
+    @staticmethod
+    def forward(ctx, uv, conic, opacity, color, aux, gauss_ids, tile_offsets,
+                W, H, tile, tiles_x, absgrad_out=None):
+        ext = _load()
+        args = [t.contiguous() for t in (uv, conic, opacity, color, aux)]
+        rgb, alpha, T, ncontrib, aux_img = ext.rasterize_forward(
+            *args, gauss_ids, tile_offsets, W, H, tile, tiles_x)
+        ctx.save_for_backward(*args, gauss_ids, tile_offsets, T, ncontrib)
+        ctx.dims = (W, H, tile, tiles_x)
+        ctx.absgrad_out = absgrad_out
+        return rgb, alpha, aux_img
+
+    @staticmethod
+    def backward(ctx, grad_rgb, grad_alpha, grad_aux):
+        ext = _load()
+        uv, conic, opacity, color, aux, gauss_ids, tile_offsets, T, ncontrib = ctx.saved_tensors
+        W, H, tile, tiles_x = ctx.dims
+        d_uv, d_conic, d_opacity, d_color, d_absuv, d_aux = ext.rasterize_backward(
+            uv, conic, opacity, color, aux, gauss_ids, tile_offsets, T, ncontrib,
+            grad_rgb.contiguous(), grad_alpha.contiguous(), grad_aux.contiguous(),
+            W, H, tile, tiles_x, ctx.absgrad_out is not None)
+        if ctx.absgrad_out is not None:
+            ctx.absgrad_out[:len(d_absuv)] += d_absuv
+        return (d_uv, d_conic, d_opacity, d_color, d_aux,
+                None, None, None, None, None, None, None)
+
+
+def _use_fused_aux(detach_weights, n_aux) -> bool:
+    """Can this aux request be served by the fused kernel?
+
+    Only the Tier 1 two-map packing ([normals, z] -> 4 channels) with BOTH maps on the
+    detached-weight contract. A live-weight request -- which Brush's PGSR plane channels
+    need, since it folds alpha in for them deliberately -- falls back to the multi-pass
+    path rather than being served the wrong contract silently. `MG_AUX_MULTIPASS=1` forces
+    the old path for the equivalence gate.
+    """
+    if os.environ.get("MG_AUX_MULTIPASS", "0") not in ("0", "", "false", "False"):
+        return False
+    return n_aux == 2 and len(detach_weights) == 2 and all(detach_weights)
+
+
 def rasterize_fused_forward(uv, conic, opacity, color, aux, gauss_ids, tile_offsets,
                             W, H, tile, tiles_x):
     """RGB and up to 4 auxiliary channels composited in ONE rasterisation pass.
@@ -526,9 +580,53 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
             uv.detach(), radius.detach(), depth.detach(), valid_b, W, H, tile,
             ry=ry_extent)
 
-    rgb, alpha = _RasterizeMetal.apply(
-        uv, conic, opacities, colors, gauss_ids, tile_offsets, W, H, tile, tiles_x,
-        absgrad_out)
+    #
+    # No background is composited into an aux map. A background constant added to a depth
+    # map turns "nothing here" into a plausible measurement.
+    aux_maps = []
+    aux_path = "none"
+    if aux_colors:
+        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth channel
+        # and deliberately FOLDS IT IN for the PGSR plane channels, so there is no correct
+        # blanket answer -- and an unstated inherited default is exactly how the original
+        # needle-collapse defect happened. The caller states it or gets an error.
+        if aux_detach_weights is None:
+            raise ValueError(
+                "aux_colors requires aux_detach_weights (a bool per aux channel). "
+                "Detached = the geometry loss cannot move opacity or footprint (the depth "
+                "and normal contract, Brush ae2ec651); live = it can (the PGSR plane "
+                "contract). There is no safe default; say which.")
+        if isinstance(aux_detach_weights, bool):
+            aux_detach_weights = [aux_detach_weights] * len(aux_colors)
+        if len(aux_detach_weights) != len(aux_colors):
+            raise ValueError(
+                f"aux_detach_weights must have one per aux channel: got "
+                f"{len(aux_detach_weights)} for {len(aux_colors)} aux colours")
+        for a in aux_colors:
+            if a.shape != (means.shape[0], 3):
+                raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
+        aux_path = "fused" if _use_fused_aux(aux_detach_weights, len(aux_colors)) \
+            else "multipass"
+
+    if aux_path == "fused":
+        # Pack [normals(3), z(1)] as (N,4) with z in channel 0, and unpack back to the
+        # same list of two (H,W,3) maps the trainer already consumes, so train.py is
+        # untouched by the switch.
+        aux4 = torch.cat([aux_colors[1][:, :1], aux_colors[0]], dim=1).contiguous()
+        rgb, alpha, aux_img = _RasterizeMetalAux.apply(
+            uv, conic, opacities, colors, aux4, gauss_ids, tile_offsets,
+            W, H, tile, tiles_x, absgrad_out)
+        aux_maps = [aux_img[..., 1:4], aux_img[..., 0:1].expand(-1, -1, 3)]
+    else:
+        rgb, alpha = _RasterizeMetal.apply(
+            uv, conic, opacities, colors, gauss_ids, tile_offsets, W, H, tile, tiles_x,
+            absgrad_out)
+        uv_d, conic_d, opac_d = uv.detach(), conic.detach(), opacities.detach()
+        for a, det in zip(aux_colors or [], aux_detach_weights or []):
+            wu, wc, wo = (uv_d, conic_d, opac_d) if det else (uv, conic, opacities)
+            aux_maps.append(_RasterizeMetal.apply(
+                wu, wc, wo, a.contiguous(), gauss_ids, tile_offsets,
+                W, H, tile, tiles_x, None)[0])
 
     # Extra attribute maps -- normals, view-space z -- composited over the SAME projection,
     # the SAME conics and opacities, and the SAME tile lists the RGB pass just used. The
@@ -562,35 +660,6 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     #
     # `absgrad_out` is deliberately NOT forwarded either: it accumulates a densification
     # signal, and an aux pass must not vote on which gaussians get split.
-    #
-    # No background is composited into an aux map. A background constant added to a depth
-    # map turns "nothing here" into a plausible measurement.
-    aux_maps = []
-    if aux_colors:
-        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth channel
-        # and deliberately FOLDS IT IN for the PGSR plane channels, so there is no correct
-        # blanket answer -- and an unstated inherited default is exactly how the original
-        # needle-collapse defect happened. The caller states it or gets an error.
-        if aux_detach_weights is None:
-            raise ValueError(
-                "aux_colors requires aux_detach_weights (a bool per aux channel). "
-                "Detached = the geometry loss cannot move opacity or footprint (the depth "
-                "and normal contract, Brush ae2ec651); live = it can (the PGSR plane "
-                "contract). There is no safe default; say which.")
-        if isinstance(aux_detach_weights, bool):
-            aux_detach_weights = [aux_detach_weights] * len(aux_colors)
-        if len(aux_detach_weights) != len(aux_colors):
-            raise ValueError(
-                f"aux_detach_weights must have one per aux channel: got "
-                f"{len(aux_detach_weights)} for {len(aux_colors)} aux colours")
-        uv_d, conic_d, opac_d = uv.detach(), conic.detach(), opacities.detach()
-        for a, det in zip(aux_colors, aux_detach_weights):
-            if a.shape != (means.shape[0], 3):
-                raise ValueError(f"aux colour must be (N,3), got {tuple(a.shape)}")
-            wu, wc, wo = (uv_d, conic_d, opac_d) if det else (uv, conic, opacities)
-            aux_maps.append(_RasterizeMetal.apply(
-                wu, wc, wo, a.contiguous(), gauss_ids, tile_offsets,
-                W, H, tile, tiles_x, None)[0])
 
     if background is not None:
         bg = torch.as_tensor(background, device=rgb.device, dtype=rgb.dtype)
@@ -613,6 +682,7 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
         "valid_mask": valid_b,          # tensor, no sync; selective-Adam hook
         "backend": "metal",
         "aux": aux_maps,
+        "aux_path": aux_path,
         # The coverage the aux maps must be divided by. Identical to the RGB alpha by
         # construction (same lists, same opacities) and captured BEFORE the background
         # composite -- though the composite only touches rgb, never alpha.

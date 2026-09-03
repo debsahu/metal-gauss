@@ -239,3 +239,97 @@ def test_zero_aux_gradient_produces_zero_aux_value_gradient():
                torch.randn(sc["H"], sc["W"], device="mps"),
                torch.zeros(sc["H"], sc["W"], 4, device="mps"))
     assert out[5].abs().max().item() == 0.0
+
+
+# --------------------------------------------------- Task 15: the switch and its guards
+
+def _leaves2(n=300, seed=61):
+    torch.manual_seed(seed)
+    L = dict(m=torch.randn(n, 3) * 0.6 + torch.tensor([0., 0., 4.]), q=torch.randn(n, 4),
+             s=torch.rand(n, 3) * 0.10 + 0.03, o=torch.rand(n) * 0.7 + 0.15,
+             sh=torch.randn(n, 16, 3) * 0.25)
+    return {k: v.to("mps").requires_grad_(True) for k, v in L.items()}
+
+
+def _render_pair(L, W=64, H=48, **kw):
+    from metal_gauss import render
+    from metal_gauss.geometry_loss import splat_normals_cam
+    K = torch.eye(3); K[0, 0] = K[1, 1] = 0.8 * max(W, H); K[0, 2], K[1, 2] = W / 2, H / 2
+    vm = torch.eye(4); vmd = vm.to("mps")
+    aux = [splat_normals_cam(L["m"], L["q"], L["s"], vmd),
+           (L["m"] @ vmd[:3, :3].T + vmd[:3, 3])[:, 2:3].expand(-1, 3)]
+    return render(L["m"], L["q"], L["s"], L["o"], L["sh"][:, :1].contiguous(), K, vm, W, H,
+                  sh_degree=3, sh_rest=L["sh"][:, 1:].contiguous(), backend="metal",
+                  aux_colors=aux, aux_detach_weights=[True, True], **kw)
+
+
+def test_fused_and_multipass_agree_within_the_preregistered_bars(monkeypatch):
+    """Plan section 4: rel <= 1e-5 and cosine >= 1 - 1e-6 on every input that takes a
+    gradient. The two paths are different kernels computing the same contract, so this is
+    the equivalence that licenses switching the default."""
+    outs = {}
+    for name, mp in (("multipass", "1"), ("fused", "0")):
+        monkeypatch.setenv("MG_AUX_MULTIPASS", mp)
+        L = _leaves2()
+        rgb, alpha, info = _render_pair(L)
+        # Without this the test is VACUOUS: before the switch existed, both env settings
+        # took the multipass path and it "passed" by comparing a path against itself.
+        assert info["aux_path"] == name, f"expected the {name} path, got {info['aux_path']}"
+        assert len(info["aux"]) == 2 and info["aux"][0].shape[-1] == 3
+        (rgb.square().mean() + info["aux"][0].square().mean()
+         + info["aux"][1].square().mean()).backward()
+        outs[name] = ({k: L[k].grad.detach().cpu() for k in L},
+                      rgb.detach().cpu(), info["aux"][0].detach().cpu(),
+                      info["aux"][1].detach().cpu())
+    gm, rgb_m, n_m, z_m = outs["multipass"]
+    gf, rgb_f, n_f, z_f = outs["fused"]
+    for a, b, nm in ((rgb_m, rgb_f, "rgb"), (n_m, n_f, "normal map"), (z_m, z_f, "z map")):
+        assert (a - b).abs().max().item() < 2e-3, nm
+    for k in gm:
+        rel = ((gm[k] - gf[k]).abs().max() / gm[k].abs().max().clamp_min(1e-8)).item()
+        cos = torch.nn.functional.cosine_similarity(
+            gm[k].flatten(), gf[k].flatten(), dim=0).item()
+        assert torch.isfinite(gf[k]).all() and rel < 1e-5 and cos > 1 - 1e-6, (k, rel, cos)
+
+
+def test_fused_is_the_default_and_the_env_var_forces_the_old_path(monkeypatch):
+    from metal_gauss import metal_backend as mb
+    monkeypatch.delenv("MG_AUX_MULTIPASS", raising=False)
+    assert mb._use_fused_aux([True, True], 2) is True
+    monkeypatch.setenv("MG_AUX_MULTIPASS", "1")
+    assert mb._use_fused_aux([True, True], 2) is False
+
+
+def test_live_weight_aux_falls_back_to_the_multipass_path(monkeypatch):
+    """The fused kernel ALWAYS drops the aux alpha VJP -- that is its contract. A caller
+    asking for LIVE weights (Brush folds alpha in for the PGSR plane channels) cannot be
+    served by it, so it must fall back rather than silently deliver the wrong contract.
+    plane-aux (plan Task 20) depends on this."""
+    from metal_gauss import metal_backend as mb
+    monkeypatch.delenv("MG_AUX_MULTIPASS", raising=False)
+    assert mb._use_fused_aux([False, False], 2) is False
+    assert mb._use_fused_aux([True, False], 2) is False
+    assert mb._use_fused_aux([True], 1) is False          # only the 2-map packing is fused
+    assert mb._use_fused_aux([True, True, True], 3) is False
+
+
+def test_live_weight_aux_still_gives_live_weight_gradients_after_the_switch(monkeypatch):
+    """End to end: the fallback must actually preserve the distinction the per-channel API
+    exists for, not merely choose a different code path."""
+    from metal_gauss import render
+    monkeypatch.delenv("MG_AUX_MULTIPASS", raising=False)
+    W = H = 48
+    K = torch.eye(3); K[0, 0] = K[1, 1] = 0.8 * W; K[0, 2] = K[1, 2] = W / 2
+    vm = torch.eye(4)
+
+    def opac_grad(detach):
+        L = _leaves2(n=150, seed=63)
+        z = (L["m"] @ vm[:3, :3].T.to("mps") + vm[:3, 3].to("mps"))[:, 2:3].expand(-1, 3)
+        _, _, info = render(L["m"], L["q"], L["s"], L["o"], L["sh"], K, vm, W, H,
+                            sh_degree=3, backend="metal",
+                            aux_colors=[z], aux_detach_weights=[detach])
+        info["aux"][0].square().mean().backward()
+        return 0.0 if L["o"].grad is None else L["o"].grad.abs().max().item()
+
+    assert opac_grad(True) < 1e-8
+    assert opac_grad(False) > 1e-8
