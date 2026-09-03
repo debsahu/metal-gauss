@@ -117,16 +117,20 @@ def test_depth_normal_weight_needs_no_prior_at_all():
 def test_depth_term_descends_when_the_seed_starts_at_the_wrong_depth():
     """The depth loss must MOVE GAUSSIANS ALONG Z. Seed at z = 2.9, prior says 3.0.
 
-    This test used to seed at exactly z = 3.0 with a prior of 3.0, so the depth term began
-    AT ITS OWN FLOOR (~0.009) with nowhere to descend, and it only "descended" because the
-    open blending-weight path let the loss reshape splats -- it was measuring the
-    needle-collapse bug. With the weight path closed (Brush ae2ec651's second half) the
-    only route left is the one that should exist: means_z.
+    DO NOT "SIMPLIFY" THIS BACK TO SEEDING AT THE PRIOR'S DEPTH. The previous version did
+    exactly that -- seed z = 3.0, prior 3.0 -- so the depth term began AT ITS OWN FLOOR
+    (~0.009) with nothing to descend toward. It passed only because the open
+    blending-weight path let the loss reshape splats instead of moving them, so THE TEST
+    REQUIRED THE BUG IN ORDER TO PASS, and closing the weight path (Brush ae2ec651's second
+    half) broke it. That is the eighth distinct way this project has produced a test result
+    that looked like evidence and was not, and the first where the test actively depended
+    on the defect it should have caught.
 
-    The displacement is sized to what the optimiser can actually traverse. The default
-    position LR on this 0.40-extent scene is 8e-5, so 300 Adam steps command roughly
-    0.024 m of travel and a 0.3 m error barely moves (measured: 7% over 300 steps). At
-    lr 1e-2 with a 0.1 m displacement the term falls to 0.37 of its start.
+    A CONVERGENCE TEST MUST BE SIZED TO THE OPTIMISER'S ACTUAL REACH, or it measures the
+    schedule rather than the mechanism. The default position LR on this 0.40-extent scene
+    is 8e-5, so 300 Adam steps command roughly 0.024 m of travel: a 0.3 m displacement
+    moves 7% and reads as a broken depth path when nothing is broken. At lr 1e-2 with a
+    0.1 m displacement the term falls to 0.37 of its start, which is the mechanism.
     """
     from metal_gauss import train as T
     out = T.train(_args(depth_loss_weight=1.0, steps=300, eval_every=30, lr_means=1e-2),
