@@ -137,21 +137,112 @@ def _base(**over):
     return b
 
 
-def test_the_hard_needle_column_SEES_the_VOID_row_far_more_loudly_than_needle_frac():
-    """`frac(aspect < 0.01)` on the archived plys. It is REPORTED, not gated -- but if it
-    could not separate VOID from the adopted recipe there would be no case for reporting it.
+def test_the_hard_needle_column_is_a_DELIVERY_STATEMENT_not_a_collapse_discriminator():
+    """`frac(aspect < HARD_NEEDLE_ASPECT)` on the archived plys: the fraction of splats whose
+    orientation the delivery format's 8-bit quaternion cannot represent (the constant is
+    derived in `test_the_hard_needle_threshold_is_the_DELIVERY_FORMATS_orientation_error`).
+    It is REPORTED, never gated, and this test pins WHY.
 
-    Measured: baseline 0.700%, R1p 1.548%, VOID 31.770%. VOID is 20.5x the adopted arm on
-    this column against 2.9x on `needle_frac`, so it is a sharper instrument for exactly
-    the pathology the rule exists to catch -- which is the claim, and it is testable.
+    An earlier version asserted the opposite conclusion -- that the column is "a sharper
+    instrument for exactly the pathology the rule exists to catch" -- on the strength of the
+    VALUE ratio: VOID/R1p is 20.53x here against 2.91x on `needle_frac`. That ratio is real,
+    and is re-asserted below, but it is the wrong statistic for the question. A collapse test
+    needs separation between the ADOPTED move and the COLLAPSE, which is the geometric-mean
+    construction every Band 1 threshold is built from (the COLLAPSE block in
+    `plane_aux_arms.py`). On that scale hard-needle is the WEAKEST of the four, not the
+    sharpest:
+
+        column             adopted |dlog|   collapse |dlog|   separation
+        aspect_p50            0.0797           1.5011          18.8x
+        smid_p50_mm           0.1319           1.5923          12.1x
+        needle_frac           0.1497           1.2279           8.2x
+        hard_needle_frac      0.7681           3.8152           5.0x   <- weakest
+
+    The value ratio is inflated by the very property that makes it a poor discriminator: the
+    ADOPTED recipe already moves this column x2.16 (R1) to x2.21 (R1p) against its own 0.700%
+    baseline, so it shouts at drift about as loudly as it shouts at collapse.
+
+    That table anchors every column on R1, as research/metal-gauss.md section 13.6 prints it.
+    The rule's own per-column "largest adopted move" anchors needle/smid on R1p and gives
+    18.8 / 11.7 / 7.6 / 4.8. The ORDERING is identical either way, and this test asserts it
+    under BOTH so the conclusion does not rest on which arm was picked.
+
+    NULL MODEL -- what this test must be able to fail on. "hard-needle carries no
+    discriminating information beyond `needle_frac`" means it is some deterministic monotone
+    transform of it. The old assertion could not see that. A CONSTANT multiple is caught (it
+    leaves the value ratio at needle_frac's 2.91x), but a power-law surrogate
+    `c * needle_frac ** p` clears the old bar for every p in roughly [2.9, 6.8] while
+    carrying, by construction, zero independent information. That surrogate is built below
+    and both statistics are run against it: the value ratio PASSES on it, the log-separation
+    ranking does NOT -- a power law rescales both logs by exactly p, so the surrogate's
+    separation is needle_frac's to machine precision and can never rank last. The real column
+    separates measurably WORSE than that zero-information surrogate, which is the finding.
     """
     hn = "run.hard_needle_frac"
-    b, adopted, void = B0A[hn], R1P[hn], VOID[hn]
-    assert void > 0.10, "the prediction under test was >= 10% on the VOID row"
-    assert void / adopted > 3 * (VOID[NEEDLE] / R1P[NEEDLE]), \
-        "hard needles must separate VOID from the adopted recipe MORE sharply than the " \
-        "existing needle column, or the column adds nothing"
-    assert adopted / b < 3.0, "and it must not scream on an arm we adopted"
+    smid = "run.smid_p50_mm"
+
+    def log_sep(baseline, adopted, void):
+        """|ln(collapse/baseline)| / |ln(adopted/baseline)| -- the ratio the geometric-mean
+        Band 1 threshold is the square root of, and the one that answers "does this column
+        tell a drift from a collapse"."""
+        return abs(math.log(void / baseline)) / abs(math.log(adopted / baseline))
+
+    def triple(col, adopted_arm):
+        return B0A[col], adopted_arm[col], VOID[col]
+
+    # -- 0. impossible values first. Both columns are FRACTIONS; a surrogate or a rebuilt
+    #       artifact that puts one above 1.0 is not a worse number, it is a broken one.
+    for arm, name in ((B0A, "B0a"), (R1, "R1"), (R1P, "R1p"), (VOID, "VOID")):
+        assert 0.0 < arm[hn] < 1.0, f"{name}: hard_needle_frac is a fraction, got {arm[hn]}"
+        assert 0.0 < arm[NEEDLE] < 1.0, f"{name}: needle_frac is a fraction"
+        assert arm[hn] < arm[NEEDLE], f"{name}: hard needles are a SUBSET of needles"
+    assert B0A[hn] == pytest.approx(0.00700, abs=5e-5)
+    assert R1[hn] == pytest.approx(0.01509, abs=5e-5)
+    assert R1P[hn] == pytest.approx(0.01548, abs=5e-5)
+    assert VOID[hn] == pytest.approx(0.31770, abs=5e-5)
+
+    # -- 1. the value ratio. Recorded because it is true and because it is what misled the
+    #       earlier claim; it is NOT the evidence for anything here.
+    assert VOID[hn] / R1P[hn] == pytest.approx(20.53, abs=0.05)
+    assert VOID[NEEDLE] / R1P[NEEDLE] == pytest.approx(2.91, abs=0.01)
+    assert VOID[hn] / R1P[hn] > 3 * (VOID[NEEDLE] / R1P[NEEDLE])   # the OLD bar, holds
+
+    # -- 2. the log separation, under BOTH adopted-arm choices. Hard-needle ranks LAST.
+    for adopted, tag in ((R1, "R1"), (R1P, "R1p")):
+        ranked = sorted((ASPECT, smid, NEEDLE, hn),
+                        key=lambda c: log_sep(*triple(c, adopted)))
+        assert ranked[0] == hn, (
+            f"anchored on {tag}, hard_needle_frac must be the WEAKEST adopted-vs-collapse "
+            f"discriminator of the four; got {ranked[0]}")
+        assert log_sep(*triple(hn, adopted)) < log_sep(*triple(ASPECT, adopted)) / 3.0, (
+            f"anchored on {tag}, aspect_p50 must separate at least 3x better -- that is why "
+            f"Band 1 gates aspect and reports hard needles")
+    assert log_sep(*triple(hn, R1)) == pytest.approx(4.97, abs=0.05)
+    assert log_sep(*triple(hn, R1P)) == pytest.approx(4.81, abs=0.05)
+    assert log_sep(*triple(ASPECT, R1)) == pytest.approx(18.83, abs=0.05)
+
+    # -- 3. THE NULL. A deterministic power law on needle_frac: no new information at all.
+    p = 3.0
+    c = B0A[hn] / B0A[NEEDLE] ** p                    # calibrated onto the real baseline
+    m_b, m_ad, m_void = (c * arm[NEEDLE] ** p for arm in (B0A, R1P, VOID))
+    # (a) the surrogate clears every assertion the OLD test made, so that test could not
+    #     have distinguished a real column from a relabelling of needle_frac.
+    assert m_void > 0.10
+    assert m_ad / m_b < 3.0
+    assert m_void / m_ad > 3 * (VOID[NEEDLE] / R1P[NEEDLE]), \
+        "if the surrogate failed the old bar it would not be the null this test needs"
+    # (b) and it cannot reproduce the ranking: p cancels out of the log ratio exactly.
+    assert log_sep(m_b, m_ad, m_void) == pytest.approx(
+        log_sep(*triple(NEEDLE, R1P)), rel=1e-9), \
+        "a power-law surrogate carries needle_frac's separation exactly -- that is the point"
+    assert log_sep(m_b, m_ad, m_void) > 1.5 * log_sep(*triple(hn, R1P)), \
+        "the REAL column separates drift from collapse worse than a zero-information " \
+        "surrogate of needle_frac; it earns its place as a delivery statement, not a gate"
+
+    # -- 4. therefore: reported, not gated.
+    assert hn not in COLLAPSE, \
+        "hard_needle_frac must not be a Band 1 column -- promoting it over aspect on the " \
+        "value ratio is exactly the error this test exists to prevent"
 
 
 def test_THE_VOID_ROW_fires_band1_on_FOUR_INDEPENDENT_COLUMNS():
