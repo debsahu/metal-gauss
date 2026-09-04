@@ -425,8 +425,13 @@ def test_invalid_plane_pixels_leave_BOTH_numerator_and_denominator():
     valid = (torch.rand(H, W, generator=g) > 0.35).float().to("mps")
     pred = pred * valid                       # invalid plane pixels are exactly 0
 
-    got = depth_loss(pred, gt * valid, "disparity")
     sel = valid > 0.5
+    # Guard against a vacuous comparison: this test's whole content is the difference
+    # between a mean over the valid pixels and a mean over all of them, so it needs BOTH
+    # populations to be non-empty. An assertion over an empty selection is how
+    # `test_flip_is_applied_when_the_raw_cross_points_away` passed for three weeks.
+    assert 0 < int(sel.sum()) < sel.numel(), f"fixture has no valid/invalid split: {sel.sum()}"
+    got = depth_loss(pred, gt * valid, "disparity")
     want = (1.0 / pred[sel] - 1.0 / gt[sel]).abs().mean()
     assert torch.allclose(got, want, atol=1e-6), f"{got.item()} vs {want.item()}"
 
