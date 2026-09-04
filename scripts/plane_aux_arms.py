@@ -138,6 +138,58 @@ def battery(out: Path, tag: str) -> dict:
             "values": {k: v for k, v in vals.items() if isinstance(v, (int, float))}}
 
 
+def verdict_for(metric: str, delta: float, floor: float) -> str:
+    """IMPROVED / WORSENED / WITHIN FLOOR for one metric.
+
+    Pure, so the whole grade is reproducible from the committed artifacts by
+    `--regrade`, and so the rule itself is unit-tested rather than only exercised by an
+    8-hour run. `abs(delta) > floor` is STRICT: a delta exactly equal to the floor has not
+    cleared it.
+    """
+    sign = DIRECTION[metric]
+    if abs(delta) <= floor:
+        return "WITHIN FLOOR"
+    if sign == 0:
+        return "MOVED"
+    return "IMPROVED" if sign * delta > 0 else "WORSENED"
+
+
+def grade(scene: str, dn: float, t: dict, fl: dict) -> dict:
+    """The pre-registered keep/drop rule, applied. See the module docstring."""
+    rows, verdict = {}, {}
+    for k in sorted(set(t["values"]) & set(fl)):
+        base, floor = fl[k]["mean"], fl[k]["spread_n3"]
+        d = t["values"][k] - base
+        row = {"treatment": t["values"][k], "baseline_mean": base, "delta": d,
+               "paired_vs_F0": t["values"][k] - fl[k]["F0"],
+               "floor_spread_n3": floor, "moves": abs(d) > floor}
+        if k in DIRECTION:
+            row["direction"] = {1: "higher is better", -1: "lower is better",
+                                0: "two-sided"}[DIRECTION[k]]
+            row["verdict"] = verdict[k] = verdict_for(k, d, floor)
+        rows[k] = row
+    gate = {k: verdict.get(k) for k in GEOMETRY_GATE}
+    psnr = verdict.get("run.psnr_masked")
+    missing = [k for k, v in gate.items() if v is None] + ([] if psnr else ["run.psnr_masked"])
+    if missing:
+        # A gate column that is absent must never read as a pass. This is the shape of
+        # failure CLAUDE.md calls the one this project keeps repeating: a check that reads
+        # a condition something OTHER than the thing being checked could satisfy.
+        raise SystemExit(f"{scene}: gate columns missing from the battery: {missing}")
+    return {"schema": 1, "scene": scene, "dn": dn,
+            "treatment": {k: v for k, v in t.items() if k != "values"},
+            "scene_pass": (gate["stats.on_seed_frac_1cm"] == "IMPROVED"
+                           and gate["stats.thin_axis_angle_p50"] != "WORSENED"
+                           and gate["run.aspect_p50"] != "WORSENED"
+                           and gate["run.needle_frac"] != "WORSENED"
+                           and psnr == "WITHIN FLOOR"),
+            "scene_drop": any(v == "WORSENED" for v in gate.values()),
+            "falsifier_triggered_on_this_scene":
+                (verdict.get("stats.on_seed_frac_1cm") == "WITHIN FLOOR"
+                 and verdict.get("stats.thin_axis_angle_p50") == "WITHIN FLOOR"),
+            "geometry_gate": gate, "psnr_verdict": psnr, "rows": rows}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", required=True)
@@ -157,7 +209,22 @@ def main() -> None:
                          "behind Task 20's bound.")
     ap.add_argument("--depth-loss-space", default="disparity", choices=["disparity", "metric"])
     ap.add_argument("--watchdog", type=float, default=14_400.0)
+    ap.add_argument("--regrade", action="store_true",
+                    help="recompute grade.json from the artifacts already on disk. No "
+                         "GPU, no training: the verdict is a pure function of the "
+                         "reports and stats JSONs, and this proves it.")
     a = ap.parse_args()
+
+    if a.regrade:
+        out = Path(a.out)
+        fl = json.loads((out / "floors.json").read_text())["floors"]
+        doc = grade(a.scene, a.dn, battery(out, "P0"), fl)
+        (out / "grade.json").write_text(json.dumps(doc, indent=2))
+        print(json.dumps({k: doc[k] for k in
+                          ("scene", "scene_pass", "scene_drop",
+                           "falsifier_triggered_on_this_scene", "geometry_gate",
+                           "psnr_verdict")}, indent=2))
+        return
 
     require_gpu_exclusive()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -227,46 +294,13 @@ def main() -> None:
     if t["depth_source"] != "plane-aux":
         raise SystemExit(f"treatment arm reports depth_source={t['depth_source']!r}: the "
                          f"flag did not survive resolve_depth_source. Nothing to grade.")
-    rows, verdict = {}, {}
-    for k in sorted(set(t["values"]) & set(fl)):
-        base, floor = fl[k]["mean"], fl[k]["spread_n3"]
-        d = t["values"][k] - base
-        row = {"treatment": t["values"][k], "baseline_mean": base, "delta": d,
-               "paired_vs_F0": t["values"][k] - fl[k]["F0"],
-               "floor_spread_n3": floor, "moves": abs(d) > floor}
-        if k in DIRECTION:
-            sign = DIRECTION[k]
-            row["direction"] = {1: "higher is better", -1: "lower is better",
-                                0: "two-sided"}[sign]
-            if sign == 0:
-                row["verdict"] = "WITHIN FLOOR" if abs(d) <= floor else "MOVED"
-            else:
-                improved = sign * d > 0
-                row["verdict"] = ("IMPROVED" if improved and abs(d) > floor else
-                                  "WORSENED" if not improved and abs(d) > floor else
-                                  "WITHIN FLOOR")
-            verdict[k] = row["verdict"]
-        rows[k] = row
-
-    gate = {k: verdict.get(k) for k in GEOMETRY_GATE}
-    psnr = verdict.get("run.psnr_masked")
-    scene_pass = (gate["stats.on_seed_frac_1cm"] == "IMPROVED"
-                  and gate["stats.thin_axis_angle_p50"] != "WORSENED"
-                  and gate["run.aspect_p50"] != "WORSENED"
-                  and gate["run.needle_frac"] != "WORSENED"
-                  and psnr == "WITHIN FLOOR")
-    scene_drop = any(v == "WORSENED" for v in gate.values())
-    falsifier = (verdict.get("stats.on_seed_frac_1cm") == "WITHIN FLOOR"
-                 and verdict.get("stats.thin_axis_angle_p50") == "WITHIN FLOOR")
-    (out / "grade.json").write_text(json.dumps(
-        {"schema": 1, "scene": a.scene, "dn": a.dn,
-         "treatment": {k: v for k, v in t.items() if k != "values"},
-         "scene_pass": scene_pass, "scene_drop": scene_drop,
-         "falsifier_triggered_on_this_scene": falsifier,
-         "geometry_gate": gate, "psnr_verdict": psnr, "rows": rows}, indent=2))
+    doc = grade(a.scene, a.dn, t, fl)
+    (out / "grade.json").write_text(json.dumps(doc, indent=2))
     (out / "ALL_DONE").write_text("")
-    print(json.dumps({"scene": a.scene, "scene_pass": scene_pass, "scene_drop": scene_drop,
-                      "falsifier": falsifier, "gate": gate, "psnr": psnr}, indent=2))
+    print(json.dumps({k: doc[k] for k in
+                      ("scene", "scene_pass", "scene_drop",
+                       "falsifier_triggered_on_this_scene", "geometry_gate",
+                       "psnr_verdict")}, indent=2))
 
 
 if __name__ == "__main__":
