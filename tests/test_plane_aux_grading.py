@@ -321,3 +321,22 @@ def test_summary_refuses_when_the_directory_and_the_report_disagree(tmp_path):
     _write_grade(tmp_path / "arkit", "pgeom")          # wrong scene inside arkit/
     with pytest.raises(SystemExit, match="disagree"):
         collect_scenes(tmp_path, "arkit")
+
+
+def test_the_floors_space_override_DEFAULTS_to_the_treatments_space():
+    """`--floors-depth-loss-space` exists for step 7 only, where the base is the DISPARITY
+    arm and the treatment is the METRIC one, so the floors to reuse are the base's.
+
+    The override must not weaken the ordinary case. It defaults to empty, and the call site
+    is `a.floors_depth_loss_space or a.depth_loss_space` -- so with the flag unset a
+    disparity-floor / metric-arm reuse is still REFUSED, and the divergence has to be
+    stated on the command line to happen at all. Would catch a default of "disparity",
+    which would silently permit every cross-space reuse.
+    """
+    from plane_aux_arms import check_floors_match
+    disparity_floors = [_cfg(), _cfg(), _cfg()]
+    # flag unset -> falls back to the treatment's space -> refused
+    with pytest.raises(SystemExit, match="depth_loss_space"):
+        check_floors_match(disparity_floors, "center", 0.0, "" or "metric")
+    # flag set to the BASE's space -> allowed, and only then
+    check_floors_match(disparity_floors, "center", 0.0, "disparity" or "metric")

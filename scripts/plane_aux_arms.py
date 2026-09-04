@@ -363,6 +363,13 @@ def main() -> None:
                     help="the depth source the reused floors were measured on. Must be "
                          "stated, and must match: floors measured on `center` are not the "
                          "floors of a `plane-aux` base.")
+    ap.add_argument("--floors-depth-loss-space", default="",
+                    choices=["", "disparity", "metric"],
+                    help="the loss space the reused floors were measured in, when it "
+                         "DIFFERS from this arm's. Step 7 compares metric against a "
+                         "disparity BASE, so the base's floors are the disparity ones. "
+                         "Defaults to --depth-loss-space, so the ordinary case must still "
+                         "match and the divergence has to be stated on the command line.")
     ap.add_argument("--skip-floors", action="store_true",
                     help="reuse the floors.json already in --out. REFUSES unless that "
                          "file exists AND its recorded dn / depth_loss_space match this "
@@ -430,8 +437,12 @@ def main() -> None:
 
     if a.skip_floors:
         prev = json.loads((out / "floors.json").read_text())
+        # The floors describe the BASE arm, and step 7's base is the disparity arm while
+        # its treatment is the metric one -- so the space to check the floors against is
+        # the BASE's, not the treatment's. It must be STATED (it defaults to the
+        # treatment's, so the ordinary case still has to match) rather than inferred.
         check_floors_match(floor_configs(out), a.floors_depth_source, a.dn,
-                           a.depth_loss_space)
+                           a.floors_depth_loss_space or a.depth_loss_space)
         fl = prev["floors"]
         print(f"=== PHASES 1-2 SKIPPED: reusing floors.json ({len(fl)} metrics) ===",
               flush=True)
