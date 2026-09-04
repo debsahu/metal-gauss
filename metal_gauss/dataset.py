@@ -80,6 +80,13 @@ class Scene:
     heldout: list[View]
     points: np.ndarray       # (P,3) sparse init
     colors: np.ndarray       # (P,3) in [0,1]
+    # COLMAP camera model NAME, or None when there is no COLMAP model (Blender, or a
+    # Scene built in a test). Recorded rather than acted on here: this loader reads
+    # `cam.params[0:4]` as (fx, fy, cx, cy) with no check, and the rasterizer is
+    # pinhole-only, so a wrong model is already a silent error everywhere. The name lets
+    # `train.resolve_depth_source` refuse the ONE path whose ray geometry is explicit --
+    # PGSR plane depth -- instead of unprojecting with a ray the model does not have.
+    camera_model: str | None = None
 
 
 def load_scene(colmap_dir: str | Path, images_dir: str | Path,
@@ -172,7 +179,12 @@ def load_scene(colmap_dir: str | Path, images_dir: str | Path,
     else:
         pts = np.array([p.xyz for p in rec.points3D.values()], np.float32)
         cols = np.array([p.color for p in rec.points3D.values()], np.float32) / 255.0
-    return Scene(train, heldout, pts, cols)
+    # `cam.model` is a pycolmap enum; `.name` on older builds, str() on newer. Neither is
+    # guaranteed, and a loader that raises here would break every dataset for the sake of
+    # one advisory guard -- so an unreadable model is recorded as None, which
+    # resolve_depth_source treats as "the caller is not asserting a model".
+    model = getattr(cam.model, "name", None) or str(getattr(cam, "model", "")) or None
+    return Scene(train, heldout, pts, cols, camera_model=model)
 
 
 # Spherical-harmonics DC normalisation, as in the INRIA ply convention.

@@ -137,14 +137,28 @@ def test_env_var_forces_the_torch_loss_path(monkeypatch):
 
 
 @mps
-def test_trainer_fused_and_torch_loss_paths_agree(monkeypatch):
-    """End to end through geometry_terms, both paths, same inputs."""
+@pytest.mark.parametrize("depth_source", ["center", "plane-aux"])
+def test_trainer_fused_and_torch_loss_paths_agree(monkeypatch, depth_source):
+    """End to end through geometry_terms, both paths, same inputs.
+
+    Parametrised over the depth source (Task 19) because the fused and torch branches of
+    `geometry_terms` form the plane depth at DIFFERENT points -- the fused one hands the
+    finished map to the kernel under `depth_mode="given"`, the torch one runs the same map
+    through the elementwise chain. A mode mismatch between them would show here as a gross
+    disagreement rather than a subtle one.
+
+    `depth_source` is passed EXPLICITLY on this hand-built Namespace, and geometry_terms
+    reads it with plain attribute access so a caller that forgets it gets an
+    AttributeError. A `getattr(args, "depth_source", "center")` default would have made
+    this test pass while silently running the centre path under both parameters.
+    """
     import argparse
     from metal_gauss.train import geometry_terms
     n_sum, z, a, gt_d, gt_n = exposing(seed=21)
     K = torch.tensor([[GRAZING[0], 0, GRAZING[2]], [0, GRAZING[1], GRAZING[3]], [0, 0, 1.]])
     args = argparse.Namespace(depth_loss_weight=1.0, normal_loss_weight=0.2,
-                              depth_normal_weight=0.05, depth_loss_space="disparity")
+                              depth_normal_weight=0.05, depth_loss_space="disparity",
+                              depth_source=depth_source)
     out = {}
     for name, v in (("fused", "0"), ("torch", "1")):
         monkeypatch.setenv("MG_TORCH_LOSS", v)

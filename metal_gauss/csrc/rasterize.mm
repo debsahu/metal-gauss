@@ -441,7 +441,8 @@ std::vector<torch::Tensor> nfd_backward(torch::Tensor depth, torch::Tensor g,
 
 std::vector<torch::Tensor> geom_loss_forward(
     torch::Tensor z_img, torch::Tensor n_sum, torch::Tensor alpha, torch::Tensor n_d,
-    torch::Tensor gt_depth, torch::Tensor gt_norm, torch::Tensor keep, int64_t space)
+    torch::Tensor gt_depth, torch::Tensor gt_norm, torch::Tensor keep, int64_t space,
+    int64_t depth_mode)
 {
     checkMPS(z_img, "z_img");
     const bool has_keep = keep.numel() > 0;
@@ -468,6 +469,10 @@ std::vector<torch::Tensor> geom_loss_forward(
             SETBUF(enc, keep_in, 12);
             uint hk = has_keep ? 1u : 0u;
             [enc setBytes:&hk length:sizeof(hk) atIndex:13];
+            // 0 = centre depth (z_img is (H,W,3), divide by alpha); 1 = a finished (H,W)
+            // depth map (PGSR plane depth, no alpha division). See geometry.metal.
+            uint dm = (uint)depth_mode;
+            [enc setBytes:&dm length:sizeof(dm) atIndex:14];
             [enc dispatchThreads:MTLSizeMake(NG * TG, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(TG, 1, 1)];
             [enc endEncoding];

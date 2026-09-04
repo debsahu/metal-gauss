@@ -26,8 +26,9 @@ import torch
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
 from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
-                                      fused_geometry_losses,
-                                      normal_loss, normals_from_depth, splat_normals_cam)
+                                      fused_geometry_losses, normal_loss,
+                                      normals_from_depth, plane_depth_from_features,
+                                      plane_features, splat_normals_cam)
 from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
@@ -338,28 +339,98 @@ def depth_normal_floor(gt_depth, gt_normal, alpha, K) -> float | None:
     return float(depth_normal_loss(n_d, gt_normal, alpha))
 
 
-def geometry_aux(means, quats, scales, viewmat):
+def geometry_aux(means, quats, scales, viewmat, depth_source: str = "center"):
     """The two aux attribute maps the geometry recipe composites: camera-frame splat
-    normals and view-space z.
+    normals, and a per-splat depth quantity whose meaning is `depth_source`.
 
     `scales` MUST be the same tensor handed to `render` (post-`filter_3d`), so the
     thin-axis choice describes the ellipsoid actually rasterized.
 
-    z comes from torch, NEVER from the preprocess's own `depth` output.
+    `center` -- view-space z. Composited and divided by alpha this is the expected depth,
+    which is BIASED for a tilted splat: the whole footprint reports the centre's depth, so
+    it is wrong by +-r*tan(theta) across it.
+
+    `plane-aux` -- PGSR's plane offset `d = n . p` (Brush `plane_features`,
+    brush-train/src/train.rs:4068). Composited alongside `n`, the pair define the plane
+    whose ray intersection `d_sum / (n_sum . r)` is the UNBIASED surface depth, and alpha
+    cancels between numerator and denominator. THE SHAPE AND THE CONTRACT DO NOT CHANGE:
+    the same [normals(3), scalar(1)] packing, the same two detached-weight aux channels,
+    the same fused kernel. Only what channel 0 means changes, and the kernel does not know
+    what it means.
+
+    Brush's `plane_features` returns the offset alongside the SAME oriented normal
+    `splat_normals` produces, so the normal half of the pair is identical between the two
+    sources and the normal loss is untouched by this switch. Verified by reading
+    train.rs:4068-4083, and mirrored here: both branches call `splat_normals_cam`.
+
+    z / d come from torch, NEVER from the preprocess's own `depth` output.
     `_PreprocessMetal.backward` accepts `d_depth` and DROPS it (metal_backend.py:267-279),
     so a depth map built on that output has no gradient path: it trains nothing and does
     not error. Pinned by tests/test_aux_render.py.
     """
     vmd = viewmat.to(means.device)
+    if depth_source == "plane-aux":
+        n_cam, d = plane_features(means, quats, scales, vmd)
+        return [n_cam, d[:, None].expand(-1, 3)]
+    if depth_source != "center":
+        raise ValueError(f"unknown depth_source {depth_source!r}")
     n_cam = splat_normals_cam(means, quats, scales, vmd)
     z = (means @ vmd[:3, :3].T + vmd[:3, 3])[:, 2:3].expand(-1, 3)
     return [n_cam, z]
+
+
+_PINHOLE_MODELS = frozenset({"PINHOLE", "SIMPLE_PINHOLE"})
+
+
+def resolve_depth_source(depth_source: str, camera_model: str | None) -> str:
+    """Warn and fall back to `center` when the plane path's pinhole assumption does not hold.
+
+    Brush does this at train.rs:1416-1418 (`warn_plane_depth_needs_pinhole`) because its
+    fisheye split path is KB4. metal-gauss has NO camera-model concept -- dataset.py:146
+    reads `cam.params[0:4]` as (fx, fy, cx, cy) with no check, and the rasterizer is
+    pinhole-only -- so a literal port of that guard could never fire. This is the guard
+    that makes it fireable: the COLMAP model name is recorded on the Scene, and anything
+    whose ray is not `((u - cx)/fx, (v - cy)/fy, 1)` falls back with a warning instead of
+    unprojecting with the wrong ray.
+
+    `None` (a Scene built in a test, or a Blender dataset) is allowed through: the caller
+    that does not know its model is not asserting a wrong one.
+    """
+    import warnings
+    if depth_source == "center" or camera_model is None:
+        return depth_source
+    if camera_model.upper() in _PINHOLE_MODELS:
+        return depth_source
+    warnings.warn(
+        f"--depth-source {depth_source} needs a pinhole camera; the COLMAP model is "
+        f"{camera_model}, whose ray is not ((u-cx)/fx, (v-cy)/fy, 1). Falling back to "
+        f"center depth rather than unprojecting with the wrong ray.", UserWarning,
+        stacklevel=2)
+    return "center"
 
 
 def _use_fused_loss() -> bool:
     """`MG_TORCH_LOSS=1` forces the pre-Task-17 torch loss chain, for equivalence gating."""
     import os
     return os.environ.get("MG_TORCH_LOSS", "0") in ("0", "", "false", "False")
+
+
+def _plane_depth(aux_maps, alpha, K):
+    """PGSR plane depth from the composited `[n_sum, offset_sum]` aux pair.
+
+    Returns `(depth, valid)`. `valid` is what `gt_depth` must be multiplied by -- NOT what
+    the prediction is multiplied by, which `plane_depth_from_features` has already done.
+    Brush train.rs:1945 is `gt_depth * valid`, and the comment there says why: an invalid
+    plane pixel zeroed in the PREDICTION only stays in the count with a full-magnitude
+    residual, i.e. it is scored as UNCOVERED (a reconstruction failure) when what it
+    actually is is UNSUPERVISED (no usable geometry). Dropping it from the numerator and
+    the denominator together is the only thing "no supervision here" can mean.
+    """
+    n_sum, off = aux_maps[0], aux_maps[1][..., :1]
+    feat = torch.cat([n_sum, off, alpha.detach()[..., None]], dim=-1)
+    depth, _normal, valid = plane_depth_from_features(
+        feat, K[0, 0].item(), K[1, 1].item(), K[0, 2].item(), K[1, 2].item())
+    return depth, valid
 
 
 def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
@@ -370,10 +441,23 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
     cheaper way to satisfy a depth loss than moving it. That is the mechanism behind
     Brush's banned `--depth-source plane-fused`, where opacity p50 collapses ~30%.
 
+    `--depth-source plane-aux` does NOT reopen that route. The plane depth needs no alpha
+    division at all -- alpha cancels between the ray-plane numerator and denominator -- and
+    the aux channels it rides on are the same DETACHED-weight pair the centre path uses.
+    Brush's plane-aux is likewise approach A, `render_splat_features`, whose contract is
+    "only `features` is on the autodiff graph" (brush-render/src/bwd/features_bwd.rs:399).
+    The live weight path is `plane-fused`, approach B, which this trainer does not have.
+
     `keep` is a BINARY mask. Multiplying a metric depth by a fractional alpha would invent
     depths between 0 and the truth, and a smaller depth is a different surface, not a less
     certain one.
     """
+    plane = args.depth_source == "plane-aux"
+    if plane:
+        depth_img, valid = _plane_depth(aux_maps, alpha, K)
+        # `valid` masks the GT, never only the prediction. See _plane_depth.
+        gt_depth = None if gt_depth is None else gt_depth * valid
+
     # Fused path: one pass over the image for the alpha divide, the normal normalise and
     # all three loss numerators, replacing ~30 torch elementwise dispatches. `keep` is
     # supported: the kernel multiplies both priors and the dn alpha by it, exactly as the
@@ -383,18 +467,20 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
             and args.depth_loss_weight > 0 and args.normal_loss_weight > 0
             and args.depth_normal_weight > 0
             and alpha.device.type == "mps" and aux_maps[0].dtype == torch.float32):
-        n_img, z_img = aux_maps
+        n_img = aux_maps[0]
         vals = fused_geometry_losses(
-            z_img, n_img, alpha, gt_depth, gt_normal,
+            depth_img if plane else aux_maps[1], n_img, alpha, gt_depth, gt_normal,
             (K[0, 0].item(), K[1, 1].item(), K[0, 2].item(), K[1, 2].item()),
-            keep=keep, space=args.depth_loss_space)
+            keep=keep, space=args.depth_loss_space,
+            depth_mode="given" if plane else "alpha")
         return {"depth": vals[0], "normal": vals[1], "depth_normal": vals[2]}
 
     alpha_d = alpha.detach()
     n_img, z_img = aux_maps
     n_img = n_img / alpha_d.clamp_min(1e-10)[..., None]
     n_img = n_img / n_img.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-    depth_img = z_img[..., 0] / alpha_d.clamp_min(1e-10)
+    if not plane:
+        depth_img = z_img[..., 0] / alpha_d.clamp_min(1e-10)
     terms = {}
     if args.depth_loss_weight > 0 and gt_depth is not None:
         gt_d = gt_depth if keep is None else gt_depth * keep
@@ -403,6 +489,11 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
         gt_n = gt_normal if keep is None else gt_normal * keep[..., None]
         terms["normal"] = normal_loss(n_img, gt_n)
     if args.depth_normal_weight > 0:
+        # Brush train.rs:2160 differentiates the PLANE depth here too, not the centre
+        # depth: "PGSR's consistency term compares the rendered plane normal against
+        # normals differentiated from the PLANE depth". No extra masking -- invalid plane
+        # pixels are exactly 0, normals_from_depth needs all three depths positive, and
+        # depth_normal_loss drops the (0,0,0) it emits.
         n_d = normals_from_depth(depth_img, K[0, 0].item(), K[1, 1].item(),
                                  K[0, 2].item(), K[1, 2].item())
         terms["depth_normal"] = depth_normal_loss(
@@ -412,7 +503,8 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
 
 def render_view(p: dict, v, active: int, sh_deg: int = 3,
                 background=(0.0, 0.0, 0.0), antialias: bool = False,
-                absgrad_out=None, filter_3d=None, want_geometry: bool = False):
+                absgrad_out=None, filter_3d=None, want_geometry: bool = False,
+                depth_source: str = "center"):
     """One rendered view, exactly as training renders it.
 
     v.K and v.viewmat stay on the HOST on purpose: the kernel reads both there,
@@ -427,7 +519,7 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
         # autograd carries it and no adjoint has to be written.
         scales, opac = apply_3d_filter(scales, opac, filter_3d[:active])
     aux = geometry_aux(p["means"][:active], p["quats"][:active], scales,
-                       v.viewmat) if want_geometry else None
+                       v.viewmat, depth_source) if want_geometry else None
     return render(
         p["means"][:active], p["quats"][:active],
         scales, opac, p["sh_dc"][:active],
@@ -435,8 +527,11 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
         sh_degree=sh_deg, backend="metal", sh_rest=p["sh_rest"][:active],
         background=background, antialias=antialias, absgrad_out=absgrad_out,
         aux_colors=aux,
-        # Centre-depth contract: both channels detached, so a geometry loss cannot buy its
-        # error down by moving opacity or footprint. See metal_backend.render.
+        # DETACHED-WEIGHT CONTRACT, and it is the same one for BOTH depth sources: a
+        # geometry loss cannot buy its error down by moving opacity or footprint. Brush's
+        # plane-aux uses the same contract (render_splat_features detaches transforms and
+        # raw_opacities); only plane-FUSED opens the weight path, and that is the mode
+        # CLAUDE.md bans and this trainer does not implement. See metal_backend.render.
         aux_detach_weights=None if aux is None else [True] * len(aux))
 
 
@@ -505,6 +600,14 @@ def train(args, scene: Scene | None = None) -> dict:
                 f"the priors, or set the weight to 0.")
     want_geometry = (args.depth_loss_weight > 0 or args.normal_loss_weight > 0
                      or args.depth_normal_weight > 0)
+    # Resolve ONCE, before the loop, and write the resolved value back onto `args` so the
+    # --report JSON records what actually ran rather than what was asked for. A sweep that
+    # reports settings other than the ones it used is the failure `_run_report` exists to
+    # prevent.
+    args.depth_source = resolve_depth_source(
+        args.depth_source, getattr(scene, "camera_model", None))
+    if want_geometry:
+        print(f"depth source: {args.depth_source}", flush=True)
     term_cov = geometry_view_coverage(args, scene.train)
     if term_cov:
         print("geometry supervision: " + ", ".join(
@@ -601,7 +704,8 @@ def train(args, scene: Scene | None = None) -> dict:
                                        antialias=args.antialias,
                                        absgrad_out=grad_sum if use_absgrad else None,
                                        filter_3d=filter_3d,
-                                       want_geometry=want_geometry)
+                                       want_geometry=want_geometry,
+                                       depth_source=args.depth_source)
         gt = v.image.to(device).float() / 255.0
         # Correct the RENDER (not the ground truth) so the exported splat stays
         # in the true photometric space and held-out views need no transform.
@@ -1008,6 +1112,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "no-prior control arm.")
     ap.add_argument("--depth-loss-weight", type=float, default=0.0,
                     help="L1 on rendered vs prior depth. earthbyte indoor recipe: 1.0")
+    ap.add_argument("--depth-source", choices=["center", "plane-aux"], default="center",
+                    help="what the depth channel composites. 'center' is the "
+                         "alpha-normalised view-space z of each splat CENTRE, which is "
+                         "biased by +-r*tan(theta) across a tilted splat's footprint. "
+                         "'plane-aux' is PGSR's ray-plane intersection (arXiv:2406.06521): "
+                         "the same two DETACHED-weight aux channels carry [n, d = n.p] "
+                         "instead of [n, z], and the depth is d_sum/(n_sum.ray), which "
+                         "needs no alpha division because alpha cancels. Brush's "
+                         "plane-fused (approach B, live blending weights) is NOT offered: "
+                         "opacity p50 collapses ~30% under it on both of our test scenes.")
     ap.add_argument("--depth-loss-space", choices=["disparity", "metric"],
                     default="disparity",
                     help="disparity (1/z, Brush's default) weights near geometry more")

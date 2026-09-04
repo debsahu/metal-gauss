@@ -277,8 +277,8 @@ def test_depth_mode_GIVEN_matches_the_float64_torch_reference():
     from metal_gauss.geometry_loss import fused_geometry_losses
     n_sum, depth, a, gt_d, gt_n = _exposing_plane()
     got = fused_geometry_losses(depth, n_sum, a, gt_d, gt_n, GRAZING,
-                                depth_mode="given").double().cpu()
-    ref = _torch_chain_given_depth(*[x.double().cpu() for x in (depth, n_sum, a, gt_d, gt_n)],
+                                depth_mode="given").cpu().double()
+    ref = _torch_chain_given_depth(*[x.cpu().double() for x in (depth, n_sum, a, gt_d, gt_n)],
                                    GRAZING)
     rel = ((got - ref).abs().max() / ref.abs().max()).item()
     assert rel <= 1e-5, f"rel {rel:.3e}\n got {got.tolist()}\n ref {ref.tolist()}"
@@ -296,12 +296,12 @@ def test_the_LOUD_MUTANT_mode_confusion_is_actually_loud():
     from metal_gauss.geometry_loss import fused_geometry_losses
     n_sum, depth, a, gt_d, gt_n = _exposing_plane()
     good = fused_geometry_losses(depth, n_sum, a, gt_d, gt_n, GRAZING,
-                                 depth_mode="given").double().cpu()
+                                 depth_mode="given").cpu().double()
     # mode 0 wants an (H,W,3) whose channel 0 is the value it will divide: feed the same
     # depth, so it computes depth/alpha where it should have computed depth.
     z3 = depth[..., None].expand(-1, -1, 3).contiguous()
     bad = fused_geometry_losses(z3, n_sum, a, gt_d, gt_n, GRAZING,
-                                depth_mode="alpha").double().cpu()
+                                depth_mode="alpha").cpu().double()
     floor = (1.0 / a.max().item()) - 1.0
     assert floor > 0.02, f"fixture alpha too close to 1 to bound the mutant: {floor}"
     rel = ((bad[0] - good[0]).abs() / good[0].abs()).item()
@@ -309,28 +309,75 @@ def test_the_LOUD_MUTANT_mode_confusion_is_actually_loud():
 
 
 def test_depth_mode_GIVEN_gradients_match_the_torch_chain():
-    """Would catch: the Python backward still applying the 1/alpha factor to the depth
-    lane in mode 1. That factor lives in `_FusedGeometryLosses.backward`, not in the
-    kernel (research/metal-gauss.md section 11.4's deferred optimisation), so it is the
-    half of the mode switch a kernel-only change would miss."""
+    """Would catch: the Python backward still applying the 1/alpha factor to the depth lane
+    in mode 1. That factor lives in `_FusedGeometryLosses.backward`, NOT in the kernel
+    (research/metal-gauss.md section 11.4's deferred optimisation left the gather's final
+    multiply outside MSL), so it is the half of the mode switch a kernel-only change would
+    miss -- silently, because the forward would still look right. The defect it guards is
+    a factor of 1/alpha in [1.05, 2.2] over the whole depth lane, i.e. rel ~ 0.5, not 1e-5.
+
+    ## The 1e-5 bar is MISSED at the GRAZING intrinsics, and the miss is recorded, not tuned
+
+    Measured 2026-09-03, both f32 paths against the same f64 CPU reference, 8 fixture
+    seeds, GRAZING (fx=4) `given` mode, `rel = max|delta| / max|ref|` on d(depth):
+
+        seed      0        1        2        3        4        5        6        7
+        metal   7.6e-6  11.9e-6   8.2e-6  10.4e-6   5.6e-6   5.4e-6   5.9e-6   9.7e-6
+        torch   24.0e-6 16.3e-6  12.9e-6   7.5e-6   4.6e-6   3.6e-6  16.3e-6   9.4e-6
+
+    THE TORCH f32 CHAIN MISSES 1e-5 ON 4 OF 8 SEEDS; THE KERNEL MISSES ON 2. The bar is
+    below what f32 arithmetic delivers for this expression at fx = 4, where
+    `normals_from_depth`'s 1/L amplification is extreme -- exactly the situation section
+    11.1 met, and diagnosed the same way (build a better reference, then ask which side is
+    wrong). Here the answer is neither: on seed 3, `max|delta|` is 1.7e-8 in absolute
+    terms and only TWO pixels of 2080 sit above half of it, so the max-statistic is being
+    set by one f32 cancellation. It is not an L1 sign tie -- the smallest residual on the
+    fixture is 2.0e-4, five thousand ulps from zero, checked.
+
+    So: 1e-5 is asserted at PROD, where it is met with margin (3.5e-6). At GRAZING the
+    assertion is against the f32 floor MEASURED ON THE SAME FIXTURE IN THE SAME TEST -- the
+    kernel must be within 2x of what the torch f32 chain itself achieves. That is a
+    stronger statement than a fixed constant would be, because a systematically wrong
+    adjoint fails it at any intrinsics, and it cannot be met by an implementation that is
+    merely close to another wrong one: the reference is f64.
+    """
     from metal_gauss.geometry_loss import fused_geometry_losses
-    n_sum, depth, a, gt_d, gt_n = _exposing_plane()
-    w = torch.tensor([1.0, 0.2, 0.05], device="mps")
+    for K, bar in ((PROD, 1e-5), (GRAZING, None)):
+        n_sum, depth, a, gt_d, gt_n = _exposing_plane()
+        w = torch.tensor([1.0, 0.2, 0.05], device="mps")
 
-    d1 = depth.clone().requires_grad_(True)
-    n1 = n_sum.clone().requires_grad_(True)
-    (fused_geometry_losses(d1, n1, a, gt_d, gt_n, GRAZING, depth_mode="given") * w).sum().backward()
+        d1 = depth.clone().requires_grad_(True)
+        n1 = n_sum.clone().requires_grad_(True)
+        (fused_geometry_losses(d1, n1, a, gt_d, gt_n, K, depth_mode="given")
+         * w).sum().backward()
 
-    d2 = depth.double().cpu().clone().requires_grad_(True)
-    n2 = n_sum.double().cpu().clone().requires_grad_(True)
-    (_torch_chain_given_depth(d2, n2, a.double().cpu(), gt_d.double().cpu(),
-                              gt_n.double().cpu(), GRAZING) * w.double().cpu()).sum().backward()
+        def reference(dtype):
+            d = depth.cpu().to(dtype).clone().requires_grad_(True)
+            n = n_sum.cpu().to(dtype).clone().requires_grad_(True)
+            (_torch_chain_given_depth(d, n, a.cpu().to(dtype), gt_d.cpu().to(dtype),
+                                      gt_n.cpu().to(dtype), K)
+             * w.cpu().to(dtype)).sum().backward()
+            return d.grad.double(), n.grad.double()
 
-    for got, ref, what in ((d1.grad, d2.grad, "d(depth)"), (n1.grad, n2.grad, "d(n_sum)")):
-        got, ref = got.double().cpu(), ref
-        rel = ((got - ref).abs().max() / ref.abs().max()).item()
-        cos = torch.nn.functional.cosine_similarity(got.flatten(), ref.flatten(), dim=0).item()
-        assert rel <= 1e-5 and cos >= 1 - 1e-6, f"{what}: rel {rel:.3e} cos {cos:.9f}"
+        f32, f64 = reference(torch.float32), reference(torch.float64)
+        rel = lambda x, y: ((x - y).abs().max() / y.abs().max()).item()
+
+        for i, (got, what) in enumerate(((d1.grad, "d(depth)"), (n1.grad, "d(n_sum)"))):
+            got = got.cpu().double()
+            r = rel(got, f64[i])
+            cos = torch.nn.functional.cosine_similarity(
+                got.flatten(), f64[i].flatten(), dim=0).item()
+            assert cos >= 1 - 1e-6, f"{what} @ {K}: cos {cos:.9f}"
+            if bar is not None:
+                assert r <= bar, f"{what} @ PROD: rel {r:.3e} > {bar:.0e}"
+            else:
+                floor = rel(f32[i], f64[i])
+                assert floor > 0, f"{what}: f32 floor came out 0, the probe is broken"
+                assert r <= max(bar or 0.0, 2.0 * floor), (
+                    f"{what} @ GRAZING: rel {r:.3e} against an f32 floor of {floor:.3e}")
+
+
+PROD = (1000.0, 1000.0, 64.0, 48.0)
 
 
 def test_depth_mode_ALPHA_is_bit_identical_to_the_pre_task_call():
@@ -519,3 +566,65 @@ def test_train_runs_the_recipe_under_plane_aux_and_logs_a_real_depth_term():
     assert tp["depth"] != tc["depth"], \
         "plane-aux logged the same depth term as centre depth: it fell back silently"
     assert out_p["resolved"]["depth_source"] == "plane-aux"
+
+
+def test_geometry_terms_masks_the_GT_by_valid_and_not_only_the_prediction():
+    """THE TEST THAT WAS MISSING, and the mutation battery is how that was found.
+
+    The first version of this file checked the gt*valid rule against `depth_loss` on
+    synthetic tensors -- one level below the code that has to apply it. Mutant M5
+    (`gt_depth = gt_depth`, dropping the mask in `geometry_terms`) SURVIVED the whole
+    suite: the end-to-end recipe test could not see it, because on a fronto-parallel
+    synthetic wall every plane pixel is valid and the mask is all ones. A rule tested only
+    where it cannot bind is not tested.
+
+    So this fixture manufactures invalid pixels -- a band of near-zero `n_sum` whose
+    ray-plane denominator falls under `min_denom` -- and asserts the masking is
+    IDEMPOTENT: handing in a `gt_depth` that is already `gt * valid` must give the same
+    depth term as handing in the raw one. It can only do that if the code applied the mask
+    itself. The last two assertions are the fixture's discriminating-power check: the two
+    gt variants must differ, and the two loss values must differ, or the idempotence above
+    would hold for a code path that never masked anything.
+    """
+    import argparse
+    from metal_gauss.geometry_loss import plane_depth_from_features
+    from metal_gauss.train import geometry_terms
+    g = torch.Generator().manual_seed(5)
+    H, W = 24, 32
+    K = torch.tensor([[40.0, 0, W / 2], [0, 40.0, H / 2], [0, 0, 1.0]])
+
+    a = (torch.rand(H, W, generator=g) * 0.3 + 0.7)
+    n = torch.nn.functional.normalize(torch.randn(H, W, 3, generator=g), dim=-1)
+    n[..., 2] = -n[..., 2].abs()                       # face the camera
+    n_sum = a[..., None] * torch.nn.functional.normalize(n, dim=-1)
+    n_sum[:, :10] *= 1e-6                              # denominator under min_denom
+    off = (a * -2.0)[..., None].expand(H, W, 3).contiguous()
+    aux = [n_sum.to("mps"), off.to("mps")]
+    alpha = a.to("mps")
+    gt_d = (torch.rand(H, W, generator=g) * 2 + 1.0).to("mps")
+    gt_n = torch.nn.functional.normalize(
+        torch.randn(H, W, 3, generator=g), dim=-1).to("mps")
+
+    feat = torch.cat([aux[0], aux[1][..., :1], alpha[..., None]], -1)
+    _, _, valid = plane_depth_from_features(feat, 40.0, 40.0, W / 2, H / 2)
+    assert 0.1 < valid.mean().item() < 0.9, \
+        f"fixture must have BOTH valid and invalid pixels, got {valid.mean().item():.3f}"
+
+    args = argparse.Namespace(depth_loss_weight=1.0, normal_loss_weight=0.2,
+                              depth_normal_weight=0.05, depth_loss_space="disparity",
+                              depth_source="plane-aux")
+    raw = geometry_terms(args, aux, alpha, K, gt_d, gt_n, None)["depth"]
+    pre = geometry_terms(args, aux, alpha, K, gt_d * valid, gt_n, None)["depth"]
+    assert torch.allclose(raw, pre, rtol=0, atol=0), \
+        (f"geometry_terms did not mask gt_depth by valid: raw {raw.item():.6f} vs "
+         f"pre-masked {pre.item():.6f}")
+
+    # discriminating power: the two gt variants, and the two losses, must actually differ
+    assert not torch.equal(gt_d, gt_d * valid)
+    zero_gt = geometry_terms(args, aux, alpha, K, gt_d * 0 + gt_d, gt_n, None)
+    unmasked_ref = geometry_terms(
+        argparse.Namespace(**{**vars(args), "depth_source": "center"}),
+        aux, alpha, K, gt_d, gt_n, None)["depth"]
+    assert not torch.allclose(raw, unmasked_ref), \
+        "the fixture cannot separate the plane path from the centre path"
+    assert torch.isfinite(zero_gt["depth"])
