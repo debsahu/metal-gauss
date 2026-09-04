@@ -1,0 +1,43 @@
+{
+  "scenes": [
+    "arkit",
+    "pgeom"
+  ],
+  "decision": "DROP",
+  "passed_on": [],
+  "regressed_on": [
+    "pgeom"
+  ],
+  "dn_settings_measured": [
+    0.0
+  ],
+  "falsifier_at_measured_dn": false,
+  "falsifier_scenes": [],
+  "falsifier_complete": false,
+  "per_scene": {
+    "arkit": {
+      "scene_pass": false,
+      "scene_drop": false,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "IMPROVED",
+        "stats.thin_axis_angle_p50": "IMPROVED",
+        "run.aspect_p50": "WITHIN FLOOR",
+        "run.needle_frac": "WITHIN FLOOR"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0
+    },
+    "pgeom": {
+      "scene_pass": false,
+      "scene_drop": true,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "IMPROVED",
+        "stats.thin_axis_angle_p50": "IMPROVED",
+        "run.aspect_p50": "WORSENED",
+        "run.needle_frac": "WORSENED"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0
+    }
+  }
+}
