@@ -1,5 +1,6 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "rule": "tier3-three-band-2026-09-04",
   "scene": "arkit",
   "dn": 0.0,
   "treatment": {
@@ -7,10 +8,216 @@
     "git": "14eeca1",
     "depth_source": "center",
     "seed_cloud": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds_tsdf/seed_tsdf2cm.ply",
+    "resolved": {
+      "antialias": false,
+      "appearance": "off",
+      "appearance_reg": 0.01,
+      "blender": null,
+      "budget": 500000,
+      "colmap": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/sparse_colmap_for_moge/0",
+      "densify_gate_frac": 0.3,
+      "densify_weight": "opacity_grad",
+      "depth_dir": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/depth_dense",
+      "depth_loss_space": "metric",
+      "depth_loss_weight": 1.0,
+      "depth_normal_weight": 0.0,
+      "depth_source": "center",
+      "eval_dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/M0.dump",
+      "eval_every": 2500,
+      "eval_split_every": 8,
+      "export": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/M0.ply",
+      "export_every": 0,
+      "filter_3d": false,
+      "filter_3d_every": 0,
+      "flatten_loss_weight": 1.0,
+      "fused_adam": true,
+      "grow": true,
+      "grow_until_frac": 0.7,
+      "images": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/images",
+      "init_ply": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/seed.ply",
+      "lr_appearance": 0.001,
+      "lr_means": 0.0002,
+      "lr_means_end": 2e-06,
+      "lr_opac": 0.01,
+      "lr_scene_scaled": true,
+      "mask_polarity": "auto",
+      "masks": null,
+      "max_resolution": 1008,
+      "no_priors": false,
+      "noise_weight": 40000.0,
+      "normal_dir": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/normal",
+      "normal_loss_weight": 0.2,
+      "num_downscales": 0,
+      "opac_reg": 0.01,
+      "out": null,
+      "prior_resident": "quantized",
+      "relocate_every": 100,
+      "relocate_until_frac": 0.85,
+      "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/M0.json",
+      "resolution_schedule": 10000,
+      "scale_reg": 0.01,
+      "seed": 42,
+      "selective_adam": false,
+      "sh_lr_div": 20.0,
+      "sh_warmup": 1000,
+      "start_active": 150000,
+      "steps": 30000,
+      "steps_scaler": 1.0
+    },
     "thin_axis_evaluated": 230875.0
   },
-  "scene_pass": false,
+  "band1": {
+    "per_arm": {
+      "run.needle_frac": {
+        "value": 0.0853400006890297,
+        "reference": 0.0803619995713234,
+        "delta": 0.004978001117706299,
+        "threshold": 0.108,
+        "x_threshold": 0.04609260294172499,
+        "space": "abs",
+        "fired": false
+      },
+      "run.aspect_p50": {
+        "value": 0.3716809153556824,
+        "reference": 0.3785106937090556,
+        "delta": 0.018208593571364617,
+        "threshold": 0.346,
+        "x_threshold": 0.0526259929808226,
+        "space": "log",
+        "fired": false
+      },
+      "stats.on_seed_frac_1cm": {
+        "value": 0.060152,
+        "reference": 0.06284533333333334,
+        "delta": 0.04380198934195878,
+        "threshold": 0.185,
+        "x_threshold": 0.23676750995653395,
+        "space": "log",
+        "fired": false
+      },
+      "run.lpips": {
+        "value": 0.39285764534298967,
+        "reference": 0.38833756859951873,
+        "delta": 0.0045200767434709355,
+        "threshold": 0.017,
+        "x_threshold": 0.2658868672629962,
+        "space": "abs",
+        "fired": false
+      }
+    },
+    "cumulative": {
+      "run.needle_frac": {
+        "value": 0.0853400006890297,
+        "reference": 0.0803619995713234,
+        "delta": 0.004978001117706299,
+        "threshold": 0.108,
+        "x_threshold": 0.04609260294172499,
+        "space": "abs",
+        "fired": false
+      },
+      "run.aspect_p50": {
+        "value": 0.3716809153556824,
+        "reference": 0.3785106937090556,
+        "delta": 0.018208593571364617,
+        "threshold": 0.346,
+        "x_threshold": 0.0526259929808226,
+        "space": "log",
+        "fired": false
+      },
+      "stats.on_seed_frac_1cm": {
+        "value": 0.060152,
+        "reference": 0.06284533333333334,
+        "delta": 0.04380198934195878,
+        "threshold": 0.185,
+        "x_threshold": 0.23676750995653395,
+        "space": "log",
+        "fired": false
+      },
+      "run.lpips": {
+        "value": 0.39285764534298967,
+        "reference": 0.38833756859951873,
+        "delta": 0.0045200767434709355,
+        "threshold": 0.017,
+        "x_threshold": 0.2658868672629962,
+        "space": "abs",
+        "fired": false
+      }
+    },
+    "per_arm_fired": [],
+    "cumulative_fired": [],
+    "fired": false
+  },
+  "band1_fired": false,
+  "band2": "FAIL",
+  "band3": {
+    "baseline": 24.760159143486707,
+    "treatment": 24.68160930058887,
+    "loss_db": 0.07854984289783573,
+    "allowance_db": 0.25,
+    "exceeds_allowance": false,
+    "crossed_stage4_gate": false,
+    "baseline_above_stage4": true,
+    "fired": false
+  },
+  "band3_fired": false,
+  "drift": [
+    {
+      "metric": "run.needle_frac",
+      "delta": 0.004978001117706299,
+      "floor_spread_n3": 0.0012940019369125366,
+      "x_floor": 3.846981195085158,
+      "sign": "worse",
+      "caused_band2_fail": false,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "run.aspect_p50",
+      "delta": -0.006829778353373228,
+      "floor_spread_n3": 0.002148836851119995,
+      "x_floor": 3.1783605860135355,
+      "sign": "worse",
+      "caused_band2_fail": false,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "stats.on_seed_frac_1cm",
+      "delta": -0.0026933333333333392,
+      "floor_spread_n3": 0.0009940000000000088,
+      "x_floor": 2.709590878604945,
+      "sign": "worse",
+      "caused_band2_fail": true,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "run.lpips",
+      "delta": 0.0045200767434709355,
+      "floor_spread_n3": 0.0007930648763005421,
+      "x_floor": 5.699504389295377,
+      "sign": "worse",
+      "caused_band2_fail": false,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "stats.thin_axis_angle_p50",
+      "delta": 1.1694706982800867,
+      "floor_spread_n3": 0.4789520080816203,
+      "x_floor": 2.441728353878813,
+      "sign": "worse",
+      "caused_band2_fail": true,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "run.psnr_masked",
+      "delta": -0.07854984289783573,
+      "floor_spread_n3": 0.011564966729110893,
+      "x_floor": 6.792050918755613,
+      "sign": "worse",
+      "caused_band2_fail": false,
+      "caused_band3_fire": false
+    }
+  ],
   "scene_drop": true,
+  "scene_pass": false,
   "falsifier_triggered_on_this_scene": false,
   "geometry_gate": {
     "stats.on_seed_frac_1cm": "WORSENED",
@@ -19,6 +226,36 @@
     "run.needle_frac": "WORSENED"
   },
   "psnr_verdict": "MOVED",
+  "anchor": {
+    "values": {
+      "run.needle_frac": 0.0803619995713234,
+      "run.aspect_p50": 0.3785106937090556,
+      "stats.on_seed_frac_1cm": 0.06284533333333334,
+      "run.lpips": 0.38833756859951873
+    },
+    "config": {
+      "budget": 500000,
+      "steps": 30000,
+      "max_resolution": 1008,
+      "num_downscales": 0
+    },
+    "source": {
+      "arms": [
+        "F0",
+        "F1",
+        "F2"
+      ],
+      "from": "bench/results/plane_aux/arkit/floors.json",
+      "statistic": "mean of the three floor arms",
+      "git": [
+        "32459cb",
+        "bcbad54"
+      ],
+      "depth_source": "center",
+      "depth_normal_weight": 0.0,
+      "depth_loss_space": "disparity"
+    }
+  },
   "rows": {
     "run.aspect_p50": {
       "treatment": 0.3716809153556824,
@@ -38,13 +275,23 @@
       "floor_spread_n3": 0.0,
       "moves": false
     },
+    "run.hard_needle_frac": {
+      "treatment": 0.001082,
+      "baseline_mean": 0.0008693333333333333,
+      "delta": 0.00021266666666666678,
+      "paired_vs_F0": 2.400000000000015e-05,
+      "floor_spread_n3": 0.0002899999999999999,
+      "moves": false
+    },
     "run.lpips": {
       "treatment": 0.39285764534298967,
       "baseline_mean": 0.38833756859951873,
       "delta": 0.0045200767434709355,
       "paired_vs_F0": 0.0048755801668981524,
       "floor_spread_n3": 0.0007930648763005421,
-      "moves": true
+      "moves": true,
+      "direction": "lower is better",
+      "verdict": "WORSENED"
     },
     "run.ms_per_step": {
       "treatment": 42.91,
@@ -89,6 +336,22 @@
       "moves": true,
       "direction": "two-sided",
       "verdict": "MOVED"
+    },
+    "run.smax_p50_mm": {
+      "treatment": 29.145736694335938,
+      "baseline_mean": 28.208670298258465,
+      "delta": 0.9370663960774728,
+      "paired_vs_F0": 0.9705066680908203,
+      "floor_spread_n3": 0.1381816864013672,
+      "moves": true
+    },
+    "run.smid_p50_mm": {
+      "treatment": 9.924190521240234,
+      "baseline_mean": 9.714706103006998,
+      "delta": 0.20948441823323627,
+      "paired_vs_F0": 0.23415565490722656,
+      "floor_spread_n3": 0.06601142883300781,
+      "moves": true
     },
     "stats.dark_splat_frac": {
       "treatment": 0.010338,

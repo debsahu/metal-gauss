@@ -1,5 +1,6 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "rule": "tier3-three-band-2026-09-04",
   "scene": "pgeom",
   "dn": 0.0,
   "treatment": {
@@ -7,10 +8,189 @@
     "git": "e8c50e1",
     "depth_source": "center",
     "seed_cloud": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/sparse/0/points3D.tsdf.txt",
+    "resolved": {
+      "antialias": false,
+      "appearance": "off",
+      "appearance_reg": 0.01,
+      "blender": null,
+      "budget": 500000,
+      "colmap": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/sparse/0",
+      "densify_gate_frac": 0.3,
+      "densify_weight": "opacity_grad",
+      "depth_dir": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/depth",
+      "depth_loss_space": "metric",
+      "depth_loss_weight": 1.0,
+      "depth_normal_weight": 0.0,
+      "depth_source": "center",
+      "eval_dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/M0.dump",
+      "eval_every": 2500,
+      "eval_split_every": 8,
+      "export": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/M0.ply",
+      "export_every": 0,
+      "filter_3d": false,
+      "filter_3d_every": 0,
+      "flatten_loss_weight": 1.0,
+      "fused_adam": true,
+      "grow": true,
+      "grow_until_frac": 0.7,
+      "images": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/images",
+      "init_ply": null,
+      "lr_appearance": 0.001,
+      "lr_means": 0.0002,
+      "lr_means_end": 2e-06,
+      "lr_opac": 0.01,
+      "lr_scene_scaled": true,
+      "mask_polarity": "auto",
+      "masks": null,
+      "max_resolution": 1920,
+      "no_priors": false,
+      "noise_weight": 40000.0,
+      "normal_dir": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/normal",
+      "normal_loss_weight": 0.2,
+      "num_downscales": 0,
+      "opac_reg": 0.01,
+      "out": null,
+      "prior_resident": "quantized",
+      "relocate_every": 100,
+      "relocate_until_frac": 0.85,
+      "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/M0.json",
+      "resolution_schedule": 10000,
+      "scale_reg": 0.01,
+      "seed": 42,
+      "selective_adam": false,
+      "sh_lr_div": 20.0,
+      "sh_warmup": 1000,
+      "start_active": 150000,
+      "steps": 30000,
+      "steps_scaler": 1.0
+    },
     "thin_axis_evaluated": 247442.0
   },
-  "scene_pass": false,
+  "band1": {
+    "per_arm": {
+      "run.needle_frac": {
+        "value": 0.14974799752235413,
+        "reference": 0.15156066914399466,
+        "delta": -0.0018126716216405325,
+        "threshold": 0.108,
+        "x_threshold": -0.0167839964966716,
+        "space": "abs",
+        "fired": false
+      },
+      "run.aspect_p50": {
+        "value": 0.31536829471588135,
+        "reference": 0.31256911158561707,
+        "delta": -0.008915543631214717,
+        "threshold": 0.346,
+        "x_threshold": -0.02576746714223907,
+        "space": "log",
+        "fired": false
+      },
+      "stats.on_seed_frac_1cm": {
+        "value": 0.065772,
+        "reference": 0.07190933333333334,
+        "delta": 0.08921185037162971,
+        "threshold": 0.185,
+        "x_threshold": 0.4822262182250255,
+        "space": "log",
+        "fired": false
+      },
+      "run.lpips": {
+        "value": 0.4018485641479492,
+        "reference": 0.4012339810530345,
+        "delta": 0.0006145830949147446,
+        "threshold": 0.017,
+        "x_threshold": 0.036151946759690856,
+        "space": "abs",
+        "fired": false
+      }
+    },
+    "cumulative": {
+      "run.needle_frac": {
+        "value": 0.14974799752235413,
+        "reference": 0.15156066914399466,
+        "delta": -0.0018126716216405325,
+        "threshold": 0.108,
+        "x_threshold": -0.0167839964966716,
+        "space": "abs",
+        "fired": false
+      },
+      "run.aspect_p50": {
+        "value": 0.31536829471588135,
+        "reference": 0.31256911158561707,
+        "delta": -0.008915543631214717,
+        "threshold": 0.346,
+        "x_threshold": -0.02576746714223907,
+        "space": "log",
+        "fired": false
+      },
+      "stats.on_seed_frac_1cm": {
+        "value": 0.065772,
+        "reference": 0.07190933333333334,
+        "delta": 0.08921185037162971,
+        "threshold": 0.185,
+        "x_threshold": 0.4822262182250255,
+        "space": "log",
+        "fired": false
+      },
+      "run.lpips": {
+        "value": 0.4018485641479492,
+        "reference": 0.4012339810530345,
+        "delta": 0.0006145830949147446,
+        "threshold": 0.017,
+        "x_threshold": 0.036151946759690856,
+        "space": "abs",
+        "fired": false
+      }
+    },
+    "per_arm_fired": [],
+    "cumulative_fired": [],
+    "fired": false
+  },
+  "band1_fired": false,
+  "band2": "FAIL",
+  "band3": {
+    "baseline": 22.574583614353095,
+    "treatment": 22.406437922443388,
+    "loss_db": 0.1681456919097073,
+    "allowance_db": 0.25,
+    "exceeds_allowance": false,
+    "crossed_stage4_gate": false,
+    "baseline_above_stage4": false,
+    "fired": false
+  },
+  "band3_fired": false,
+  "drift": [
+    {
+      "metric": "stats.on_seed_frac_1cm",
+      "delta": -0.006137333333333342,
+      "floor_spread_n3": 0.0006940000000000002,
+      "x_floor": 8.843419788664756,
+      "sign": "worse",
+      "caused_band2_fail": true,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "stats.thin_axis_angle_p50",
+      "delta": 1.8640069414598273,
+      "floor_spread_n3": 0.16651113978506515,
+      "x_floor": 11.194487911535004,
+      "sign": "worse",
+      "caused_band2_fail": true,
+      "caused_band3_fire": false
+    },
+    {
+      "metric": "run.psnr_masked",
+      "delta": -0.1681456919097073,
+      "floor_spread_n3": 0.04002377830783388,
+      "x_floor": 4.201144894828583,
+      "sign": "worse",
+      "caused_band2_fail": false,
+      "caused_band3_fire": false
+    }
+  ],
   "scene_drop": true,
+  "scene_pass": false,
   "falsifier_triggered_on_this_scene": false,
   "geometry_gate": {
     "stats.on_seed_frac_1cm": "WORSENED",
@@ -19,6 +199,37 @@
     "run.needle_frac": "IMPROVED"
   },
   "psnr_verdict": "MOVED",
+  "anchor": {
+    "values": {
+      "run.needle_frac": 0.15156066914399466,
+      "run.aspect_p50": 0.31256911158561707,
+      "stats.on_seed_frac_1cm": 0.07190933333333334,
+      "run.lpips": 0.4012339810530345
+    },
+    "config": {
+      "budget": 500000,
+      "steps": 30000,
+      "max_resolution": 1920,
+      "num_downscales": 0
+    },
+    "source": {
+      "arms": [
+        "F0",
+        "F1",
+        "F2"
+      ],
+      "from": "bench/results/plane_aux/pgeom/floors.json",
+      "statistic": "mean of the three floor arms",
+      "git": [
+        "0273e93",
+        "8954ad1",
+        "bcbad54"
+      ],
+      "depth_source": "center",
+      "depth_normal_weight": 0.0,
+      "depth_loss_space": "disparity"
+    }
+  },
   "rows": {
     "run.aspect_p50": {
       "treatment": 0.31536829471588135,
@@ -38,13 +249,23 @@
       "floor_spread_n3": 0.0,
       "moves": false
     },
+    "run.hard_needle_frac": {
+      "treatment": 0.002194,
+      "baseline_mean": 0.0020733333333333333,
+      "delta": 0.00012066666666666693,
+      "paired_vs_F0": 0.00029600000000000026,
+      "floor_spread_n3": 0.00041200000000000004,
+      "moves": false
+    },
     "run.lpips": {
       "treatment": 0.4018485641479492,
       "baseline_mean": 0.4012339810530345,
       "delta": 0.0006145830949147446,
       "paired_vs_F0": 0.0004896712303161799,
       "floor_spread_n3": 0.001224652528762804,
-      "moves": false
+      "moves": false,
+      "direction": "lower is better",
+      "verdict": "WITHIN FLOOR"
     },
     "run.ms_per_step": {
       "treatment": 97.09,
@@ -89,6 +310,22 @@
       "moves": true,
       "direction": "two-sided",
       "verdict": "MOVED"
+    },
+    "run.smax_p50_mm": {
+      "treatment": 25.624338150024414,
+      "baseline_mean": 25.84501075744629,
+      "delta": -0.220672607421875,
+      "paired_vs_F0": -0.13615989685058594,
+      "floor_spread_n3": 0.1558856964111328,
+      "moves": true
+    },
+    "run.smid_p50_mm": {
+      "treatment": 7.171139240264893,
+      "baseline_mean": 7.151176452636719,
+      "delta": 0.019962787628173828,
+      "paired_vs_F0": 0.03271770477294922,
+      "floor_spread_n3": 0.022002696990966797,
+      "moves": false
     },
     "stats.dark_splat_frac": {
       "treatment": 0.066446,

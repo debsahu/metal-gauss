@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "what": "The Tier 1 P-GEOM arms that ANCHOR the Band 1 collapse thresholds, copied into the repository from the run artifacts so the derivation and the VOID demonstration are reproducible from git alone. The artifacts themselves live in a session scratchpad, outside version control, and will not survive it.",
+  "source": {
+    "run_dir": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t10run",
+    "reports": "<arm>.json",
+    "stats": "<arm>.stats.json",
+    "shape": "recomputed from <arm>.ply by scripts/ply_shape.py, cross-checked against collected.json's ply.* columns",
+    "collected": "collected.json (the batch's own roll-up)",
+    "note": "research/metal-gauss.md section 8.1 tabulates these rounded to 3-4 sf; these are the full-precision values."
+  },
+  "median_convention": "average (np.median) -- what collected.json's ply.* columns and therefore section 8.1's aspect/needle figures use. The TRAINER's own metrics.shape block uses torch's LOWER median instead; the two differ by ~2e-6 relative at 500k splats and are not interchangeable at more than ~5 significant figures. hard_needle_frac and needle_frac are fractions, not order statistics, so they are identical either way.",
+  "roles": {
+    "B0a": "baseline; the reference every delta below is taken against",
+    "R1": "full recipe, dn=0.05 -- ADOPTED",
+    "R1p": "full recipe, dn=0 -- ADOPTED; Task 19's base arm is this configuration",
+    "R1_openweights": "THE VOID ROW. The same recipe before the aux blending-weight fix: it reached a similar thin-axis by destroying the splats, and thin-axis, opacity and dark fraction all reported it as HEALTHIER than baseline. It is the smallest RECORDED collapse, and the upper anchor of every Band 1 threshold.",
+    "B0b": "baseline repeat, same seed as B0a",
+    "B0d": "baseline repeat on a later commit; section 8.2 established no drift"
+  },
+  "arms": {
+    "B0a": {
+      "values": {
+        "run.needle_frac": 0.166346,
+        "run.aspect_p50": 0.2956620955353454,
+        "stats.on_seed_frac_1cm": 0.08471,
+        "run.lpips": 0.39519074916839597,
+        "stats.thin_axis_angle_p50": 49.78375314746906,
+        "run.psnr_masked": 22.328741356678844,
+        "run.smid_p50_mm": 6.619275628488914,
+        "run.smax_p50_mm": 25.662457214822208,
+        "run.hard_needle_frac": 0.007
+      },
+      "git": "727b8ba",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.0,
+        "flatten_loss_weight": 0.0,
+        "depth_loss_weight": 0.0,
+        "normal_loss_weight": 0.0,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    },
+    "R1": {
+      "values": {
+        "run.needle_frac": 0.1932,
+        "run.aspect_p50": 0.2730019272204393,
+        "stats.on_seed_frac_1cm": 0.088998,
+        "run.lpips": 0.39676238656044005,
+        "stats.thin_axis_angle_p50": 29.448960482799396,
+        "run.psnr_masked": 22.603672645401264,
+        "run.smid_p50_mm": 5.801311210879474,
+        "run.smax_p50_mm": 24.68334831403273,
+        "run.hard_needle_frac": 0.01509
+      },
+      "git": "78434d6",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.05,
+        "flatten_loss_weight": 1.0,
+        "depth_loss_weight": 1.0,
+        "normal_loss_weight": 0.2,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    },
+    "R1p": {
+      "values": {
+        "run.needle_frac": 0.195308,
+        "run.aspect_p50": 0.27493785888216316,
+        "stats.on_seed_frac_1cm": 0.081424,
+        "run.lpips": 0.39757623910903933,
+        "stats.thin_axis_angle_p50": 29.47242803752828,
+        "run.psnr_masked": 22.514047024304254,
+        "run.smid_p50_mm": 5.779607560993283,
+        "run.smax_p50_mm": 24.69697872140725,
+        "run.hard_needle_frac": 0.015478
+      },
+      "git": "855c2cb",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.0,
+        "flatten_loss_weight": 1.0,
+        "depth_loss_weight": 1.0,
+        "normal_loss_weight": 0.2,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    },
+    "R1_openweights": {
+      "values": {
+        "run.needle_frac": 0.567904,
+        "run.aspect_p50": 0.06589825256297693,
+        "stats.on_seed_frac_1cm": 0.03587,
+        "run.lpips": 0.5213699185848236,
+        "stats.thin_axis_angle_p50": 29.01965578418939,
+        "run.psnr_masked": 21.332727824205172,
+        "run.smid_p50_mm": 1.346678166806869,
+        "run.smax_p50_mm": 22.44489927193895,
+        "run.hard_needle_frac": 0.317704
+      },
+      "git": "727b8ba",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.05,
+        "flatten_loss_weight": 1.0,
+        "depth_loss_weight": 1.0,
+        "normal_loss_weight": 0.2,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    },
+    "B0b": {
+      "values": {
+        "run.needle_frac": 0.168558,
+        "run.aspect_p50": 0.29405480158450825,
+        "stats.on_seed_frac_1cm": 0.084716,
+        "run.lpips": 0.3945951330661774,
+        "stats.thin_axis_angle_p50": 49.78591058406456,
+        "run.psnr_masked": 22.32379989324102,
+        "run.smid_p50_mm": 6.59110878871998,
+        "run.smax_p50_mm": 25.761358619118095,
+        "run.hard_needle_frac": 0.006818
+      },
+      "git": "727b8ba",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.0,
+        "flatten_loss_weight": 0.0,
+        "depth_loss_weight": 0.0,
+        "normal_loss_weight": 0.0,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    },
+    "B0d": {
+      "values": {
+        "run.needle_frac": 0.166918,
+        "run.aspect_p50": 0.2967583953181431,
+        "stats.on_seed_frac_1cm": 0.084106,
+        "run.lpips": 0.39446045994758605,
+        "stats.thin_axis_angle_p50": 49.83856437628531,
+        "run.psnr_masked": 22.423988442299315,
+        "run.smid_p50_mm": 6.610792156028877,
+        "run.smax_p50_mm": 25.687178299297482,
+        "run.hard_needle_frac": 0.006922
+      },
+      "git": "78434d6",
+      "seed": 42,
+      "resolved": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 2,
+        "depth_normal_weight": 0.0,
+        "flatten_loss_weight": 0.0,
+        "depth_loss_weight": 0.0,
+        "normal_loss_weight": 0.0,
+        "depth_loss_space": "disparity",
+        "seed": 42
+      }
+    }
+  },
+  "floor_arms": [
+    "B0a",
+    "B0b",
+    "B0d"
+  ],
+  "floor_arms_note": "research/metal-gauss.md section 8.2's MEASURED FLOOR SET is B0a/B0b/B0d, not B0a/B0b/B0c -- the M4 Max replication showed no drift between those three binaries, so they are a legitimate same-config n=3 sample. The Tier 1 run's own floors.json predates that and uses B0c; it also carries no shape columns at all, because metrics.shape did not exist when it was written.",
+  "floors": {
+    "run.needle_frac": {
+      "B0a": 0.166346,
+      "B0b": 0.168558,
+      "B0d": 0.166918,
+      "F0": 0.166346,
+      "F1": 0.168558,
+      "F2": 0.166918,
+      "mean": 0.167274,
+      "spread_n3": 0.0022120000000000195,
+      "repeat_pair_abs_diff": 0.0022120000000000195
+    },
+    "run.aspect_p50": {
+      "B0a": 0.2956620955353454,
+      "B0b": 0.29405480158450825,
+      "B0d": 0.2967583953181431,
+      "F0": 0.2956620955353454,
+      "F1": 0.29405480158450825,
+      "F2": 0.2967583953181431,
+      "mean": 0.2954917641459989,
+      "spread_n3": 0.0027035937336348237,
+      "repeat_pair_abs_diff": 0.0016072939508371409
+    },
+    "stats.on_seed_frac_1cm": {
+      "B0a": 0.08471,
+      "B0b": 0.084716,
+      "B0d": 0.084106,
+      "F0": 0.08471,
+      "F1": 0.084716,
+      "F2": 0.084106,
+      "mean": 0.08451066666666666,
+      "spread_n3": 0.0006099999999999994,
+      "repeat_pair_abs_diff": 6.0000000000060005e-06
+    },
+    "run.lpips": {
+      "B0a": 0.39519074916839597,
+      "B0b": 0.3945951330661774,
+      "B0d": 0.39446045994758605,
+      "F0": 0.39519074916839597,
+      "F1": 0.3945951330661774,
+      "F2": 0.39446045994758605,
+      "mean": 0.39474878072738645,
+      "spread_n3": 0.000730289220809921,
+      "repeat_pair_abs_diff": 0.000595616102218588
+    },
+    "stats.thin_axis_angle_p50": {
+      "B0a": 49.78375314746906,
+      "B0b": 49.78591058406456,
+      "B0d": 49.83856437628531,
+      "F0": 49.78375314746906,
+      "F1": 49.78591058406456,
+      "F2": 49.83856437628531,
+      "mean": 49.80274270260631,
+      "spread_n3": 0.05481122881624856,
+      "repeat_pair_abs_diff": 0.002157436595496165
+    },
+    "run.psnr_masked": {
+      "B0a": 22.328741356678844,
+      "B0b": 22.32379989324102,
+      "B0d": 22.423988442299315,
+      "F0": 22.328741356678844,
+      "F1": 22.32379989324102,
+      "F2": 22.423988442299315,
+      "mean": 22.358843230739726,
+      "spread_n3": 0.100188549058295,
+      "repeat_pair_abs_diff": 0.0049414634378237565
+    },
+    "run.smid_p50_mm": {
+      "B0a": 6.619275628488914,
+      "B0b": 6.59110878871998,
+      "B0d": 6.610792156028877,
+      "F0": 6.619275628488914,
+      "F1": 6.59110878871998,
+      "F2": 6.610792156028877,
+      "mean": 6.6070588577459235,
+      "spread_n3": 0.028166839768934082,
+      "repeat_pair_abs_diff": 0.028166839768934082
+    },
+    "run.smax_p50_mm": {
+      "B0a": 25.662457214822208,
+      "B0b": 25.761358619118095,
+      "B0d": 25.687178299297482,
+      "F0": 25.662457214822208,
+      "F1": 25.761358619118095,
+      "F2": 25.687178299297482,
+      "mean": 25.703664711079263,
+      "spread_n3": 0.09890140429588712,
+      "repeat_pair_abs_diff": 0.09890140429588712
+    },
+    "run.hard_needle_frac": {
+      "B0a": 0.007,
+      "B0b": 0.006818,
+      "B0d": 0.006922,
+      "F0": 0.007,
+      "F1": 0.006818,
+      "F2": 0.006922,
+      "mean": 0.006913333333333334,
+      "spread_n3": 0.00018199999999999987,
+      "repeat_pair_abs_diff": 0.00018199999999999987
+    }
+  }
+}

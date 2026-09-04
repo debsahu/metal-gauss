@@ -304,6 +304,20 @@ def geometry_coverage_warning(cov: dict) -> str | None:
             "says so (see CLAUDE.md Stage 3, '24 of 276 faces trained photometric-only').")
 
 
+# A splat whose minor in-plane half-axis is smaller than the rim displacement its OWN
+# quantised orientation produces in the delivery format. Its orientation is undeliverable
+# however well it was trained, so this is a DELIVERY-DERIVED threshold, not a taste one.
+#
+# splat-transform's SOG writer normalises the quaternion, scales it by +-sqrt(2), and
+# stores the smallest three components as `255 * (q * 0.5 + 0.5)` in uint8 (verified in the
+# installed package's `dist/index.mjs`, at the writer that emits the `252 + maxComp` tag).
+# One uint8 step is therefore sqrt(2)/255 = 0.0055459 in true component units; worst-case
+# round-to-nearest error is step/2 per component over three components, a quaternion
+# perturbation of norm (step/2)*sqrt(3); and a perturbation of norm e is a rotation of 2e.
+# That is 0.0096058 rad. 0.01 is the next round number at or above it.
+HARD_NEEDLE_ASPECT = 0.01
+
+
 def shape_metrics(log_scales: torch.Tensor) -> dict:
     """In-plane aspect and needle fraction: WHAT the splats became.
 
@@ -318,6 +332,7 @@ def shape_metrics(log_scales: torch.Tensor) -> dict:
     aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
     return {"aspect_p50": float(aspect.median()),
             "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
+            "hard_needle_frac": float((aspect < HARD_NEEDLE_ASPECT).to(aspect.dtype).mean()),
             "smid_p50_mm": float(s[:, 1].median() * 1000.0),
             "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
 

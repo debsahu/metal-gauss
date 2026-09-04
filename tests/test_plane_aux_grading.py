@@ -21,6 +21,23 @@ THIN = "stats.thin_axis_angle_p50"
 ASPECT = "run.aspect_p50"
 NEEDLE = "run.needle_frac"
 PSNR = "run.psnr_masked"
+LPIPS = "run.lpips"
+
+# The keep/drop rule these tests exercised was REPLACED on 2026-09-04 by the three-band
+# rule in `tests/test_plane_aux_tier3_rule.py`. What survives here is the shared machinery
+# -- per-metric verdicts, floor reuse, `--summary` scene naming, `write_grade` -- plus the
+# decision tests, updated to the new bands and each one saying what changed. The
+# replacement's own tests live in the other file; nothing here re-tests a band.
+#
+# `grade` now takes the frozen cumulative anchor and the arm's resolved configuration.
+ANCHOR = {ON_SEED: 0.08, ASPECT: 0.27, NEEDLE: 0.19, LPIPS: 0.40}
+ANCHOR_CFG = {"budget": 500000, "steps": 30000, "max_resolution": 1920,
+              "num_downscales": 0}
+
+
+def _extra():
+    """The three arguments `grade` gained with the three-band rule."""
+    return (ANCHOR, {"config": ANCHOR_CFG, "values": ANCHOR}, dict(ANCHOR_CFG))
 
 
 def test_the_floor_comparison_is_STRICT():
@@ -51,20 +68,22 @@ def test_each_metrics_direction_of_worse(metric, delta, want):
 
 def _fl(**over):
     """Floors for a base arm; every gate metric present, spread 0.01 unless overridden."""
-    base = {ON_SEED: 0.08, THIN: 30.0, ASPECT: 0.27, NEEDLE: 0.19, PSNR: 22.5}
+    base = {ON_SEED: 0.08, THIN: 30.0, ASPECT: 0.27, NEEDLE: 0.19, PSNR: 22.5,
+            LPIPS: 0.40}
     return {k: {"F0": v, "F1": v, "F2": v, "mean": v, "spread_n3": over.get(k + "_floor", 0.01),
                 "repeat_pair_abs_diff": 0.0} for k, v in base.items()}
 
 
 def _t(**over):
-    base = {ON_SEED: 0.08, THIN: 30.0, ASPECT: 0.27, NEEDLE: 0.19, PSNR: 22.5}
+    base = {ON_SEED: 0.08, THIN: 30.0, ASPECT: 0.27, NEEDLE: 0.19, PSNR: 22.5,
+            LPIPS: 0.40}
     base.update(over)
     return {"seed": 42, "git": "x", "depth_source": "plane-aux", "seed_cloud": "tsdf.txt",
             "thin_axis_evaluated": 250000, "values": base}
 
 
 def test_a_clean_pass_passes():
-    d = grade("s", 0.0, _t(**{ON_SEED: 0.10, THIN: 28.0}), _fl())
+    d = grade("s", 0.0, _t(**{ON_SEED: 0.10, THIN: 28.0}), _fl(), *_extra())
     assert d["scene_pass"] and not d["scene_drop"]
     assert not d["falsifier_triggered_on_this_scene"]
 
@@ -73,8 +92,8 @@ def test_on_seed_must_RISE_not_merely_not_fall():
     """The rule says on-seed@1cm must rise by more than the floor. An arm that improves
     thin-axis and leaves on-seed alone is NOT a pass -- would catch a gate written as
     `!= WORSENED` for this column, which is how the other three are written."""
-    d = grade("s", 0.0, _t(**{THIN: 20.0}), _fl())
-    assert not d["scene_pass"]
+    d = grade("s", 0.0, _t(**{THIN: 20.0}), _fl(), *_extra())
+    assert not d["scene_pass"] and d["band2"] == "WITHIN FLOOR"
     assert d["geometry_gate"][ON_SEED] == "WITHIN FLOOR"
 
 
@@ -88,27 +107,45 @@ def test_a_needle_collapse_DROPS_even_when_thin_axis_improves():
     three-column gate someone would write.
     """
     d = grade("s", 0.0, _t(**{THIN: 20.0, ASPECT: 0.066, NEEDLE: 0.568, ON_SEED: 0.04}),
-              _fl())
+              _fl(), *_extra())
     assert d["scene_drop"] and not d["scene_pass"]
+    # UPDATED for the three-band rule: this row now drops through Band 1, on magnitude,
+    # and Band 2 fails as well because on-seed HALVED. Under the replaced rule any
+    # beyond-floor worsening of aspect or needles was the drop, at any magnitude.
+    assert d["band1_fired"] and set(d["band1"]["per_arm_fired"]) >= {ASPECT, NEEDLE}
+    assert d["band2"] == "FAIL"
     assert d["geometry_gate"][ASPECT] == "WORSENED"
     assert d["geometry_gate"][NEEDLE] == "WORSENED"
     # and the discriminating check: thin-axis alone WOULD have called this an improvement
     assert d["geometry_gate"][THIN] == "IMPROVED"
 
 
-def test_a_psnr_move_blocks_a_pass_in_EITHER_direction():
-    for p in (25.0, 20.0):
-        d = grade("s", 0.0, _t(**{ON_SEED: 0.10, PSNR: p}), _fl())
-        assert d["psnr_verdict"] == "MOVED"
-        assert not d["scene_pass"]
+def test_a_psnr_GAIN_no_longer_blocks_a_pass_but_a_LOSS_beyond_0_25_dB_drops():
+    """REPLACED CONDITION, kept as the record of what changed.
+
+    The pre-registered rule required masked PSNR to stay WITHIN the floor in either
+    direction, so a 5 dB IMPROVEMENT blocked a pass. Band 3 is one-sided -- "falls by more
+    than 0.25 dB" -- because a gain is not a regression, and because the two-sided
+    condition is what made every Tier 3 arm unable to pass whatever its geometry did
+    (research/metal-gauss.md section 12.4: "Neither scene PASSED either -- masked PSNR
+    moved on both").
+
+    Would catch a re-introduction of `abs(delta)` into Band 3.
+    """
+    up = grade("s", 0.0, _t(**{ON_SEED: 0.10, PSNR: 27.5}), _fl(), *_extra())
+    assert up["psnr_verdict"] == "MOVED" and not up["band3_fired"] and up["scene_pass"]
+    down = grade("s", 0.0, _t(**{ON_SEED: 0.10, PSNR: 22.5 - 0.26}), _fl(), *_extra())
+    assert down["band3_fired"] and down["scene_drop"]
+    inside = grade("s", 0.0, _t(**{ON_SEED: 0.10, PSNR: 22.5 - 0.24}), _fl(), *_extra())
+    assert not inside["band3_fired"] and inside["scene_pass"]
 
 
 def test_the_falsifier_fires_only_when_BOTH_on_seed_and_thin_axis_stay_put():
-    both_still = grade("s", 0.0, _t(**{ASPECT: 0.30}), _fl())
+    both_still = grade("s", 0.0, _t(**{ASPECT: 0.30}), _fl(), *_extra())
     assert both_still["falsifier_triggered_on_this_scene"]
-    thin_moved = grade("s", 0.0, _t(**{THIN: 25.0}), _fl())
+    thin_moved = grade("s", 0.0, _t(**{THIN: 25.0}), _fl(), *_extra())
     assert not thin_moved["falsifier_triggered_on_this_scene"]
-    seed_moved = grade("s", 0.0, _t(**{ON_SEED: 0.10}), _fl())
+    seed_moved = grade("s", 0.0, _t(**{ON_SEED: 0.10}), _fl(), *_extra())
     assert not seed_moved["falsifier_triggered_on_this_scene"]
 
 
@@ -123,7 +160,7 @@ def test_a_MISSING_gate_column_is_an_error_and_never_a_pass():
     fl = _fl(); fl.pop(THIN)
     t = _t(); t["values"].pop(THIN)
     with pytest.raises(SystemExit, match=THIN):
-        grade("s", 0.0, t, fl)
+        grade("s", 0.0, t, fl, *_extra())
 
 
 def test_every_gate_column_has_a_declared_direction():
@@ -204,10 +241,17 @@ def test_a_missing_configuration_key_is_a_MISMATCH_not_agreement():
 # ---------------------------------------------------------- the cross-scene decision
 
 def _g(**over):
-    d = {"scene_pass": False, "scene_drop": False,
+    """A scene grade as `combined_verdict` reads it under the three-band rule."""
+    d = {"scene_pass": False, "scene_drop": False, "band1_fired": False,
+         "band2": "WITHIN FLOOR", "band3_fired": False, "drift": [],
          "falsifier_triggered_on_this_scene": False, "dn": 0.0,
          "geometry_gate": {}, "psnr_verdict": "WITHIN FLOOR"}
     d.update(over)
+    if over.get("scene_pass") and "band2" not in over:
+        d["band2"] = "PASS"
+    if over.get("scene_drop") and not any(k in over for k in
+                                          ("band1_fired", "band2", "band3_fired")):
+        d["band1_fired"] = True
     return d
 
 
@@ -226,12 +270,15 @@ def test_a_regression_on_ONE_scene_is_a_DROP_even_if_the_other_scene_passes():
     assert v["regressed_on"] == ["arkit"] and v["passed_on"] == ["pgeom"]
 
 
-def test_pass_on_both_is_the_recipe_default_and_pass_on_one_is_opt_in():
+def test_pass_on_both_is_the_default_and_pass_on_one_is_opt_in():
+    """UPDATED wording only. The outcome classes were renamed by the three-band rule
+    ("KEEP AS RECIPE DEFAULT" -> "KEEP AS DEFAULT", "KEEP AS OPT-IN" -> "OPT-IN") and a
+    third class was added between them for a pass that carries drift."""
     from plane_aux_arms import combined_verdict
     both = combined_verdict({"a": _g(scene_pass=True), "b": _g(scene_pass=True)})
-    assert both["decision"] == "KEEP AS RECIPE DEFAULT"
+    assert both["decision"] == "KEEP AS DEFAULT"
     one = combined_verdict({"a": _g(scene_pass=True), "b": _g()})
-    assert one["decision"] == "KEEP AS OPT-IN"
+    assert one["decision"] == "OPT-IN"
 
 
 def test_no_pass_and_no_regression_is_NOT_adoption():
@@ -298,6 +345,40 @@ def test_summary_refuses_an_UNNAMED_grade_json_rather_than_counting_it(tmp_path)
     _write_grade(tmp_path / "regrade_smoke", "regrade_smoke", scene_drop=True)
     with pytest.raises(SystemExit, match="regrade_smoke"):
         collect_scenes(tmp_path, "pgeom,arkit")
+
+
+def test_a_NON_PRIMARY_arms_summary_reads_its_OWN_file_and_never_grade_json(tmp_path):
+    """The step-7 arm needs a cross-scene decision too, and it must not get there by
+    borrowing the pre-registered arm's filename -- which is the defect `write_grade` was
+    fixed for. `--summary --treatment-tag M0` reads `grade_M0.json`.
+
+    Would catch a summary hard-coded to `grade.json`, which would report the plane-aux
+    verdict under the metric-space arm's name with nothing erroring: both files are
+    well-formed grades of real arms.
+    """
+    from plane_aux_arms import collect_scenes, grade_filename
+    assert grade_filename("P0") == "grade.json"
+    assert grade_filename("M0") == "grade_M0.json"
+    for scene in ("pgeom", "arkit"):
+        d = tmp_path / scene
+        _write_grade(d, scene, band2="PASS")
+        (d / "grade_M0.json").write_text(json.dumps(
+            {"scene": scene, "dn": 0.0, "band2": "FAIL", "scene_pass": False,
+             "scene_drop": True, "falsifier_triggered_on_this_scene": False,
+             "geometry_gate": {}, "psnr_verdict": "MOVED"}))
+    primary = collect_scenes(tmp_path, "pgeom,arkit")
+    m0 = collect_scenes(tmp_path, "pgeom,arkit", "M0")
+    assert all(g["band2"] == "PASS" for g in primary.values())
+    assert all(g["band2"] == "FAIL" for g in m0.values())
+
+
+def test_a_missing_NON_PRIMARY_grade_is_still_an_error_and_names_its_own_filename(tmp_path):
+    """Would catch a tag parameter that silently falls back to grade.json when the tagged
+    file is absent -- which would grade the wrong arm and say nothing."""
+    from plane_aux_arms import collect_scenes
+    _write_grade(tmp_path / "pgeom", "pgeom")
+    with pytest.raises(SystemExit, match="grade_M0.json"):
+        collect_scenes(tmp_path, "pgeom", "M0")
 
 
 def test_summary_refuses_a_MISSING_named_scene(tmp_path):

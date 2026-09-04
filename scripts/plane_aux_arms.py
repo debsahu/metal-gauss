@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import statistics
@@ -77,17 +78,102 @@ DIRECTION = {
     "stats.thin_axis_angle_p50": -1,
     "run.aspect_p50": +1,
     "run.needle_frac": -1,
+    "run.lpips": -1,
     "run.psnr_masked": 0,
 }
-# The four geometry columns the keep/drop rule turns on. PSNR is a "within the floor"
-# condition, not a geometry column, and is handled separately.
+# The four geometry columns the OLD (magnitude-blind) keep/drop rule turned on. Retained
+# because `grade` still reports each column's IMPROVED / WORSENED / WITHIN FLOOR verdict
+# and the tests assert every gate column has a declared direction. The DECISION no longer
+# reads all four: aspect and needles moved to Band 1, where magnitude decides.
 GEOMETRY_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50",
                  "run.aspect_p50", "run.needle_frac")
 
+# ---------------------------------------------------------------------------------------
+# THE TIER 3 KEEP/DROP RULE, adopted 2026-09-04, replacing "WORSENED anywhere = DROP".
+#
+# The old rule was magnitude-blind. research/metal-gauss.md section 12.4 records what that
+# cost: P-GEOM's plane-aux arm moved in-plane aspect -2.5% and needles +0.6 pp -- 4.6x and
+# 4.5x floors that are 0.0017 and 0.0013 wide -- and DROPped, while the VOID row of section
+# 8.1 (aspect -78%, needles +40 pp, on-seed HALVED) produced the same one-word verdict.
+# The section's own words: "Whether a magnitude-blind gate is the right instrument is a real
+# question -- and it must be settled BEFORE the next arm, never after seeing this one."
+#
+#   Band 1  COLLAPSE     hard DROP, any one column, per-arm AND cumulative
+#   Band 2  GEOMETRY     on-seed@1cm must RISE; thin-axis must not worsen
+#   Band 3  PHOTOMETRIC  hard DROP on a >0.25 dB PSNR loss, or crossing the 24 dB gate
+#
+# A beyond-floor worsening that is below Band 1 is DRIFT: reported with sign and x floor,
+# and it does NOT drop. It does block KEEP AS DEFAULT.
+#
+# EVERY BAND 1 THRESHOLD IS `sqrt(healthy x collapse)` in the column's natural space --
+# geometric mean of the largest ADOPTED move (R1 or R1p vs B0a, whichever moved further in
+# the worsening direction) and the smallest RECORDED collapse (the VOID row). It is a
+# fence between two measured populations, not a round number.
+# `tests/test_plane_aux_tier3_rule.py` re-derives all four from the section 8.1 table, so a
+# later session cannot quietly retune one to make an arm pass.
+COLLAPSE = {
+    # column                     space  worse   threshold   derivation (section 8.1)
+    "run.needle_frac":      {"space": "abs", "worse": +1, "threshold": 0.108},
+    "run.aspect_p50":       {"space": "log", "worse": -1, "threshold": 0.346},
+    "stats.on_seed_frac_1cm": {"space": "log", "worse": -1, "threshold": 0.185},
+    "run.lpips":            {"space": "abs", "worse": +1, "threshold": 0.017},
+}
+# Band 2. Note what is NOT here: aspect and needles. They are Band 1's business now.
+BAND2_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50")
+
+# Band 3. 0.25 dB sits above the trainer's own cross-machine same-seed spread (0.115-0.220
+# dB, section 8.2): a loss smaller than the delivery pipeline's own reproduction spread
+# cannot be a product-visible regression on its own. 24.0 dB is CLAUDE.md's Stage 4 gate.
+PSNR_DROP_DB = 0.25
+STAGE4_PSNR_DB = 24.0
+
+# Drift is scored over exactly the columns the rule grades, and only in the worsening
+# direction. If it counted improvements, KEEP AS DEFAULT would be unreachable: Band 2
+# REQUIRES on-seed to improve beyond its floor, which would itself be a drift column.
+DRIFT_SCOPE = tuple(dict.fromkeys(tuple(COLLAPSE) + BAND2_GATE + ("run.psnr_masked",)))
+
+# A hard needle is a splat whose minor in-plane half-axis is smaller than the rim
+# displacement its OWN quantised orientation produces in the delivery format, so its
+# orientation is undeliverable however well it was trained.
+#
+# Verified in the installed splat-transform (`@playcanvas/splat-transform`,
+# `dist/index.mjs`, the SOG writer that emits the `252 + maxComp` tag): the quaternion is
+# normalised, scaled by `+-sqrt(2)`, and its smallest three components stored as
+# `255 * (q * 0.5 + 0.5)` in uint8. One uint8 step is therefore `sqrt(2)/255 = 0.0055459`
+# in true component units; worst-case round-to-nearest error is `step/2` per component over
+# three components, i.e. a quaternion perturbation of norm `(step/2)*sqrt(3)`; and a
+# perturbation of norm e is a rotation of `2e`. That is 0.0096058 rad. 0.01 is the next
+# round number at or above it.
+#
+# REPORTED ONLY. It is not a Band 1 column and not a gate column: it comes from a ply, not
+# from the trainer's report, so an archived arm may or may not have it, and a gate that is
+# sometimes absent is the failure shape this project keeps repeating.
+HARD_NEEDLE_ASPECT = 0.01
+
 
 def peak_driver_gb(log: Path) -> float | None:
+    # A re-grade runs against the COMMITTED artifacts, which are the reports only -- the
+    # multi-megabyte training logs are not in git. An absent log is "not measured here",
+    # never zero: the column then falls out of the battery on both sides and is not graded.
+    if not log.exists():
+        return None
     vals = [float(m) for m in re.findall(r"\[mem\] driver ([0-9.]+) GB", log.read_text(errors="replace"))]
     return max(vals) if vals else None
+
+
+def report_path(out: Path, tag: str) -> Path:
+    """`<tag>.json` as a run writes it, or `<tag>.report.json` as the repo commits it.
+
+    The two are not two formats: the committed file is a trimmed SUBSET, and `resolved`,
+    `env.git` and `metrics` are byte-identical between them (checked across all ten Task 19
+    arms). Accepting both is what lets `--regrade` reproduce a verdict from the repository
+    alone, with no scratch directory and no GPU -- which is the only form of reproducibility
+    that survives the scratch directory being cleaned.
+    """
+    for name in (f"{tag}.json", f"{tag}.report.json"):
+        if (out / name).exists():
+            return out / name
+    raise SystemExit(f"{tag}: no report at {out}/{tag}.json or {out}/{tag}.report.json")
 
 
 def score(out: Path, tag: str, seed_cloud: str) -> None:
@@ -115,7 +201,7 @@ def score(out: Path, tag: str, seed_cloud: str) -> None:
 
 def battery(out: Path, tag: str) -> dict:
     """Every column the plan requires, from the artifact that produced it -- never stdout."""
-    rep = json.loads((out / f"{tag}.json").read_text())
+    rep = json.loads(report_path(out, tag).read_text())
     st = json.loads((out / f"{tag}.stats.json").read_text())
     ref = str(st.get("seed_cloud") or "")
     # Scoring thin-axis against the cloud the trainer seeded from was an 11.6 deg error
@@ -130,12 +216,88 @@ def battery(out: Path, tag: str) -> dict:
         "run.coverage": m["coverage"], "run.lpips": m.get("lpips"),
         "run.ms_per_step": m["ms_per_step"], "run.n_splats": m["n_splats"],
         "run.aspect_p50": sh["aspect_p50"], "run.needle_frac": sh["needle_frac"],
+        # REPORTED, never gated. `Dlog aspect = Dlog smid - Dlog smax`, so aspect already
+        # IS this differential and a collapse test on the halves would double-count it.
+        # They are here because MAGNITUDE is what separates Task 19 from the VOID row --
+        # same shape, 1/35 the size -- and the raw millimetres say that directly.
+        "run.smid_p50_mm": sh.get("smid_p50_mm"),
+        "run.smax_p50_mm": sh.get("smax_p50_mm"),
+        "run.hard_needle_frac": (sh.get("hard_needle_frac")
+                                 if sh.get("hard_needle_frac") is not None
+                                 else hard_needle_from_sidecar(out, tag)),
         "run.peak_driver_gb": peak_driver_gb(out / f"{tag}.log"),
     })
     return {"seed": rep["resolved"]["seed"], "git": rep["env"]["git"],
             "depth_source": rep["resolved"]["depth_source"], "seed_cloud": ref,
+            "resolved": rep["resolved"],
             "thin_axis_evaluated": st["metrics"].get("thin_axis_evaluated"),
             "values": {k: v for k, v in vals.items() if isinstance(v, (int, float))}}
+
+
+def hard_needle_from_sidecar(out: Path, tag: str) -> float | None:
+    """`frac(aspect < HARD_NEEDLE_ASPECT)`, from `<tag>.shape.json` if `scripts/ply_shape.py`
+    has been run over that arm's ply.
+
+    It cannot come from the report for arms trained before the column existed, and it is
+    NOT a gate column, so absence is legitimate and silent -- the one case where a missing
+    column is allowed to be silent, because nothing decides on it.
+
+    The sidecar is REFUSED unless it names the ply it read and reproduces that arm's
+    `aspect_p50` and `needle_frac`: a shape file computed from some other ply would put a
+    number in the battery that describes a different reconstruction.
+    """
+    f = out / f"{tag}.shape.json"
+    if not f.exists():
+        return None
+    d = json.loads(f.read_text())
+    if d.get("verified_against_report") is not True:
+        raise SystemExit(f"{f} does not record a passing cross-check against {tag}'s "
+                         f"report. Re-run scripts/ply_shape.py; an unverified shape "
+                         f"sidecar may describe a different ply.")
+    return d["hard_needle_frac"]
+
+
+def floors_from_reports(out: Path, tags=("F0", "F1", "F2")) -> dict:
+    """Rebuild the floor table from the floor arms' artifacts, for columns floors.json
+    predates (smid/smax, hard needles, LPIPS on an older run).
+
+    NOT a substitute for floors.json, which is the phase-ordered record written BEFORE any
+    treatment was scored. It is checked against it: see `merge_extended_floors`.
+    """
+    arms = {t: battery(out, t) for t in tags}
+    keys = sorted(set.intersection(*(set(arms[t]["values"]) for t in tags)))
+    fl = {}
+    for k in keys:
+        v = [arms[t]["values"][k] for t in tags]
+        fl[k] = {"F0": v[0], "F1": v[1], "F2": v[2],
+                 "mean": statistics.mean(v), "spread_n3": max(v) - min(v),
+                 "repeat_pair_abs_diff": abs(v[0] - v[1])}
+    return fl
+
+
+def merge_extended_floors(committed: dict, rebuilt: dict) -> dict:
+    """Committed floors, plus the columns only the rebuild has -- and a hard refusal if the
+    two DISAGREE anywhere they overlap.
+
+    The overlap check is the point, not the merge. `floors.json` was written under the
+    phase order that makes the whole protocol trustworthy (floors scored and frozen before
+    any treatment number existed); recomputing it from the same reports must reproduce it
+    exactly, and if it does not, something about the artifacts has changed underneath and
+    no verdict computed from them means anything. Adding a column must never be a way to
+    quietly re-measure a floor.
+    """
+    for k, v in committed.items():
+        if k not in rebuilt:
+            continue
+        for field in ("F0", "F1", "F2", "mean", "spread_n3"):
+            a, b = v.get(field), rebuilt[k].get(field)
+            if a is None or b is None or abs(a - b) > 1e-12 * max(1.0, abs(a)):
+                raise SystemExit(
+                    f"floors.json and the floor arms' own reports disagree on "
+                    f"{k}.{field}: {a!r} vs {b!r}. The committed floors are the frozen "
+                    f"record; a rebuild that does not reproduce them means the artifacts "
+                    f"moved, and nothing graded against them is meaningful.")
+    return {**{k: v for k, v in rebuilt.items() if k not in committed}, **committed}
 
 
 FLOOR_CONFIG_KEYS = ("depth_normal_weight", "depth_loss_space", "depth_source",
@@ -221,7 +383,19 @@ def write_grade(out: Path, tag: str, doc: dict) -> None:
         (out / "grade.json").write_text(json.dumps(doc, indent=2))
 
 
-def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
+def grade_filename(tag: str) -> str:
+    """`grade.json` for the PRIMARY arm, `grade_<tag>.json` for every other.
+
+    Mirrors `write_grade` exactly, and for the same reason: the scene verdict belongs to
+    the pre-registered arm, and a second arm's cross-scene decision must be computable
+    WITHOUT borrowing its filename. `--regrade --treatment-tag M0` overwriting `grade.json`
+    is a defect this repo already shipped once (see `write_grade`); a summary that could
+    only read `grade.json` would push someone toward re-creating it by hand.
+    """
+    return "grade.json" if tag == PRIMARY_TAG else f"grade_{tag}.json"
+
+
+def collect_scenes(root: Path, scenes_csv: str, tag: str = PRIMARY_TAG) -> dict[str, dict]:
     """Load exactly the named scenes' grade.json, and refuse anything else.
 
     THIS IS NOT DEFENSIVENESS, IT IS A NEAR-MISS MADE STRUCTURAL. `--summary` originally
@@ -241,14 +415,15 @@ def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
         raise SystemExit("--summary requires --scenes (e.g. --scenes pgeom,arkit). A glob "
                          "over --out would count any stray grade.json, including the "
                          "grader's own synthetic test fixtures, as a measured scene.")
-    found = {d.name for d in root.iterdir() if d.is_dir() and (d / "grade.json").exists()}
+    fname = grade_filename(tag)
+    found = {d.name for d in root.iterdir() if d.is_dir() and (d / fname).exists()}
     missing, extra = sorted(set(want) - found), sorted(found - set(want))
     if missing:
-        raise SystemExit(f"--scenes named {missing} but no grade.json for them under {root}")
+        raise SystemExit(f"--scenes named {missing} but no {fname} for them under {root}")
     if extra:
-        raise SystemExit(f"unnamed grade.json under {root}: {extra}. Name them in --scenes "
+        raise SystemExit(f"unnamed {fname} under {root}: {extra}. Name them in --scenes "
                          f"or move them out; a stray one is not silently ignored.")
-    per = {n: json.loads((root / n / "grade.json").read_text()) for n in want}
+    per = {n: json.loads((root / n / fname).read_text()) for n in want}
     for n, g in per.items():
         # The directory name is not evidence about what was measured; the report is.
         if g.get("scene") != n:
@@ -257,47 +432,256 @@ def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
     return per
 
 
+# ============================================================ the three bands
+
+
+def collapse_delta(metric: str, value: float, reference: float) -> float:
+    """How far `value` sits from `reference` TOWARD WORSE, in the column's natural space.
+
+    Positive = worse, always, whichever direction the column runs. A sign error here
+    inverts every Band 1 test -- an arm that HALVED on-seed would read as a large
+    improvement and no collapse would ever fire -- so the sign is a test of its own.
+    """
+    spec = COLLAPSE[metric]
+    if spec["space"] == "log":
+        if value <= 0.0 or reference <= 0.0:
+            raise SystemExit(f"{metric}: log-space column needs positive values, got "
+                             f"value={value!r} reference={reference!r}")
+        d = math.log(value) - math.log(reference)
+    else:
+        d = value - reference
+    return spec["worse"] * d
+
+
+def _collapse_side(values: dict, reference: dict, what: str) -> dict:
+    row = {}
+    for col in COLLAPSE:
+        if col not in values:
+            raise SystemExit(f"Band 1 column {col} is missing from the treatment battery. "
+                             f"A collapse column that was never measured must never read "
+                             f"as 'did not collapse'.")
+        if col not in reference:
+            raise SystemExit(f"Band 1 column {col} is missing from the {what}. An anchor "
+                             f"or baseline that predates a column cannot testify about "
+                             f"that column.")
+        d = collapse_delta(col, values[col], reference[col])
+        thr = COLLAPSE[col]["threshold"]
+        row[col] = {"value": values[col], "reference": reference[col], "delta": d,
+                    "threshold": thr, "x_threshold": d / thr,
+                    "space": COLLAPSE[col]["space"], "fired": d > thr}
+    return row
+
+
+def band1(t_values: dict, base_values: dict, anchor_values: dict) -> dict:
+    """Band 1 -- COLLAPSE. Hard DROP; any ONE column; per-arm AND cumulative.
+
+    Per-arm is against this arm's own re-measured base. Cumulative is against the scene's
+    FROZEN Tier 3 anchor, and it is the half that stops the rule ratcheting: four accepted
+    8 pp needle drifts are a 32 pp collapse that no single arm ever fired on. Without it a
+    magnitude rule is a licence to walk anywhere, in small steps.
+
+    Comparison is STRICT: a delta exactly equal to the threshold has not fired.
+    """
+    per = _collapse_side(t_values, base_values, "baseline")
+    cum = _collapse_side(t_values, anchor_values, "anchor")
+    pf = [k for k, v in per.items() if v["fired"]]
+    cf = [k for k, v in cum.items() if v["fired"]]
+    return {"per_arm": per, "cumulative": cum, "per_arm_fired": pf,
+            "cumulative_fired": cf, "fired": bool(pf or cf)}
+
+
+def band2(verdicts: dict) -> str:
+    """Band 2 -- GEOMETRY GATE, unchanged from the pre-registered rule except in SCOPE.
+
+        PASS          on-seed@1cm IMPROVED beyond floor, thin-axis p50 not WORSENED
+        FAIL          either column WORSENED beyond floor
+        WITHIN FLOOR  neither worsened, but on-seed did not rise either
+
+    Aspect and needles are deliberately NOT read here. They were two of the four columns of
+    the old gate, and moving them to Band 1 -- where a 2.5% move and a 78% collapse get
+    different answers -- is the entire change.
+    """
+    missing = [k for k in BAND2_GATE if verdicts.get(k) is None]
+    if missing:
+        raise SystemExit(f"Band 2 columns missing from the battery: {missing}. An absent "
+                         f"gate column must never read as a pass.")
+    on_seed, thin = (verdicts[k] for k in BAND2_GATE)
+    if on_seed == "WORSENED" or thin == "WORSENED":
+        return "FAIL"
+    if on_seed == "IMPROVED":
+        return "PASS"
+    return "WITHIN FLOOR"
+
+
+def band3(psnr_treatment: float, psnr_baseline: float) -> dict:
+    """Band 3 -- PHOTOMETRIC. Hard DROP on a PSNR LOSS greater than 0.25 dB, or on falling
+    below the 24 dB Stage 4 gate from at or above it.
+
+    One-sided by construction: the rule says "falls by", and the old two-sided "must be
+    WITHIN floor" condition is what made every Tier 3 arm unable to PASS whatever its
+    geometry did. A gain is not a regression.
+
+    Both comparisons are strict.
+    """
+    loss = psnr_baseline - psnr_treatment
+    crossed = psnr_baseline >= STAGE4_PSNR_DB > psnr_treatment
+    return {"baseline": psnr_baseline, "treatment": psnr_treatment, "loss_db": loss,
+            "allowance_db": PSNR_DROP_DB, "exceeds_allowance": loss > PSNR_DROP_DB,
+            "crossed_stage4_gate": crossed,
+            "baseline_above_stage4": psnr_baseline >= STAGE4_PSNR_DB,
+            "fired": bool(loss > PSNR_DROP_DB or crossed)}
+
+
+def drift_columns(rows: dict, verdicts: dict, band1_detail: dict,
+                  band2_verdict: str | None = None,
+                  band3_fired: bool = False) -> list[dict]:
+    """Beyond floor, below Band 1, and WORSE. Reported with sign and x floor; never a DROP.
+
+    Two exclusions carry the definition:
+      * IMPROVEMENTS are not drift. Band 2 REQUIRES on-seed to improve beyond its floor, so
+        counting any beyond-floor move would make KEEP AS DEFAULT unreachable by
+        construction -- a rule with an unreachable branch is a broken rule.
+      * A column that FIRED Band 1 is a COLLAPSE, not a drift. Reporting it as drift would
+        make a hard DROP read as adoptable-with-caveats.
+    """
+    fired = set(band1_detail["per_arm_fired"]) | set(band1_detail["cumulative_fired"])
+    out = []
+    for k in DRIFT_SCOPE:
+        if k in fired or k not in rows or k not in verdicts:
+            continue
+        d = rows[k]["delta"]
+        if DIRECTION.get(k, 0) == 0:
+            # two-sided column (PSNR): only a FALL is a worsening
+            worse = verdicts[k] == "MOVED" and d < 0
+        else:
+            worse = verdicts[k] == "WORSENED"
+        if not worse:
+            continue
+        fl = rows[k]["floor_spread_n3"]
+        # A Band 2 column that WORSENED is why the scene failed, not a harmless drift. It
+        # still satisfies the literal definition ("beyond floor, below Band 1"), so it is
+        # reported rather than hidden -- but flagged, because a list whose entries mean
+        # "adoptable with caveats" and "this is the DROP" at the same time is precisely the
+        # shape of check CLAUDE.md warns about, aimed at a human reader.
+        caused_fail = bool(band2_verdict == "FAIL" and k in BAND2_GATE
+                           and verdicts.get(k) == "WORSENED")
+        # Same reasoning for Band 3: on the VOID row masked PSNR falls 1.03 dB, which IS
+        # the Band 3 firing, and listing it unqualified as "drift, does not DROP" would
+        # describe the drop as a caveat.
+        caused_b3 = bool(band3_fired and k == "run.psnr_masked")
+        out.append({"metric": k, "delta": d, "floor_spread_n3": fl,
+                    "x_floor": abs(d) / fl if fl else float("inf"), "sign": "worse",
+                    "caused_band2_fail": caused_fail, "caused_band3_fire": caused_b3})
+    return out
+
+
+ANCHOR_CONFIG_KEYS = ("budget", "steps", "max_resolution", "num_downscales")
+
+
+def load_anchor(path: Path, scene: str) -> dict:
+    """The scene's frozen Tier 3 anchor entry, or an error.
+
+    A missing scene is an ERROR and never an empty anchor: an empty anchor makes every
+    cumulative check vacuous while still writing a well-formed grade, which is precisely
+    the shape of failure the other guards in this file exist to stop.
+    """
+    doc = json.loads(path.read_text())
+    entry = doc.get("scenes", {}).get(scene)
+    if not entry:
+        raise SystemExit(f"no frozen Tier 3 anchor for scene {scene!r} in {path}. The "
+                         f"cumulative half of Band 1 cannot be evaluated without one, and "
+                         f"an absent anchor must not silently become a vacuous check. "
+                         f"Anchors present: {sorted(doc.get('scenes', {}))}")
+    return entry
+
+
+def check_anchor_applies(scene: str, anchor_entry: dict, resolved: dict) -> None:
+    """The anchor is re-measured only when scene, budget or resolution changes -- so a run
+    that changed one of those must not be graded against the old anchor.
+
+    `steps` and `num_downscales` are checked too: both change what a 30k arm's geometry
+    columns settle at, and neither is named in the sentence above, which is exactly why
+    they are the ones that would slip through.
+
+    `depth_source` is deliberately NOT checked. The anchor is a frozen SCENE baseline; if a
+    treatment is ever adopted as the default base, the new floors move with it and the
+    anchor must not, or the ratchet the cumulative check exists to catch becomes invisible.
+    """
+    want = anchor_entry.get("config") or {}
+    for k in ANCHOR_CONFIG_KEYS:
+        a, b = want.get(k, "<absent>"), resolved.get(k, "<absent>")
+        if a != b:
+            raise SystemExit(
+                f"{scene}: the frozen anchor was measured at {k}={a!r} and this arm ran at "
+                f"{k}={b!r}. An anchor for another configuration is not this scene's "
+                f"anchor -- re-measure it (and say so in tier3_anchor.json) rather than "
+                f"grading a ratchet against a fiction.")
+
+
 def combined_verdict(per_scene: dict[str, dict]) -> dict:
-    """KEEP / OPT-IN / DROP across scenes, from the pre-registered rule.
+    """The cross-scene outcome class, from the three-band rule.
 
-        KEEP as the recipe default  -- passes on BOTH scenes
-        KEEP as an OPT-IN           -- passes on one, and is inside the floor on the other
-        DROP                        -- worsens any of the four geometry columns beyond the
-                                       floor on EITHER scene
+        DROP                        -- Band 1 fires anywhere, or Band 2 FAILs, or Band 3
+                                       fires. Checked FIRST and not overridable.
+        KEEP AS DEFAULT             -- Band 2 PASSes on every scene with NO drift column
+                                       on any of them.
+        OPT-IN, DEFAULT-CANDIDATE   -- Band 2 PASSes on every scene, drift present.
+                                       Promotable to default only by a blind visual A/B --
+                                       NOT by this grader, which has no view of the render.
+        OPT-IN                      -- PASSes on one scene, WITHIN FLOOR on the other.
+        NOT ADOPTED                 -- nothing passed and nothing regressed.
 
-    DROP is checked FIRST and is not overridable. A scene that passes and a scene that
-    regresses is not an opt-in: the rule says "drop if it worsens ... on either scene", and
-    an implementation that reached the opt-in branch first would turn a regression into a
-    recommendation.
+    DROP IS CHECKED FIRST AND IS NOT OVERRIDABLE, and the drop set is recomputed here from
+    the bands rather than read from each scene's `scene_drop`. A pass on one scene and a
+    collapse on another is not an opt-in; an implementation that reached an opt-in branch
+    first would turn a collapse into a recommendation.
 
     THE FALSIFIER IS REPORTED SEPARATELY AND CAN BE INCOMPLETE. As written it requires both
     on-seed@1cm and thin-axis to stay inside the floor on both scenes AT BOTH dn SETTINGS.
     Step 6 (dn = 0.05) is gated behind Task 20, so `falsifier_complete` is False whenever
-    only one dn setting has been measured, and `falsifier_at_measured_dn` says what the
-    measured settings show. A partial falsifier is not a falsification.
+    only one dn setting has been measured. A partial falsifier is not a falsification.
     """
     scenes = sorted(per_scene)
-    drops = [s for s in scenes if per_scene[s]["scene_drop"]]
-    passes = [s for s in scenes if per_scene[s]["scene_pass"]]
+    def _drops(s):
+        g = per_scene[s]
+        return bool(g.get("band1_fired") or g.get("band2") == "FAIL"
+                    or g.get("band3_fired"))
+    drops = [s for s in scenes if _drops(s)]
+    passes = [s for s in scenes if per_scene[s].get("band2") == "PASS" and s not in drops]
+    within = [s for s in scenes if per_scene[s].get("band2") == "WITHIN FLOOR"
+              and s not in drops]
+    drifting = {s: per_scene[s].get("drift") or [] for s in scenes}
+    any_drift = any(drifting[s] for s in scenes)
     dns = sorted({per_scene[s]["dn"] for s in scenes})
     fals = [s for s in scenes if per_scene[s]["falsifier_triggered_on_this_scene"]]
+
     if drops:
         decision = "DROP"
     elif len(passes) == len(scenes):
-        decision = "KEEP AS RECIPE DEFAULT"
-    elif passes:
-        decision = "KEEP AS OPT-IN"
+        decision = "KEEP AS DEFAULT" if not any_drift else "OPT-IN, DEFAULT-CANDIDATE"
+    elif passes and len(passes) + len(within) == len(scenes):
+        decision = "OPT-IN"
     else:
         decision = "NOT ADOPTED (no scene passed, none regressed)"
-    return {"scenes": scenes, "decision": decision,
-            "passed_on": passes, "regressed_on": drops,
+
+    return {"schema": 2, "rule": "tier3-three-band-2026-09-04",
+            "scenes": scenes, "decision": decision,
+            "promotion_requires":
+                ("a blind visual A/B on a rendered view; this grader cannot promote a "
+                 "default-candidate, because nothing it measures looks at the render"
+                 if decision == "OPT-IN, DEFAULT-CANDIDATE" else None),
+            "passed_on": passes, "within_floor_on": within, "regressed_on": drops,
+            "drift_on": {s: [d["metric"] for d in drifting[s]] for s in scenes
+                         if drifting[s]},
             "dn_settings_measured": dns,
             "falsifier_at_measured_dn": len(fals) == len(scenes),
             "falsifier_scenes": fals,
             "falsifier_complete": len(dns) >= 2,
-            "per_scene": {s: {k: per_scene[s][k] for k in
-                              ("scene_pass", "scene_drop", "geometry_gate",
-                               "psnr_verdict", "dn")} for s in scenes}}
+            "per_scene": {s: {k: per_scene[s].get(k) for k in
+                              ("band1_fired", "band2", "band3_fired", "scene_pass",
+                               "scene_drop", "geometry_gate", "psnr_verdict", "dn")}
+                          | {"drift": [d["metric"] for d in drifting[s]]}
+                          for s in scenes}}
 
 
 def verdict_for(metric: str, delta: float, floor: float) -> str:
@@ -316,8 +700,25 @@ def verdict_for(metric: str, delta: float, floor: float) -> str:
     return "IMPROVED" if sign * delta > 0 else "WORSENED"
 
 
-def grade(scene: str, dn: float, t: dict, fl: dict) -> dict:
-    """The pre-registered keep/drop rule, applied. See the module docstring."""
+def grade(scene: str, dn: float, t: dict, fl: dict, anchor_values: dict,
+          anchor_entry: dict, resolved: dict) -> dict:
+    """The THREE-BAND Tier 3 keep/drop rule, applied to one scene. See the COLLAPSE block.
+
+    Pure, so the whole grade is reproducible from the committed artifacts by `--regrade`,
+    and so the rule is unit-tested rather than exercised once by an eight-hour run.
+
+    `anchor_values` and `anchor_entry` are passed separately on purpose: the first is the
+    frozen per-column baseline the cumulative check reads, the second carries the
+    provenance and configuration the anchor is only valid for. They are cross-checked
+    against each other here, so passing a mismatched pair is an error rather than a silent
+    grade against the wrong numbers.
+    """
+    check_anchor_applies(scene, anchor_entry, resolved)
+    declared = anchor_entry.get("values")
+    if declared is not None and declared != anchor_values:
+        raise SystemExit(f"{scene}: anchor_values disagree with anchor_entry['values']. "
+                         f"Two claims about the same frozen anchor must not differ.")
+
     rows, verdict = {}, {}
     for k in sorted(set(t["values"]) & set(fl)):
         base, floor = fl[k]["mean"], fl[k]["spread_n3"]
@@ -330,6 +731,7 @@ def grade(scene: str, dn: float, t: dict, fl: dict) -> dict:
                                 0: "two-sided"}[DIRECTION[k]]
             row["verdict"] = verdict[k] = verdict_for(k, d, floor)
         rows[k] = row
+
     gate = {k: verdict.get(k) for k in GEOMETRY_GATE}
     psnr = verdict.get("run.psnr_masked")
     missing = [k for k, v in gate.items() if v is None] + ([] if psnr else ["run.psnr_masked"])
@@ -338,18 +740,28 @@ def grade(scene: str, dn: float, t: dict, fl: dict) -> dict:
         # failure CLAUDE.md calls the one this project keeps repeating: a check that reads
         # a condition something OTHER than the thing being checked could satisfy.
         raise SystemExit(f"{scene}: gate columns missing from the battery: {missing}")
-    return {"schema": 1, "scene": scene, "dn": dn,
+
+    base_vals = {k: fl[k]["mean"] for k in fl}
+    b1 = band1(t["values"], base_vals, anchor_values)
+    b2 = band2(verdict)
+    b3 = band3(t["values"]["run.psnr_masked"], fl["run.psnr_masked"]["mean"])
+    drift = drift_columns(rows, verdict, b1, b2, b3["fired"])
+    drop = bool(b1["fired"] or b2 == "FAIL" or b3["fired"])
+    return {"schema": 2, "rule": "tier3-three-band-2026-09-04", "scene": scene, "dn": dn,
             "treatment": {k: v for k, v in t.items() if k != "values"},
-            "scene_pass": (gate["stats.on_seed_frac_1cm"] == "IMPROVED"
-                           and gate["stats.thin_axis_angle_p50"] != "WORSENED"
-                           and gate["run.aspect_p50"] != "WORSENED"
-                           and gate["run.needle_frac"] != "WORSENED"
-                           and psnr == "WITHIN FLOOR"),
-            "scene_drop": any(v == "WORSENED" for v in gate.values()),
+            "band1": b1, "band1_fired": b1["fired"],
+            "band2": b2, "band3": b3, "band3_fired": b3["fired"],
+            "drift": drift,
+            "scene_drop": drop,
+            "scene_pass": (b2 == "PASS" and not drop),
             "falsifier_triggered_on_this_scene":
                 (verdict.get("stats.on_seed_frac_1cm") == "WITHIN FLOOR"
                  and verdict.get("stats.thin_axis_angle_p50") == "WITHIN FLOOR"),
-            "geometry_gate": gate, "psnr_verdict": psnr, "rows": rows}
+            "geometry_gate": gate, "psnr_verdict": psnr,
+            "anchor": {"values": anchor_values,
+                       "config": anchor_entry.get("config"),
+                       "source": anchor_entry.get("source")},
+            "rows": rows}
 
 
 def main() -> None:
@@ -403,6 +815,10 @@ def main() -> None:
     ap.add_argument("--summary", action="store_true",
                     help="read every <scene>/grade.json under --out and emit the "
                          "cross-scene KEEP / OPT-IN / DROP decision. No GPU.")
+    ap.add_argument("--anchor", default=str(ROOT / "bench/results/plane_aux/tier3_anchor.json"),
+                    help="the FROZEN Tier 3 anchor Band 1's cumulative half reads. Not the "
+                         "floors: floors are re-measured per arm and would let the rule "
+                         "ratchet, which is the failure the anchor exists to stop.")
     ap.add_argument("--regrade", action="store_true",
                     help="recompute grade.json from the artifacts already on disk. No "
                          "GPU, no training: the verdict is a pure function of the "
@@ -415,21 +831,32 @@ def main() -> None:
         root = Path(a.out)
         if not root.is_dir():
             raise SystemExit(f"--out {root} is not a directory")
-        per = collect_scenes(root, a.scenes)
+        per = collect_scenes(root, a.scenes, a.treatment_tag)
         v = combined_verdict(per)
-        (Path(a.out) / "combined_verdict.json").write_text(json.dumps(v, indent=2))
+        v["arm"] = a.treatment_tag
+        name = ("combined_verdict.json" if a.treatment_tag == PRIMARY_TAG
+                else f"combined_verdict_{a.treatment_tag}.json")
+        (Path(a.out) / name).write_text(json.dumps(v, indent=2))
         print(json.dumps(v, indent=2))
         return
 
     if a.regrade:
         out = Path(a.out)
-        fl = json.loads((out / "floors.json").read_text())["floors"]
-        doc = grade(a.scene, a.dn, battery(out, a.treatment_tag), fl)
+        if not a.scene:
+            raise SystemExit("--regrade needs --scene: the frozen anchor is per scene, and "
+                             "the directory name is not evidence about what was measured.")
+        committed = json.loads((out / "floors.json").read_text())["floors"]
+        fl = merge_extended_floors(committed, floors_from_reports(out))
+        t = battery(out, a.treatment_tag)
+        entry = load_anchor(Path(a.anchor), a.scene)
+        doc = grade(a.scene, a.dn, t, fl, entry["values"], entry, t["resolved"])
         write_grade(out, a.treatment_tag, doc)
         print(json.dumps({k: doc[k] for k in
-                          ("scene", "scene_pass", "scene_drop",
+                          ("scene", "rule", "band1_fired", "band2", "band3_fired",
+                           "scene_pass", "scene_drop",
                            "falsifier_triggered_on_this_scene", "geometry_gate",
-                           "psnr_verdict")}, indent=2))
+                           "psnr_verdict")} | {"drift": [d["metric"] for d in doc["drift"]]},
+                         indent=2))
         return
 
     for req in ("scene", "colmap", "images", "seed_cloud"):
@@ -487,13 +914,16 @@ def main() -> None:
     if t["depth_source"] != src:
         raise SystemExit(f"treatment arm reports depth_source={t['depth_source']!r}, asked "
                          f"for {src!r}: the flag did not survive resolve_depth_source.")
-    doc = grade(a.scene, a.dn, t, fl)
+    entry = load_anchor(Path(a.anchor), a.scene)
+    doc = grade(a.scene, a.dn, t, fl, entry["values"], entry, t["resolved"])
     write_grade(out, tag, doc)
     (out / "ALL_DONE").write_text("")
     print(json.dumps({k: doc[k] for k in
-                      ("scene", "scene_pass", "scene_drop",
+                      ("scene", "rule", "band1_fired", "band2", "band3_fired",
+                       "scene_pass", "scene_drop",
                        "falsifier_triggered_on_this_scene", "geometry_gate",
-                       "psnr_verdict")}, indent=2))
+                       "psnr_verdict")} | {"drift": [d["metric"] for d in doc["drift"]]},
+                     indent=2))
 
 
 def run_floor_phases(a, out: Path, common: list[str], floors) -> None:
