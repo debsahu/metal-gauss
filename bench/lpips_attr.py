@@ -253,8 +253,11 @@ def fit_affine(render: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, di
     MPS has no float64 and a float32 sum over 2.8M pixels is not free.
     """
     h, w, _ = render.shape
-    x = render.reshape(-1, 3).double().cpu()
-    y = gt.reshape(-1, 3).double().cpu()
+    # .cpu() BEFORE .double(): MPS has no float64 and `.double()` on an MPS
+    # tensor raises. research/metal-gauss.md 13.5 records the same defect found
+    # by the same means -- only a test that renders can see it.
+    x = render.reshape(-1, 3).cpu().double()
+    y = gt.reshape(-1, 3).cpu().double()
     x1 = torch.cat([x, torch.ones(x.shape[0], 1, dtype=x.dtype)], 1)     # [N, 4]
     a = x1.T @ x1
     b = x1.T @ y

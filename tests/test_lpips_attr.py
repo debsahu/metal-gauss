@@ -493,3 +493,32 @@ def test_the_ppisp_fixture_separates_the_two_stages():
     no_crf = _reference_ppisp(rgb, vig, ident_c)
     assert float(((full - no_vig) ** 2).mean()) > 1e-3
     assert float(((full - no_crf) ** 2).mean()) > 1e-3
+
+
+# ------------------------------------------------------- the device they run on
+
+mps = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs an Apple GPU")
+
+
+@mps
+@pytest.mark.parametrize("fitter", ["affine", "bilagrid", "ppisp"])
+def test_every_fitter_runs_on_MPS(fitter):
+    """The probe runs on MPS and the CPU-only tests could not see that
+    `fit_affine` did `.double()` BEFORE `.cpu()`, which raises on MPS -- MPS has
+    no float64. It died on the first real view instead, which is exactly how
+    research/metal-gauss.md 13.5 records finding the same defect.
+    """
+    torch.manual_seed(30)
+    r = torch.rand(24, 32, 3, device="mps")
+    g = (r * 0.9 + 0.05).clamp(0, 1)
+    if fitter == "affine":
+        fit, info = LA.fit_affine(r, g)
+    elif fitter == "bilagrid":
+        fit, info = LA.fit_bilagrid(r, g, steps=20)
+    else:
+        fits, info = LA.fit_ppisp_shared([r], [g], steps=20)
+        fit = fits[0]
+    assert fit.device.type == "mps", fit.device
+    assert fit.shape == r.shape
+    assert torch.isfinite(fit).all()
+    assert info["mse_after"] <= info["mse_before"] * 1.0001
