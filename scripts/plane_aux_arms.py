@@ -159,6 +159,42 @@ def check_floors_match(prev: dict, dn: float, space: str) -> None:
             f"floor. Re-measure, or drop --skip-floors.")
 
 
+def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
+    """Load exactly the named scenes' grade.json, and refuse anything else.
+
+    THIS IS NOT DEFENSIVENESS, IT IS A NEAR-MISS MADE STRUCTURAL. `--summary` originally
+    globbed every subdirectory of --out that contained a grade.json. Two SYNTHETIC smoke
+    directories -- fixtures written to test the grader itself, one of them a fabricated
+    pass/regress pair -- were sitting in that same tree. Globbing would have fed invented
+    numbers into the cross-scene decision, and because DROP is checked first and is not
+    overridable, a fabricated regression would have produced a DROP that looked exactly
+    like a measured one. Nothing would have errored.
+
+    So the caller NAMES the scenes. A named scene that is missing is an error, and an
+    UNNAMED grade.json found in the tree is ALSO an error rather than a silent inclusion --
+    the second half is the one that matters, because it is the half a glob gets wrong.
+    """
+    want = [s for s in (x.strip() for x in scenes_csv.split(",")) if s]
+    if not want:
+        raise SystemExit("--summary requires --scenes (e.g. --scenes pgeom,arkit). A glob "
+                         "over --out would count any stray grade.json, including the "
+                         "grader's own synthetic test fixtures, as a measured scene.")
+    found = {d.name for d in root.iterdir() if d.is_dir() and (d / "grade.json").exists()}
+    missing, extra = sorted(set(want) - found), sorted(found - set(want))
+    if missing:
+        raise SystemExit(f"--scenes named {missing} but no grade.json for them under {root}")
+    if extra:
+        raise SystemExit(f"unnamed grade.json under {root}: {extra}. Name them in --scenes "
+                         f"or move them out; a stray one is not silently ignored.")
+    per = {n: json.loads((root / n / "grade.json").read_text()) for n in want}
+    for n, g in per.items():
+        # The directory name is not evidence about what was measured; the report is.
+        if g.get("scene") != n:
+            raise SystemExit(f"{n}/grade.json says scene={g.get('scene')!r}: the directory "
+                             f"and the report disagree about what was measured.")
+    return per
+
+
 def combined_verdict(per_scene: dict[str, dict]) -> dict:
     """KEEP / OPT-IN / DROP across scenes, from the pre-registered rule.
 
@@ -287,6 +323,9 @@ def main() -> None:
                          "invocation: a floor measured for another configuration is not "
                          "this arm's floor, which is the whole reason Tier 3 measures its "
                          "own (section 8.2).")
+    ap.add_argument("--scenes", default="",
+                    help="comma-separated scene directory names --summary must find, "
+                         "e.g. 'pgeom,arkit'. REQUIRED for --summary: see collect_scenes.")
     ap.add_argument("--summary", action="store_true",
                     help="read every <scene>/grade.json under --out and emit the "
                          "cross-scene KEEP / OPT-IN / DROP decision. No GPU.")
@@ -299,16 +338,10 @@ def main() -> None:
     if a.summary:
         # `--out` is the PARENT holding one subdirectory per scene. Reads only grade.json
         # files, so it needs no GPU and no reports.
-        per = {}
         root = Path(a.out)
         if not root.is_dir():
             raise SystemExit(f"--out {root} is not a directory")
-        for d in sorted(root.iterdir()):
-            g = d / "grade.json"
-            if d.is_dir() and g.exists():
-                per[d.name] = json.loads(g.read_text())
-        if not per:
-            raise SystemExit(f"no <scene>/grade.json under {a.out}")
+        per = collect_scenes(root, a.scenes)
         v = combined_verdict(per)
         (Path(a.out) / "combined_verdict.json").write_text(json.dumps(v, indent=2))
         print(json.dumps(v, indent=2))

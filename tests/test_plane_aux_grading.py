@@ -221,3 +221,61 @@ def test_the_falsifier_needs_EVERY_scene_not_just_one():
     from plane_aux_arms import combined_verdict
     v = combined_verdict({"a": _g(falsifier_triggered_on_this_scene=True), "b": _g()})
     assert v["falsifier_at_measured_dn"] is False
+
+
+# --------------------------------------------- --summary must NAME the scenes it counts
+
+def _write_grade(d, scene, **over):
+    import json
+    d.mkdir(parents=True, exist_ok=True)
+    g = {"scene": scene, "dn": 0.0, "scene_pass": False, "scene_drop": False,
+         "falsifier_triggered_on_this_scene": False, "geometry_gate": {},
+         "psnr_verdict": "WITHIN FLOOR"}
+    g.update(over)
+    (d / "grade.json").write_text(json.dumps(g))
+
+
+def test_summary_refuses_an_UNNAMED_grade_json_rather_than_counting_it(tmp_path):
+    """A NEAR-MISS MADE STRUCTURAL, not defensiveness.
+
+    `--summary` globbed every subdirectory of --out holding a grade.json, and the grader's
+    own SYNTHETIC smoke fixtures -- one a fabricated pass/regress pair -- were sitting in
+    that same tree. Because DROP is checked first and is not overridable, a fabricated
+    regression would have produced a DROP indistinguishable from a measured one, with
+    nothing erroring. Moving those directories by hand is not a fix; naming the scenes is.
+
+    The half that matters is the EXTRA case: a missing scene is loud anyway, while a stray
+    one is exactly what a glob gets wrong.
+    """
+    from plane_aux_arms import collect_scenes
+    _write_grade(tmp_path / "pgeom", "pgeom")
+    _write_grade(tmp_path / "arkit", "arkit")
+    assert set(collect_scenes(tmp_path, "pgeom,arkit")) == {"pgeom", "arkit"}
+
+    _write_grade(tmp_path / "regrade_smoke", "regrade_smoke", scene_drop=True)
+    with pytest.raises(SystemExit, match="regrade_smoke"):
+        collect_scenes(tmp_path, "pgeom,arkit")
+
+
+def test_summary_refuses_a_MISSING_named_scene(tmp_path):
+    from plane_aux_arms import collect_scenes
+    _write_grade(tmp_path / "pgeom", "pgeom")
+    with pytest.raises(SystemExit, match="arkit"):
+        collect_scenes(tmp_path, "pgeom,arkit")
+
+
+def test_summary_refuses_an_EMPTY_scene_list(tmp_path):
+    """Would catch a default that silently re-enables the glob."""
+    from plane_aux_arms import collect_scenes
+    _write_grade(tmp_path / "pgeom", "pgeom")
+    with pytest.raises(SystemExit, match="requires --scenes"):
+        collect_scenes(tmp_path, "")
+
+
+def test_summary_refuses_when_the_directory_and_the_report_disagree(tmp_path):
+    """The directory name is not evidence about what was measured; the report is. Would
+    catch a grade.json copied into the wrong scene directory."""
+    from plane_aux_arms import collect_scenes
+    _write_grade(tmp_path / "arkit", "pgeom")          # wrong scene inside arkit/
+    with pytest.raises(SystemExit, match="disagree"):
+        collect_scenes(tmp_path, "arkit")
