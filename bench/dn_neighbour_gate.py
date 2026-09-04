@@ -368,7 +368,7 @@ def run(args) -> dict:
     }
 
 
-def summarise(paths: list[str], scenes: list[str]) -> dict:
+def summarise(paths: list[str], scenes: list[str], steps: list[str] | None = None) -> dict:
     """Cross-scene decision from the measurement files ALONE, and only from the ones named.
 
     Refuses a synthetic file, a file of the wrong kind, a duplicate scene/step, and any
@@ -389,6 +389,16 @@ def summarise(paths: list[str], scenes: list[str]) -> dict:
     missing = [s for s in scenes if not any(k[0] == s for k in got)]
     if missing:
         raise RuntimeError(f"named scenes with no measurement: {missing}")
+    if steps:
+        # COMPLETENESS. Without this, a verdict over three of the four pre-registered
+        # (scene, step) measurements reads exactly like a verdict over all four -- a check
+        # something other than the thing being checked can satisfy.
+        holes = [f"{sc}/{st}" for sc in scenes for st in steps if (sc, st) not in got]
+        if holes:
+            raise RuntimeError(f"pre-registered measurements missing: {holes}")
+        wrong_step = sorted({k[1] for k in got} - set(steps))
+        if wrong_step:
+            raise RuntimeError(f"measurements at steps not named: {wrong_step}")
     extra = sorted({k[0] for k in got} - set(scenes))
     if extra:
         raise RuntimeError(f"measurements for scenes not named: {extra}")
@@ -405,7 +415,8 @@ def summarise(paths: list[str], scenes: list[str]) -> dict:
     worst = max(r["affected_frac_overall"] for r in rows)
     all_under = all(r["under_line"] for r in rows)
     return {
-        "kind": KIND + "_summary", "scenes": sorted(scenes), "rows": rows,
+        "kind": KIND + "_summary", "scenes": sorted(scenes),
+        "steps": sorted(steps) if steps else None, "rows": rows,
         "worst_affected_frac_overall": worst,
         "line": AFFECTED_FRACTION_LINE,
         "verdict": "CLOSE" if all_under else "ESCALATE",
@@ -441,6 +452,9 @@ def build_parser():
     ap.add_argument("--summary", nargs="+", default=None, metavar="FILE")
     ap.add_argument("--scenes", default=None,
                     help="comma-separated scene labels the summary must cover, exactly")
+    ap.add_argument("--steps", default=None,
+                    help="comma-separated step labels; every scene x step combination must "
+                         "be present, and no other step may appear")
     return ap
 
 
@@ -449,7 +463,8 @@ def main(argv=None):
     if args.summary:
         if not args.scenes:
             raise SystemExit("--summary requires --scenes: a summary must NAME its scenes")
-        out = summarise(args.summary, args.scenes.split(","))
+        out = summarise(args.summary, args.scenes.split(","),
+                        args.steps.split(",") if args.steps else None)
     else:
         for req in ("colmap", "images", "scene", "step_label"):
             if getattr(args, req) is None:

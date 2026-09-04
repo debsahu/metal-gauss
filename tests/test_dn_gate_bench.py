@@ -331,3 +331,22 @@ def test_bench_terms_reproduce_the_trainers_torch_path_exactly(monkeypatch):
             assert set(got) == set(want)
             for name in want:
                 assert torch.equal(got[name], want[name]), (space, k is None, name)
+
+
+def test_summary_refuses_an_incomplete_scene_x_step_grid(tmp_path):
+    """CATCHES the verdict that reads like it covered the pre-registered set and did not.
+    Three of four (scene, step) measurements produce a well-formed summary with a verdict
+    in it; only naming the steps makes the hole an error."""
+    fs = [_write(tmp_path, "a.json", _meas("pgeom", "step0", 0.0001)),
+          _write(tmp_path, "b.json", _meas("pgeom", "30k", 0.0001)),
+          _write(tmp_path, "c.json", _meas("pmask", "step0", 0.0001))]
+    summarise(fs, ["pgeom", "pmask"])                     # passes without --steps ...
+    with pytest.raises(RuntimeError, match="missing"):    # ... and must not with it
+        summarise(fs, ["pgeom", "pmask"], ["step0", "30k"])
+
+
+def test_summary_refuses_a_step_label_that_was_not_named(tmp_path):
+    fs = [_write(tmp_path, "a.json", _meas("pgeom", "step0", 0.0001)),
+          _write(tmp_path, "b.json", _meas("pgeom", "7500", 0.0001))]
+    with pytest.raises(RuntimeError, match="steps not named"):
+        summarise(fs, ["pgeom"], ["step0"])
