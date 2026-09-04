@@ -1,0 +1,83 @@
+{
+  "schema": 2,
+  "rule": "tier3-three-band-2026-09-04",
+  "scenes": [
+    "arkit",
+    "pgeom"
+  ],
+  "decision": "DROP",
+  "promotion_requires": null,
+  "passed_on": [],
+  "within_floor_on": [],
+  "regressed_on": [
+    "arkit",
+    "pgeom"
+  ],
+  "drift_on": {
+    "arkit": [
+      "run.needle_frac",
+      "run.aspect_p50",
+      "stats.on_seed_frac_1cm",
+      "run.lpips",
+      "stats.thin_axis_angle_p50",
+      "run.psnr_masked"
+    ],
+    "pgeom": [
+      "stats.on_seed_frac_1cm",
+      "stats.thin_axis_angle_p50",
+      "run.psnr_masked"
+    ]
+  },
+  "dn_settings_measured": [
+    0.0
+  ],
+  "falsifier_at_measured_dn": false,
+  "falsifier_scenes": [],
+  "falsifier_complete": false,
+  "per_scene": {
+    "arkit": {
+      "band1_fired": false,
+      "band2": "FAIL",
+      "band3_fired": false,
+      "scene_pass": false,
+      "scene_drop": true,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "WORSENED",
+        "stats.thin_axis_angle_p50": "WORSENED",
+        "run.aspect_p50": "WORSENED",
+        "run.needle_frac": "WORSENED"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0,
+      "drift": [
+        "run.needle_frac",
+        "run.aspect_p50",
+        "stats.on_seed_frac_1cm",
+        "run.lpips",
+        "stats.thin_axis_angle_p50",
+        "run.psnr_masked"
+      ]
+    },
+    "pgeom": {
+      "band1_fired": false,
+      "band2": "FAIL",
+      "band3_fired": false,
+      "scene_pass": false,
+      "scene_drop": true,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "WORSENED",
+        "stats.thin_axis_angle_p50": "WORSENED",
+        "run.aspect_p50": "IMPROVED",
+        "run.needle_frac": "IMPROVED"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0,
+      "drift": [
+        "stats.on_seed_frac_1cm",
+        "stats.thin_axis_angle_p50",
+        "run.psnr_masked"
+      ]
+    }
+  },
+  "arm": "M0"
+}

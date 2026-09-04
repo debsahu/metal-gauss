@@ -1,0 +1,100 @@
+{
+  "resolved": {
+    "antialias": false,
+    "appearance": "off",
+    "appearance_reg": 0.01,
+    "blender": null,
+    "budget": 500000,
+    "colmap": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/sparse/0",
+    "densify_gate_frac": 0.3,
+    "densify_weight": "opacity_grad",
+    "depth_dir": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/depth",
+    "depth_loss_space": "disparity",
+    "depth_loss_weight": 1.0,
+    "depth_normal_weight": 0.0,
+    "depth_source": "center",
+    "eval_dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/F1.dump",
+    "eval_every": 2500,
+    "eval_split_every": 8,
+    "export": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/F1.ply",
+    "export_every": 0,
+    "filter_3d": false,
+    "filter_3d_every": 0,
+    "flatten_loss_weight": 1.0,
+    "fused_adam": true,
+    "grow": true,
+    "grow_until_frac": 0.7,
+    "images": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/images",
+    "init_ply": null,
+    "lr_appearance": 0.001,
+    "lr_means": 0.0002,
+    "lr_means_end": 2e-06,
+    "lr_opac": 0.01,
+    "lr_scene_scaled": true,
+    "mask_polarity": "auto",
+    "masks": null,
+    "max_resolution": 1920,
+    "no_priors": false,
+    "noise_weight": 40000.0,
+    "normal_dir": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/normal",
+    "normal_loss_weight": 0.2,
+    "num_downscales": 0,
+    "opac_reg": 0.01,
+    "out": null,
+    "prior_resident": "quantized",
+    "relocate_every": 100,
+    "relocate_until_frac": 0.85,
+    "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/F1.json",
+    "resolution_schedule": 10000,
+    "scale_reg": 0.01,
+    "seed": 42,
+    "selective_adam": false,
+    "sh_lr_div": 20.0,
+    "sh_warmup": 1000,
+    "start_active": 150000,
+    "steps": 30000,
+    "steps_scaler": 1.0
+  },
+  "env": {
+    "git": "8954ad1",
+    "dirty": false,
+    "torch": "2.13.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "started_at": "2026-09-04T02:07:41.077807Z",
+    "finished_at": "2026-09-04T02:56:10.537450Z"
+  },
+  "metrics": {
+    "psnr": 22.58471315686297,
+    "psnr_masked": 22.58471315686297,
+    "coverage": 1.0,
+    "terms": {
+      "l1": 0.0365835465490818,
+      "ssim": 0.2929646372795105,
+      "flatten": 2.40937624766957e-05,
+      "depth": 0.03144305944442749,
+      "normal": 0.0884661078453064
+    },
+    "shape": {
+      "aspect_p50": 0.3133947551250458,
+      "needle_frac": 0.15227000415325165,
+      "smid_p50_mm": 7.16042423248291,
+      "smax_p50_mm": 25.858150482177734
+    },
+    "wall_s": 2901.0,
+    "n_splats": 500000,
+    "ms_per_step": 96.7,
+    "term_view_coverage": {
+      "depth": [
+        171,
+        171
+      ],
+      "normal": [
+        171,
+        171
+      ]
+    },
+    "term_coverage_warning": null,
+    "lpips": 0.4017838513851166
+  }
+}

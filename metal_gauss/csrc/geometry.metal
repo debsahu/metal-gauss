@@ -153,6 +153,21 @@ kernel void geom_loss_forward(
     // reproduces that exactly rather than approximating it with a separate branch.
     device const float*  keep    [[buffer(12)]],   // (H,W), 1 = keep, or empty
     constant uint&      has_keep [[buffer(13)]],
+    // PGSR plane-aux (Task 19). 0 = CENTRE depth: buffer 0 is (H,W,3) and its channel 0 is
+    // an alpha-WEIGHTED z that must be divided by alpha to recover the depth. 1 = GIVEN:
+    // buffer 0 is a finished (H,W) depth map -- PGSR's ray-plane intersection, where alpha
+    // cancels exactly between the ray-plane numerator and denominator and dividing again
+    // would be wrong by 1/alpha (see plane_depth_from_features).
+    //
+    // ONE uniform decides BOTH the stride and the division because they are the same fact:
+    // mode 0's buffer is 3-channel and needs the divide, mode 1's is 1-channel and does
+    // not. Splitting them into two uniforms would admit a combination that means nothing.
+    //
+    // The BACKWARD kernel needs no equivalent. It emits dL/d(depth_img), which is the same
+    // quantity in both modes; the 1/alpha that turns it into dL/d(z_img) is applied by
+    // _FusedGeometryLosses.backward in Python, because section 11.4's deferred
+    // optimisation left the gather's final multiply outside the kernel.
+    constant uint&   depth_mode  [[buffer(14)]],
     uint  gidx [[thread_position_in_grid]],
     uint  lidx [[thread_index_in_threadgroup]],
     uint  tgid [[threadgroup_position_in_grid]])
@@ -168,7 +183,9 @@ kernel void geom_loss_forward(
         const uint o3 = gidx * 3u;
         const float k  = has_keep ? keep[gidx] : 1.0f;
         const float a  = max(alpha[gidx], 1e-10f);
-        const float di = z_img[o3] / a;
+        const uint  dstride = (depth_mode == 0u) ? 3u : 1u;
+        const float dz = z_img[gidx * dstride];
+        const float di = (depth_mode == 0u) ? (dz / a) : dz;
         depth_o[gidx] = di;
 
         float3 nr = float3(n_sum[o3], n_sum[o3+1], n_sum[o3+2]) / a;

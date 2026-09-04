@@ -1,0 +1,14 @@
+{
+  "center": {
+    "peak_driver_gb_in_loop": 3.276,
+    "driver_gb_after_run": 2.206
+  },
+  "plane-aux": {
+    "peak_driver_gb_in_loop": 3.278,
+    "driver_gb_after_run": 2.206
+  },
+  "delta_gb": 0.002,
+  "ratio": 1.0006,
+  "steps": 300,
+  "note": "in-loop peak sampled at every render_view call, --no-grow so capacity is pinned at the budget from step 0. The trainer's own [mem] lines only fire above 20 GB and are absent on every arm, which independently bounds both arms under 20 GB."
+}

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "ply": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/pgeom/P0.ply",
+  "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/pa-wt/bench/results/plane_aux/pgeom/P0.report.json",
+  "hard_needle_aspect": 0.01,
+  "verified_against_report": true,
+  "reproduced": {
+    "aspect_p50": 0.3046247959136963,
+    "needle_frac": 0.1573760062456131,
+    "smid_p50_mm": 6.960831642150879,
+    "smax_p50_mm": 25.661399841308594
+  },
+  "n_splats": 500000,
+  "aspect_p50": 0.3046247919765668,
+  "needle_frac": 0.157376,
+  "hard_needle_frac": 0.002652,
+  "smid_p50_mm": 6.960831518035439,
+  "smax_p50_mm": 25.661398752311243
+}
