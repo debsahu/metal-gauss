@@ -328,6 +328,11 @@ def geometry_coverage_warning(cov: dict) -> str | None:
 # round-to-nearest error is step/2 per component over three components, a quaternion
 # perturbation of norm (step/2)*sqrt(3); and a perturbation of norm e is a rotation of 2e.
 # That is 0.0096058 rad. 0.01 is the next round number at or above it.
+#
+# It moves only if the delivery format's quaternion precision moves, and it is REPORTED,
+# NEVER GATED: no band may depend on it. Of the four shape columns it is the weakest
+# collapse discriminator (log-separation 5.0x against aspect's 18.8x), so it is a
+# DELIVERY statement about a trained model, not a test that decides one.
 HARD_NEEDLE_ASPECT = 0.01
 
 
