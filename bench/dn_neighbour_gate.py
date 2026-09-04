@@ -137,12 +137,29 @@ def _grads(n_sum, z_img, loss):
 
 
 def _rel_cos(got, ref):
+    """`rel` (max-norm), `rel_l2` and cosine.
+
+    `rel` is the repo's own bar shape (tests/test_fused_geom_loss.py `_bars`) and is what
+    the plan asked for, so it is reported unchanged. Read it knowing what it can and
+    cannot say HERE: it is the right statistic for two implementations of the SAME
+    function, and a poor one for a rule change that REMOVES PIXELS FROM THE LOSS. A
+    removed pixel's gradient becomes exactly zero, so if the largest-magnitude gradient in
+    the frame sits on a removed pixel, `rel` is exactly 1.0 however few pixels moved. It
+    cannot be compared to the kernel's 7.02e-6 f32 distance from truth in any useful way.
+
+    `rel_l2` = ||got - ref|| / ||ref|| over the whole field is the one that answers "how
+    much of the gradient field changed", and it is reported beside it. ADDED AFTER seeing
+    the first max-norm result; it is extra information and it changes no threshold -- the
+    pre-registered decision rule is on the affected FRACTION alone.
+    """
     # .cpu() BEFORE .double(): MPS has no float64 and raises rather than casting.
     got, ref = got.detach().cpu().double(), ref.detach().cpu().double()
-    rel = float((got - ref).abs().max() / ref.abs().max().clamp_min(1e-30))
+    ref_max, ref_l2 = float(ref.abs().max()), float(ref.norm())
+    rel = float((got - ref).abs().max() / max(ref_max, 1e-30))
+    rel_l2 = float((got - ref).norm() / max(ref_l2, 1e-30))
     cos = float(torch.nn.functional.cosine_similarity(
-        got.flatten(), ref.flatten(), dim=0)) if float(ref.abs().max()) > 0 else float("nan")
-    return rel, cos
+        got.flatten(), ref.flatten(), dim=0)) if ref_max > 0 else float("nan")
+    return rel, rel_l2, cos
 
 
 def affected_stats(in_loss, covered, alpha_ok, keep_ok) -> dict:
@@ -228,8 +245,8 @@ def measure_view(p, v, active, sh_deg, device, weights) -> dict:
     gz_g, gn_g = _grads(n_sum, z_img, t_g["depth_normal"])
     rec["dn_only"] = {}
     for lab, a_, b_ in (("dL_dz_img", gz_g, gz_u), ("dL_dn_sum", gn_g, gn_u)):
-        r, c = _rel_cos(a_, b_)
-        rec["dn_only"][lab] = {"rel": r, "cos": c}
+        r, r2, c = _rel_cos(a_, b_)
+        rec["dn_only"][lab] = {"rel": r, "rel_l2": r2, "cos": c}
 
     # The weighted geometry loss the trainer actually backpropagates: a dn-only rel is
     # the term's own change, which is NOT what the splats feel at dn weight 0.05.
@@ -243,8 +260,8 @@ def measure_view(p, v, active, sh_deg, device, weights) -> dict:
     gz_g2, gn_g2 = _grads(n_sum, z_img, _tot(t_g))
     rec["weighted_total"] = {}
     for lab, a_, b_ in (("dL_dz_img", gz_g2, gz_u2), ("dL_dn_sum", gn_g2, gn_u2)):
-        r, c = _rel_cos(a_, b_)
-        rec["weighted_total"][lab] = {"rel": r, "cos": c}
+        r, r2, c = _rel_cos(a_, b_)
+        rec["weighted_total"][lab] = {"rel": r, "rel_l2": r2, "cos": c}
     return rec
 
 
@@ -316,12 +333,21 @@ def run(args) -> dict:
             agg[f"{grp}.{lab}.rel_max"] = max(r[grp][lab]["rel"] for r in per_view)
             agg[f"{grp}.{lab}.rel_median"] = float(
                 np.median([r[grp][lab]["rel"] for r in per_view]))
+            agg[f"{grp}.{lab}.rel_l2_max"] = max(r[grp][lab]["rel_l2"] for r in per_view)
+            agg[f"{grp}.{lab}.rel_l2_median"] = float(
+                np.median([r[grp][lab]["rel_l2"] for r in per_view]))
             agg[f"{grp}.{lab}.cos_min"] = min(r[grp][lab]["cos"] for r in per_view)
     agg["affected_frac_line"] = AFFECTED_FRACTION_LINE
     agg["affected_frac_under_line"] = bool(
         agg["affected_frac_overall"] < AFFECTED_FRACTION_LINE)
     agg["grad_rel_max_over_all"] = max(
         agg[f"{g}.{l}.rel_max"] for g in ("dn_only", "weighted_total")
+        for l in ("dL_dz_img", "dL_dn_sum"))
+    agg["grad_rel_l2_max_over_all"] = max(
+        agg[f"{g}.{l}.rel_l2_max"] for g in ("dn_only", "weighted_total")
+        for l in ("dL_dz_img", "dL_dn_sum"))
+    agg["grad_cos_min_over_all"] = min(
+        agg[f"{g}.{l}.cos_min"] for g in ("dn_only", "weighted_total")
         for l in ("dL_dz_img", "dL_dn_sum"))
     agg["f32_kernel_distance_from_truth"] = F32_KERNEL_DISTANCE_FROM_TRUTH
     agg["grad_under_kernel_f32_error"] = bool(
