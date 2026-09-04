@@ -294,3 +294,40 @@ def summarise_inline(rec, tmp_path):
     p = tmp_path / "rec.json"
     p.write_text(json.dumps(rec))
     return summarise([str(p)], ["synthetic"])
+
+
+def test_bench_terms_reproduce_the_trainers_torch_path_exactly(monkeypatch):
+    """THE FAITHFULNESS TEST, and every number in section 13 rests on it. The tool has its
+    own copy of the torch chain (`_terms`) so it can differentiate the two rules from one
+    render. A copy that drifts from `geometry_terms` measures a function the trainer does
+    not compute -- and it would drift silently, since both produce plausible losses.
+
+    CATCHES: a missing `clamp_min`, a `keep` applied to the wrong operand, the alpha divide
+    dropped from `n_img`, the wrong loss space. Bit-exact, not approximate: they are the
+    same arithmetic in the same order, so anything else is a difference in the chain.
+    """
+    import argparse
+
+    from bench.dn_neighbour_gate import _terms
+    from metal_gauss.train import geometry_terms
+    monkeypatch.setenv("MG_TORCH_LOSS", "1")
+    monkeypatch.delenv("MG_DN_GATE_NEIGHBOURS", raising=False)
+    g = torch.Generator().manual_seed(17)
+    h, w = 11, 13
+    alpha = torch.rand(h, w, generator=g) * 0.9 + 0.05
+    z = ((1.5 + torch.rand(h, w, generator=g)) * alpha)[..., None].expand(h, w, 3).contiguous()
+    n_sum = alpha[..., None] * torch.nn.functional.normalize(
+        torch.randn(h, w, 3, generator=g), dim=-1)
+    gt_d = 1.5 + torch.rand(h, w, generator=g)
+    gt_n = torch.nn.functional.normalize(torch.randn(h, w, 3, generator=g), dim=-1)
+    keep = (torch.rand(h, w, generator=g) > 0.2)
+    K = torch.tensor([[120.0, 0, 6.0], [0, 130.0, 5.0], [0, 0, 1.0]])
+    for space in ("disparity", "metric"):
+        for k in (None, keep):
+            args = argparse.Namespace(depth_loss_weight=1.0, normal_loss_weight=0.2,
+                                      depth_normal_weight=0.05, depth_loss_space=space)
+            want = geometry_terms(args, [n_sum, z], alpha, K, gt_d, gt_n, k)
+            got, _, _ = _terms(n_sum, z, alpha, k, K, gt_d, gt_n, gate=False, space=space)
+            assert set(got) == set(want)
+            for name in want:
+                assert torch.equal(got[name], want[name]), (space, k is None, name)
