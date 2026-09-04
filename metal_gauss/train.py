@@ -303,6 +303,18 @@ def geometry_coverage_warning(cov: dict) -> str | None:
             "says so (see CLAUDE.md Stage 3, '24 of 276 faces trained photometric-only').")
 
 
+# Below this in-plane aspect a splat's ORIENTATION IS UNDELIVERABLE, whatever the trainer
+# computed. The delivery format stores the quaternion smallest-three in 8 bits: three
+# components over [-1/sqrt2, 1/sqrt2] at 256 levels is a step of sqrt(2)/255 = 5.55e-3, so
+# the worst-case quaternion-norm error is sqrt(3)/2 of that = 4.80e-3 and the worst-case
+# orientation error is about twice that again, 9.6e-3 rad. A rotation of theta displaces a
+# splat's rim, at radius smax, by roughly smax*theta -- so at smid/smax < 9.6e-3 the minor
+# in-plane half-axis is smaller than the rim displacement the splat's own quantised
+# orientation produces. Rounded to 0.01. This is a DELIVERY threshold, not a tuning knob:
+# it moves only if the delivery format's quaternion precision moves.
+HARD_NEEDLE_ASPECT = 0.01
+
+
 def shape_metrics(log_scales: torch.Tensor) -> dict:
     """In-plane aspect and needle fraction: WHAT the splats became.
 
@@ -317,6 +329,7 @@ def shape_metrics(log_scales: torch.Tensor) -> dict:
     aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
     return {"aspect_p50": float(aspect.median()),
             "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
+            "hard_needle_frac": float((aspect < HARD_NEEDLE_ASPECT).to(aspect.dtype).mean()),
             "smid_p50_mm": float(s[:, 1].median() * 1000.0),
             "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
 
