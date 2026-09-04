@@ -1,0 +1,194 @@
+{
+  "kind": "lpips_attribution",
+  "schema": 1,
+  "stage": "step3_ceiling",
+  "scene": "pgeom",
+  "arm": "R1",
+  "tag": "b_500_lr2e-2",
+  "dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t10run/R1.dump",
+  "device": "mps",
+  "net": "vgg",
+  "image_hw": [
+    1440,
+    1920
+  ],
+  "n_views": 2,
+  "views": [
+    "wide_20260821_110425_399",
+    "wide_20260821_110601_403"
+  ],
+  "config": {
+    "bilagrid_steps": 500,
+    "bilagrid_lr": 0.02,
+    "ppisp_steps": 1,
+    "ppisp_lr": 0.002,
+    "max_views": 2
+  },
+  "px_per_bilagrid_cell_bin": 1350.0,
+  "baseline": {
+    "lpips_per_view": {
+      "wide_20260821_110425_399": 0.3865814507007599,
+      "wide_20260821_110601_403": 0.46774327754974365
+    },
+    "lpips_mean": 0.42716236412525177,
+    "psnr_per_view": {
+      "wide_20260821_110425_399": 24.60563850402832,
+      "wide_20260821_110601_403": 22.233753204345703
+    },
+    "psnr_mean": 23.41969585418701
+  },
+  "identity_control_c2": {
+    "max_abs_delta": 0.0,
+    "passed": true
+  },
+  "fitters": {
+    "bilagrid_tv10": {
+      "delta_lpips_per_view": {
+        "wide_20260821_110425_399": 0.0022275149822235107,
+        "wide_20260821_110601_403": 0.01848641037940979
+      },
+      "delta_lpips_mean": 0.01035696268081665,
+      "delta_lpips_min": 0.0022275149822235107,
+      "delta_lpips_max": 0.01848641037940979,
+      "lpips_after_mean": 0.4168054014444351,
+      "delta_psnr_mean": 1.482497215270996,
+      "delta_psnr_min": 0.2567119598388672,
+      "delta_psnr_max": 2.708282470703125,
+      "psnr_after_mean": 24.902193069458008,
+      "mse_before_mean": 0.004720907658338547,
+      "mse_after_mean": 0.0032337254378944635,
+      "n_params_per_view": 24576,
+      "wall_s": 67.9,
+      "info_first_view": {
+        "fitter": "bilagrid_tv10",
+        "dims": [
+          16,
+          16,
+          8
+        ],
+        "tv_weight": 10.0,
+        "steps": 500,
+        "lr": 0.02,
+        "n_params": 24576,
+        "mse_curve": [
+          [
+            0,
+            0.0034628696739673615,
+            0.0034628696739673615
+          ],
+          [
+            100,
+            0.003264408092945814,
+            0.0033090468496084213
+          ],
+          [
+            200,
+            0.0032636551186442375,
+            0.003312233369797468
+          ],
+          [
+            300,
+            0.0032634527888149023,
+            0.003317197086289525
+          ],
+          [
+            400,
+            0.003263062098994851,
+            0.0033256877213716507
+          ],
+          [
+            499,
+            0.00326313404366374,
+            0.0033326479606330395
+          ]
+        ],
+        "mse_before": 0.0034628696739673615,
+        "mse_after": 0.0032630646601319313
+      },
+      "synthetic_control_c1": {
+        "induced_lpips_mean": 0.17242497950792313,
+        "residual_lpips_mean": 0.022504067048430443,
+        "recovered_mean": 0.14992091245949268,
+        "recovered_fraction_mean": 0.8704447055019886,
+        "recovered_fraction_min": 0.8596189078445678,
+        "floor": 0.9,
+        "passed": false,
+        "n_views": 2
+      }
+    },
+    "bilagrid_tv0": {
+      "delta_lpips_per_view": {
+        "wide_20260821_110425_399": 0.013513058423995972,
+        "wide_20260821_110601_403": 0.027736783027648926
+      },
+      "delta_lpips_mean": 0.02062492072582245,
+      "delta_lpips_min": 0.013513058423995972,
+      "delta_lpips_max": 0.027736783027648926,
+      "lpips_after_mean": 0.4065374433994293,
+      "delta_psnr_mean": 3.855330467224121,
+      "delta_psnr_min": 1.175119400024414,
+      "delta_psnr_max": 6.535541534423828,
+      "psnr_after_mean": 27.275026321411133,
+      "mse_before_mean": 0.004720907658338547,
+      "mse_after_mean": 0.0019851395045407116,
+      "n_params_per_view": 24576,
+      "wall_s": 67.3,
+      "info_first_view": {
+        "fitter": "bilagrid_tv0",
+        "dims": [
+          16,
+          16,
+          8
+        ],
+        "tv_weight": 0.0,
+        "steps": 500,
+        "lr": 0.02,
+        "n_params": 24576,
+        "mse_curve": [
+          [
+            0,
+            0.0034628696739673615,
+            0.0034628696739673615
+          ],
+          [
+            100,
+            0.002782009309157729,
+            0.002782009309157729
+          ],
+          [
+            200,
+            0.0027207504026591778,
+            0.0027207504026591778
+          ],
+          [
+            300,
+            0.0026842786464840174,
+            0.0026842786464840174
+          ],
+          [
+            400,
+            0.0026593334041535854,
+            0.0026593334041535854
+          ],
+          [
+            499,
+            0.0026409791316837072,
+            0.0026409791316837072
+          ]
+        ],
+        "mse_before": 0.0034628696739673615,
+        "mse_after": 0.0026408853009343147
+      },
+      "synthetic_control_c1": {
+        "induced_lpips_mean": 0.17242497950792313,
+        "residual_lpips_mean": 0.005259108496829867,
+        "recovered_mean": 0.16716587101109326,
+        "recovered_fraction_mean": 0.96923101512625,
+        "recovered_fraction_min": 0.966206749440463,
+        "floor": 0.9,
+        "passed": true,
+        "n_views": 2
+      }
+    }
+  }
+}
