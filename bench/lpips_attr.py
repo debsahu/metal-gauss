@@ -343,3 +343,46 @@ def fit_ppisp_shared(renders: list[torch.Tensor], gts: list[torch.Tensor],
                   "vignetting": vig.detach().cpu().tolist(),
                   "crf_raw": crf.detach().cpu().tolist(),
                   "mse_before": before, "mse_after": after}
+
+
+# ------------------------------------------------------------------ ply reading
+
+def params_from_ply(path: str, device: str = "cpu") -> tuple[dict, int]:
+    """The trainer's own parameter dict, read back from an INRIA ply in ITS OWN
+    pre-activation space -- `opacity` a logit, `scale_*` a log, `rot_*`
+    unnormalised, exactly as `train.export_ply` wrote them.
+
+    `metal_gauss.io.load_ply` is the WRONG reader here: it activates all three,
+    and re-inverting a sigmoid loses the value at the rails.
+
+    Transcribed from `bench/dn_neighbour_gate.py`, which lives on
+    feat/dn-neighbour-gate and is NOT on main. Importing it from there is what
+    `scripts/lpips_train_views.py` originally did, and it failed at runtime on
+    this branch with `ModuleNotFoundError` -- a dependency on an unmerged branch
+    that no test caught, because the tests exercised `select_views` and never
+    `main()`. Pinned here by a ROUND TRIP through `train.export_ply` rather than
+    by copying: the test writes a ply from known parameters and requires this
+    reader to return them bit-exactly.
+    """
+    from plyfile import PlyData
+    v = PlyData.read(path)["vertex"]
+
+    def col(n):
+        import numpy as np
+        return torch.from_numpy(np.asarray(v[n], dtype=np.float32).copy())
+
+    n = len(v)
+    sh = torch.zeros(n, 16, 3)
+    for c in range(3):
+        sh[:, 0, c] = col(f"f_dc_{c}")
+        for b in range(15):
+            sh[:, b + 1, c] = col(f"f_rest_{c * 15 + b}")
+    p = {
+        "means": torch.stack([col("x"), col("y"), col("z")], 1).to(device),
+        "log_scales": torch.stack([col(f"scale_{i}") for i in range(3)], 1).to(device),
+        "quats": torch.stack([col(f"rot_{i}") for i in range(4)], 1).to(device),
+        "logit_opac": col("opacity").to(device),
+        "sh_dc": sh[:, :1].to(device),
+        "sh_rest": sh[:, 1:].to(device),
+    }
+    return p, n

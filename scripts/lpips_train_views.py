@@ -69,7 +69,7 @@ def main(argv=None) -> None:
         raise FileExistsError(f"refusing to write into a populated dump: {dump}")
 
     import torch
-    from bench.dn_neighbour_gate import params_from_ply
+    from bench.lpips_attr import params_from_ply
     from metal_gauss.dataset import load_scene
     from metal_gauss.train import evaluate
 
