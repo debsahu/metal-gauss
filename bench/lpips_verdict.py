@@ -141,6 +141,8 @@ def verdict(res: dict, capacity_delta: float | None = None,
         out["capacity_delta_lpips"] = capacity_delta
         out["capacity_floor"] = capacity_floor
         out["capacity_grid_ceiling"] = grid
+        # Strictly greater, and on the IMPROVEMENT: a capacity arm that made LPIPS
+        # WORSE is not "capacity is the finding", it is evidence against it.
         if grid is not None and capacity_delta > grid:
             out.update(verdict="DEFER",
                        why=(f"the capacity arm moved LPIPS by {capacity_delta:.5f}, "
@@ -176,7 +178,12 @@ def main(argv=None) -> None:
     ap.add_argument("--scene", default="pgeom")
     ap.add_argument("--arm", default="R1")
     ap.add_argument("--tag", default="")
-    ap.add_argument("--capacity-delta", type=float, default=None)
+    ap.add_argument("--capacity-delta", type=float, default=None,
+                    help="LPIPS IMPROVEMENT from the capacity arm, POSITIVE when the "
+                         "bigger budget scored BETTER -- the same sign convention as a "
+                         "fitter's dLPIPS, so the two are directly comparable. Passing "
+                         "the raw (big - small) difference inverts it: LPIPS is a "
+                         "distance, so a better arm has a LOWER one.")
     ap.add_argument("--capacity-floor", type=float, default=None)
     ap.add_argument("--write", default=None)
     a = ap.parse_args(argv)

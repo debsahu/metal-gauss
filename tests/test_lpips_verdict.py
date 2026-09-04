@@ -148,3 +148,13 @@ def test_coupling_reports_the_per_view_range_not_only_the_coefficient():
     assert c["pearson_psnr_lpips"] < -0.95
     assert c["lpips_max"] - c["lpips_min"] == pytest.approx(0.25)
     assert c["psnr_max"] - c["psnr_min"] == pytest.approx(3.5)
+
+
+def test_a_capacity_arm_that_made_lpips_WORSE_does_not_defer():
+    """Sign convention. `capacity_delta` is an IMPROVEMENT, positive when the
+    bigger budget scored better -- the same convention as a fitter's dLPIPS.
+    A capacity arm that made LPIPS worse is evidence AGAINST capacity being the
+    finding, so it must not trigger the DEFER branch by magnitude."""
+    r = _res(affine=(0.004, True), bilagrid_tv10=(0.021, True), ppisp=(0.005, True))
+    assert V.verdict(r, capacity_delta=-0.9)["verdict"] == "BUILD"
+    assert V.verdict(r, capacity_delta=+0.9)["verdict"] == "DEFER"

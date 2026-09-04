@@ -1,0 +1,32 @@
+snapshot_commit=36dcb3d3c6a2b715e49e5613c02b7e0173b6205b
+started=2026-09-04T20:24:48Z
+--- md5 of every trainer source ---
+ec6f024d02400077ec725c6afd7f67e8 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/__init__.py
+544db7f2cdebb1071a560261d7ac2276 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/api.py
+7d9302ec65d070ff302ed52009d826f9 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/appearance.py
+7730df7e110d204d197e0e2b65574838 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/blender.py
+3315cde19ef93164931fee7134d55cd8 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/adam.metal
+65c47d0cf25af79ec3f0a8f37fbfbc12 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/binning.metal
+d9e77d9fb779332acc998c8454165716 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/geometry.metal
+e4a61f38382bf43cde56c886e236a182 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/preprocess.metal
+580d1c261587b583345ca7ae76190abb /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/rasterize.metal
+f330d81e3ddd9459be7b614e2f540869 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/rasterize.mm
+3f7ad11318a79e7573585fbd2919095f /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/smoke.mm
+896594a1babfcc4f838e010d50eb2076 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/csrc/ssim.metal
+99a48c26ca67d5a16f16d5a84b5eae19 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/dataset.py
+24cb19f2361ad76ceea3a6dd5efdb3dc /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/fused_adam.py
+364bfd22004447f8075257c84a4a81fd /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/geometry_loss.py
+b6efc5c5cd0b1794f7aa76b4f57f27ac /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/io.py
+bc6248f4d56946163196df8009d105ee /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/masks.py
+41b182497dee6ac6524e77d0756add1c /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/mcmc.py
+3f86d723a955cadb11918a82b31db5bd /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/metal_backend.py
+faf4a16c0c2272a03106c5f02e47838f /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/mipfilter.py
+dd8525a294be66d968e008fb5c4b9cce /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/prior_io.py
+2bbc30b4896a8d9996337cd8c00f532d /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/priors.py
+d5eef828a31aa15162562a79a4f52a4a /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/render_path.py
+33b089b4bbe155fe40cfeaebd779b88b /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/schedule.py
+87c3ef42a7d6cdab2ed9a45447130043 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/selective_adam.py
+b4c5d959ec6ed1937d416c2cad437e38 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/sh.py
+77e8e54e6d0ba8191d53fe5ada6d0428 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/ssim.py
+2eca187e2bbdb45d7b842b6fd6ccdc2a /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/torch_ref.py
+9ab9f184bdc6f7f24c2cc51d3668e4f0 /private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/snap/metal_gauss/train.py
