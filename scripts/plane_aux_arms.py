@@ -138,25 +138,66 @@ def battery(out: Path, tag: str) -> dict:
             "values": {k: v for k, v in vals.items() if isinstance(v, (int, float))}}
 
 
-def check_floors_match(prev: dict, dn: float, space: str) -> None:
-    """Refuse a floors.json measured for a DIFFERENT configuration.
+FLOOR_CONFIG_KEYS = ("depth_normal_weight", "depth_loss_space", "depth_source",
+                     "flatten_loss_weight", "depth_loss_weight", "normal_loss_weight",
+                     "budget", "steps", "max_resolution", "num_downscales")
 
-    Reusing floors is legitimate -- step 7 runs a second treatment against the same base --
-    and it is also exactly how a floor from the wrong configuration gets applied without
+
+def floor_configs(out: Path, tags=("F0", "F1", "F2")) -> list[dict]:
+    """The floor arms' OWN resolved settings, from the reports that produced them.
+
+    Not from a summary field in floors.json. `_run_report` records `vars(args)` AFTER
+    resolution, so this is what each arm actually ran; a summary field is a claim about it.
+    It also means the check works on a floors.json written before the summary field existed
+    -- which is the case here, since the arm queue is executing a snapshot that predates it,
+    and hand-editing a measurement artifact to satisfy a guard is not an option.
+    """
+    return [json.loads((out / f"{t}.json").read_text())["resolved"] for t in tags]
+
+
+def check_floors_match(configs: list[dict], base_depth_source: str, dn: float,
+                       space: str) -> None:
+    """Refuse floors that were not measured on THIS arm's base configuration.
+
+    Reusing floors is legitimate -- step 7 grades a second treatment against the same base
+    -- and it is also exactly how a floor from the wrong configuration gets applied without
     anyone noticing. research/metal-gauss.md section 8.2 is this project's record of that
     class of error: baseline-arm floors quoted for recipe arms, and an n=2 floor 25-45x too
-    small. So the reuse is CHECKED, and the check reads the fields that define the
-    configuration, not merely that the file exists.
+    small.
 
-    A missing key is treated as a mismatch, never as agreement: an older floors.json that
-    predates a field cannot testify about it.
+    Two things are checked, and the first is the one a summary field cannot do:
+
+      1. the floor arms AGREE WITH EACH OTHER on every configuration key. Three runs that
+         differ in a flag are not a repeat measurement of anything, and their spread is not
+         a noise floor -- it is a treatment effect wearing one.
+      2. they match the requested base. `depth_source` is included deliberately: if the
+         winning depth source is `plane-aux`, floors measured on `center` are NOT its
+         floors, and the honest answer is to re-measure rather than reuse.
+
+    A missing key is a mismatch, never agreement.
     """
-    have_dn, have_space = prev.get("dn", "<absent>"), prev.get("depth_loss_space", "<absent>")
-    if have_dn != dn or have_space != space:
-        raise SystemExit(
-            f"floors.json was measured at dn={have_dn} space={have_space}; this run is "
-            f"dn={dn} space={space}. A floor for another configuration is not this arm's "
-            f"floor. Re-measure, or drop --skip-floors.")
+    if not configs:
+        raise SystemExit("no floor arm reports to check")
+    want = dict(zip(FLOOR_CONFIG_KEYS,
+                    [dn, space, base_depth_source] + [None] * (len(FLOOR_CONFIG_KEYS) - 3)))
+    ref = configs[0]
+    for i, c in enumerate(configs[1:], start=1):
+        diff = {k: (ref.get(k, "<absent>"), c.get(k, "<absent>")) for k in FLOOR_CONFIG_KEYS
+                if ref.get(k, "<absent>") != c.get(k, "<absent>")}
+        if diff:
+            raise SystemExit(
+                f"floor arms 0 and {i} differ in configuration: {diff}. Three runs that "
+                f"differ in a flag are not a repeat measurement, and their spread is a "
+                f"treatment effect, not a noise floor.")
+    for k, v in want.items():
+        if v is None:
+            continue
+        have = ref.get(k, "<absent>")
+        if have != v:
+            raise SystemExit(
+                f"floors were measured with {k}={have}; this arm's base is {k}={v}. A "
+                f"floor for another configuration is not this arm's floor. Re-measure, or "
+                f"drop --skip-floors.")
 
 
 def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
@@ -317,6 +358,11 @@ def main() -> None:
     ap.add_argument("--floors-only", action="store_true",
                     help="stop after phase 2. Used when a later treatment will reuse "
                          "these floors.")
+    ap.add_argument("--floors-depth-source", default="center",
+                    choices=["center", "plane-aux"],
+                    help="the depth source the reused floors were measured on. Must be "
+                         "stated, and must match: floors measured on `center` are not the "
+                         "floors of a `plane-aux` base.")
     ap.add_argument("--skip-floors", action="store_true",
                     help="reuse the floors.json already in --out. REFUSES unless that "
                          "file exists AND its recorded dn / depth_loss_space match this "
@@ -384,7 +430,8 @@ def main() -> None:
 
     if a.skip_floors:
         prev = json.loads((out / "floors.json").read_text())
-        check_floors_match(prev, a.dn, a.depth_loss_space)
+        check_floors_match(floor_configs(out), a.floors_depth_source, a.dn,
+                           a.depth_loss_space)
         fl = prev["floors"]
         print(f"=== PHASES 1-2 SKIPPED: reusing floors.json ({len(fl)} metrics) ===",
               flush=True)

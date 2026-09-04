@@ -137,25 +137,67 @@ def test_every_gate_column_has_a_declared_direction():
 
 # ------------------------------------------------------------ reusing floors safely
 
-def test_reused_floors_must_MATCH_the_configuration_and_a_missing_key_is_a_mismatch():
-    """Would catch a `--skip-floors` that checks only that floors.json EXISTS.
+def _cfg(**over):
+    c = {"depth_normal_weight": 0.0, "depth_loss_space": "disparity",
+         "depth_source": "center", "flatten_loss_weight": 1.0,
+         "depth_loss_weight": 1.0, "normal_loss_weight": 0.2,
+         "budget": 500000, "steps": 30000, "max_resolution": 1920, "num_downscales": 0}
+    c.update(over)
+    return c
+
+
+def test_reused_floors_must_match_the_base_configuration():
+    """Would catch a --skip-floors that checks only that floors.json EXISTS.
 
     Reusing floors is legitimate (step 7 grades a second treatment against the same base)
     and is also exactly how a floor from the wrong configuration gets applied silently --
-    section 8.2's failure. The last case is the one a permissive `.get(k, default)` would
-    wave through: an older floors.json that predates the field cannot testify about it, so
-    absence must read as MISMATCH, not as agreement.
+    section 8.2's failure.
     """
     from plane_aux_arms import check_floors_match
-    check_floors_match({"dn": 0.0, "depth_loss_space": "disparity"}, 0.0, "disparity")
-    with pytest.raises(SystemExit, match="dn=0.05"):
-        check_floors_match({"dn": 0.05, "depth_loss_space": "disparity"}, 0.0, "disparity")
-    with pytest.raises(SystemExit, match="space=metric"):
-        check_floors_match({"dn": 0.0, "depth_loss_space": "metric"}, 0.0, "disparity")
+    ok = [_cfg(), _cfg(), _cfg()]
+    check_floors_match(ok, "center", 0.0, "disparity")
+    with pytest.raises(SystemExit, match="depth_normal_weight"):
+        check_floors_match(ok, "center", 0.05, "disparity")
+    with pytest.raises(SystemExit, match="depth_loss_space"):
+        check_floors_match(ok, "center", 0.0, "metric")
+
+
+def test_floors_measured_on_ONE_depth_source_are_not_the_floors_of_ANOTHER():
+    """THE CASE THAT MATTERS FOR STEP 7. If the winning depth source is `plane-aux`, the
+    `center` floors already on disk are not its floors, and the honest answer is to
+    re-measure. Would catch a guard that checked dn and loss space but not depth source --
+    which is what this guard originally did."""
+    from plane_aux_arms import check_floors_match
+    center_floors = [_cfg(), _cfg(), _cfg()]
+    with pytest.raises(SystemExit, match="depth_source"):
+        check_floors_match(center_floors, "plane-aux", 0.0, "disparity")
+
+
+def test_floor_arms_that_DISAGREE_WITH_EACH_OTHER_are_not_a_noise_floor():
+    """The check a summary field in floors.json cannot perform at all.
+
+    Three runs that differ in a flag are not a repeat measurement of anything, and their
+    max-min is a treatment effect wearing a noise floor's clothes -- which would then be
+    used to decide whether the treatment arm 'moved' a metric. Reading each arm's OWN
+    resolved settings is what makes this detectable.
+    """
+    from plane_aux_arms import check_floors_match
+    mixed = [_cfg(), _cfg(flatten_loss_weight=0.0), _cfg()]
+    with pytest.raises(SystemExit, match="differ in configuration"):
+        check_floors_match(mixed, "center", 0.0, "disparity")
+    drifted = [_cfg(), _cfg(), _cfg(max_resolution=1600)]
+    with pytest.raises(SystemExit, match="differ in configuration"):
+        check_floors_match(drifted, "center", 0.0, "disparity")
+
+
+def test_a_missing_configuration_key_is_a_MISMATCH_not_agreement():
+    """An older report that predates a field cannot testify about it."""
+    from plane_aux_arms import check_floors_match
+    c = _cfg(); c.pop("depth_loss_space")
     with pytest.raises(SystemExit, match="absent"):
-        check_floors_match({"dn": 0.0}, 0.0, "disparity")
-    with pytest.raises(SystemExit, match="absent"):
-        check_floors_match({}, 0.0, "disparity")
+        check_floors_match([c, c, c], "center", 0.0, "disparity")
+    with pytest.raises(SystemExit, match="no floor arm reports"):
+        check_floors_match([], "center", 0.0, "disparity")
 
 
 # ---------------------------------------------------------- the cross-scene decision
