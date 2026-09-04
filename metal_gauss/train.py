@@ -362,6 +362,18 @@ def _use_fused_loss() -> bool:
     return os.environ.get("MG_TORCH_LOSS", "0") in ("0", "", "false", "False")
 
 
+def _gate_dn_neighbours() -> bool:
+    """`MG_DN_GATE_NEIGHBOURS=1` gates the depth-normal term on its STENCIL NEIGHBOURS too.
+
+    Task 20's measurement flag, off by default and not a recipe knob. Torch path only --
+    the fused Metal kernel does not implement it, and `geometry_terms` raises rather than
+    quietly computing the ungated term under a gated label. See
+    `geometry_loss.depth_normal_loss`.
+    """
+    import os
+    return os.environ.get("MG_DN_GATE_NEIGHBOURS", "0") not in ("0", "", "false", "False")
+
+
 def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
     """The depth / normal / depth-normal terms over one view's aux maps.
 
@@ -383,6 +395,14 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
             and args.depth_loss_weight > 0 and args.normal_loss_weight > 0
             and args.depth_normal_weight > 0
             and alpha.device.type == "mps" and aux_maps[0].dtype == torch.float32):
+        if _gate_dn_neighbours():
+            # REFUSE, never ignore. The fused kernel gates the base pixel only; running it
+            # with MG_DN_GATE_NEIGHBOURS set would report an UNGATED number under a gated
+            # label, and nothing downstream could tell the difference.
+            raise RuntimeError(
+                "MG_DN_GATE_NEIGHBOURS is set but the fused geometry-loss kernel does not "
+                "implement the neighbour gate. Set MG_TORCH_LOSS=1 to take the torch "
+                "reference path, or unset MG_DN_GATE_NEIGHBOURS.")
         n_img, z_img = aux_maps
         vals = fused_geometry_losses(
             z_img, n_img, alpha, gt_depth, gt_normal,
@@ -406,7 +426,8 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
         n_d = normals_from_depth(depth_img, K[0, 0].item(), K[1, 1].item(),
                                  K[0, 2].item(), K[1, 2].item())
         terms["depth_normal"] = depth_normal_loss(
-            n_d, n_img, alpha_d if keep is None else alpha_d * keep)
+            n_d, n_img, alpha_d if keep is None else alpha_d * keep,
+            gate_neighbours=_gate_dn_neighbours())
     return terms
 
 
