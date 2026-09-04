@@ -156,3 +156,68 @@ def test_reused_floors_must_MATCH_the_configuration_and_a_missing_key_is_a_misma
         check_floors_match({"dn": 0.0}, 0.0, "disparity")
     with pytest.raises(SystemExit, match="absent"):
         check_floors_match({}, 0.0, "disparity")
+
+
+# ---------------------------------------------------------- the cross-scene decision
+
+def _g(**over):
+    d = {"scene_pass": False, "scene_drop": False,
+         "falsifier_triggered_on_this_scene": False, "dn": 0.0,
+         "geometry_gate": {}, "psnr_verdict": "WITHIN FLOOR"}
+    d.update(over)
+    return d
+
+
+def test_a_regression_on_ONE_scene_is_a_DROP_even_if_the_other_scene_passes():
+    """The single most important ordering in the rule.
+
+    Would catch an implementation that checks the opt-in condition ("passes on one, inside
+    the floor on the other") before the drop condition. That reading turns
+    pass-here/regress-there into a RECOMMENDATION, when the pre-registered rule says
+    "DROP if it worsens any of the four geometry columns beyond the floor on EITHER scene".
+    """
+    from plane_aux_arms import combined_verdict
+    v = combined_verdict({"pgeom": _g(scene_pass=True),
+                          "arkit": _g(scene_drop=True)})
+    assert v["decision"] == "DROP"
+    assert v["regressed_on"] == ["arkit"] and v["passed_on"] == ["pgeom"]
+
+
+def test_pass_on_both_is_the_recipe_default_and_pass_on_one_is_opt_in():
+    from plane_aux_arms import combined_verdict
+    both = combined_verdict({"a": _g(scene_pass=True), "b": _g(scene_pass=True)})
+    assert both["decision"] == "KEEP AS RECIPE DEFAULT"
+    one = combined_verdict({"a": _g(scene_pass=True), "b": _g()})
+    assert one["decision"] == "KEEP AS OPT-IN"
+
+
+def test_no_pass_and_no_regression_is_NOT_adoption():
+    """An arm that changes nothing is not an opt-in. Would catch an `else: OPT-IN`."""
+    from plane_aux_arms import combined_verdict
+    v = combined_verdict({"a": _g(), "b": _g()})
+    assert v["decision"].startswith("NOT ADOPTED")
+
+
+def test_the_falsifier_is_reported_INCOMPLETE_while_only_one_dn_setting_is_measured():
+    """The pre-registered falsifier requires both scenes AT BOTH dn SETTINGS. Step 6
+    (dn = 0.05) is gated behind Task 20, so a dn = 0 sweep alone cannot falsify.
+
+    Would catch reporting `falsifier_at_measured_dn` as the falsifier -- a partial
+    falsifier presented as a falsification is exactly the over-claim this flag exists to
+    prevent.
+    """
+    from plane_aux_arms import combined_verdict
+    v = combined_verdict({"a": _g(falsifier_triggered_on_this_scene=True),
+                          "b": _g(falsifier_triggered_on_this_scene=True)})
+    assert v["falsifier_at_measured_dn"] is True
+    assert v["falsifier_complete"] is False
+    assert v["dn_settings_measured"] == [0.0]
+    v2 = combined_verdict({"a": _g(falsifier_triggered_on_this_scene=True),
+                           "b": _g(falsifier_triggered_on_this_scene=True, dn=0.05)})
+    assert v2["falsifier_complete"] is True
+
+
+def test_the_falsifier_needs_EVERY_scene_not_just_one():
+    from plane_aux_arms import combined_verdict
+    v = combined_verdict({"a": _g(falsifier_triggered_on_this_scene=True), "b": _g()})
+    assert v["falsifier_at_measured_dn"] is False

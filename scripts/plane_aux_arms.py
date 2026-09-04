@@ -159,6 +159,49 @@ def check_floors_match(prev: dict, dn: float, space: str) -> None:
             f"floor. Re-measure, or drop --skip-floors.")
 
 
+def combined_verdict(per_scene: dict[str, dict]) -> dict:
+    """KEEP / OPT-IN / DROP across scenes, from the pre-registered rule.
+
+        KEEP as the recipe default  -- passes on BOTH scenes
+        KEEP as an OPT-IN           -- passes on one, and is inside the floor on the other
+        DROP                        -- worsens any of the four geometry columns beyond the
+                                       floor on EITHER scene
+
+    DROP is checked FIRST and is not overridable. A scene that passes and a scene that
+    regresses is not an opt-in: the rule says "drop if it worsens ... on either scene", and
+    an implementation that reached the opt-in branch first would turn a regression into a
+    recommendation.
+
+    THE FALSIFIER IS REPORTED SEPARATELY AND CAN BE INCOMPLETE. As written it requires both
+    on-seed@1cm and thin-axis to stay inside the floor on both scenes AT BOTH dn SETTINGS.
+    Step 6 (dn = 0.05) is gated behind Task 20, so `falsifier_complete` is False whenever
+    only one dn setting has been measured, and `falsifier_at_measured_dn` says what the
+    measured settings show. A partial falsifier is not a falsification.
+    """
+    scenes = sorted(per_scene)
+    drops = [s for s in scenes if per_scene[s]["scene_drop"]]
+    passes = [s for s in scenes if per_scene[s]["scene_pass"]]
+    dns = sorted({per_scene[s]["dn"] for s in scenes})
+    fals = [s for s in scenes if per_scene[s]["falsifier_triggered_on_this_scene"]]
+    if drops:
+        decision = "DROP"
+    elif len(passes) == len(scenes):
+        decision = "KEEP AS RECIPE DEFAULT"
+    elif passes:
+        decision = "KEEP AS OPT-IN"
+    else:
+        decision = "NOT ADOPTED (no scene passed, none regressed)"
+    return {"scenes": scenes, "decision": decision,
+            "passed_on": passes, "regressed_on": drops,
+            "dn_settings_measured": dns,
+            "falsifier_at_measured_dn": len(fals) == len(scenes),
+            "falsifier_scenes": fals,
+            "falsifier_complete": len(dns) >= 2,
+            "per_scene": {s: {k: per_scene[s][k] for k in
+                              ("scene_pass", "scene_drop", "geometry_gate",
+                               "psnr_verdict", "dn")} for s in scenes}}
+
+
 def verdict_for(metric: str, delta: float, floor: float) -> str:
     """IMPROVED / WORSENED / WITHIN FLOOR for one metric.
 
