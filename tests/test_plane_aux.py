@@ -628,3 +628,55 @@ def test_geometry_terms_masks_the_GT_by_valid_and_not_only_the_prediction():
     assert not torch.allclose(raw, unmasked_ref), \
         "the fixture cannot separate the plane path from the centre path"
     assert torch.isfinite(zero_gt["depth"])
+
+
+def test_the_FUSED_LOSS_KERNEL_IS_NOT_USED_when_depth_normal_weight_is_zero():
+    """A FINDING, pinned so it cannot drift unnoticed, not a defect being fixed here.
+
+    `geometry_terms`'s fused branch requires ALL THREE weights positive
+    (`args.depth_normal_weight > 0`). So R1p -- flatten 1.0, depth 1.0, normal 0.2,
+    dn 0.0 -- runs the TORCH loss chain, not the Tier 2 fused kernel.
+
+    That matters for three things at once:
+
+      * R1p is the base arm the plan pre-registers for every Tier 3 comparison, so every
+        Tier 3 arm measured with dn = 0 is measured on the torch chain. The A/B is still
+        one-variable (both arms take the same branch), but it is NOT the code path Tier 2
+        optimised.
+      * research/metal-gauss.md section 11.6a's "recipe ON" figures (1.59x / 1.79x) were
+        taken with dn = 0.05, i.e. WITH the kernel. They do not describe an R1p run.
+      * Task 19's route (ii) -- "fold the ray-plane division into the loss kernel" -- cannot
+        help R1p at all, because R1p never calls that kernel. Route (ii) as the plan
+        specifies it is a speedup for dn > 0 configurations only.
+
+    Verified by execution rather than by reading: `fused_geometry_losses` is patched to
+    raise, and `geometry_terms` is called at dn = 0 and dn = 0.05 with everything else
+    identical. Only the second must reach it. A test that merely read the condition could
+    not tell whether some other guard also short-circuits.
+    """
+    import argparse
+    from unittest.mock import patch
+    from metal_gauss import train as T
+    from tests.test_fused_geom_loss import exposing
+
+    n_sum, z, a, gt_d, gt_n = exposing(seed=3)
+    K = torch.tensor([[600.0, 0, 26.0], [0, 600.0, 20.0], [0, 0, 1.0]])
+    reached = []
+
+    def spy(*args, **kw):
+        reached.append(kw.get("depth_mode", "alpha"))
+        raise AssertionError("fused kernel reached")
+
+    for dn, expect in ((0.0, False), (0.05, True)):
+        args = argparse.Namespace(depth_loss_weight=1.0, normal_loss_weight=0.2,
+                                  depth_normal_weight=dn, depth_loss_space="disparity",
+                                  depth_source="center")
+        reached.clear()
+        with patch.object(T, "fused_geometry_losses", spy):
+            try:
+                T.geometry_terms(args, [n_sum, z], a, K, gt_d, gt_n, None)
+            except AssertionError as e:
+                if "fused kernel reached" not in str(e):
+                    raise
+        assert bool(reached) is expect, (
+            f"dn={dn}: fused kernel reached={bool(reached)}, expected {expect}")

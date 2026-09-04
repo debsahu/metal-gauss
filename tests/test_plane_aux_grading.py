@@ -133,3 +133,26 @@ def test_every_gate_column_has_a_declared_direction():
     for k in GEOMETRY_GATE:
         assert k in DIRECTION, k
         assert DIRECTION[k] in (+1, -1), f"{k} is a gate column, so it cannot be two-sided"
+
+
+# ------------------------------------------------------------ reusing floors safely
+
+def test_reused_floors_must_MATCH_the_configuration_and_a_missing_key_is_a_mismatch():
+    """Would catch a `--skip-floors` that checks only that floors.json EXISTS.
+
+    Reusing floors is legitimate (step 7 grades a second treatment against the same base)
+    and is also exactly how a floor from the wrong configuration gets applied silently --
+    section 8.2's failure. The last case is the one a permissive `.get(k, default)` would
+    wave through: an older floors.json that predates the field cannot testify about it, so
+    absence must read as MISMATCH, not as agreement.
+    """
+    from plane_aux_arms import check_floors_match
+    check_floors_match({"dn": 0.0, "depth_loss_space": "disparity"}, 0.0, "disparity")
+    with pytest.raises(SystemExit, match="dn=0.05"):
+        check_floors_match({"dn": 0.05, "depth_loss_space": "disparity"}, 0.0, "disparity")
+    with pytest.raises(SystemExit, match="space=metric"):
+        check_floors_match({"dn": 0.0, "depth_loss_space": "metric"}, 0.0, "disparity")
+    with pytest.raises(SystemExit, match="absent"):
+        check_floors_match({"dn": 0.0}, 0.0, "disparity")
+    with pytest.raises(SystemExit, match="absent"):
+        check_floors_match({}, 0.0, "disparity")

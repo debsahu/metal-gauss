@@ -138,6 +138,27 @@ def battery(out: Path, tag: str) -> dict:
             "values": {k: v for k, v in vals.items() if isinstance(v, (int, float))}}
 
 
+def check_floors_match(prev: dict, dn: float, space: str) -> None:
+    """Refuse a floors.json measured for a DIFFERENT configuration.
+
+    Reusing floors is legitimate -- step 7 runs a second treatment against the same base --
+    and it is also exactly how a floor from the wrong configuration gets applied without
+    anyone noticing. research/metal-gauss.md section 8.2 is this project's record of that
+    class of error: baseline-arm floors quoted for recipe arms, and an n=2 floor 25-45x too
+    small. So the reuse is CHECKED, and the check reads the fields that define the
+    configuration, not merely that the file exists.
+
+    A missing key is treated as a mismatch, never as agreement: an older floors.json that
+    predates a field cannot testify about it.
+    """
+    have_dn, have_space = prev.get("dn", "<absent>"), prev.get("depth_loss_space", "<absent>")
+    if have_dn != dn or have_space != space:
+        raise SystemExit(
+            f"floors.json was measured at dn={have_dn} space={have_space}; this run is "
+            f"dn={dn} space={space}. A floor for another configuration is not this arm's "
+            f"floor. Re-measure, or drop --skip-floors.")
+
+
 def verdict_for(metric: str, delta: float, floor: float) -> str:
     """IMPROVED / WORSENED / WITHIN FLOOR for one metric.
 
@@ -209,6 +230,21 @@ def main() -> None:
                          "behind Task 20's bound.")
     ap.add_argument("--depth-loss-space", default="disparity", choices=["disparity", "metric"])
     ap.add_argument("--watchdog", type=float, default=14_400.0)
+    ap.add_argument("--treatment-tag", default="P0",
+                    help="tag for the treatment arm. Step 7 (metric vs disparity) reuses "
+                         "the SAME floors with a different treatment, so it needs a "
+                         "different tag and must not overwrite P0.")
+    ap.add_argument("--treatment-depth-source", default="plane-aux",
+                    choices=["center", "plane-aux"])
+    ap.add_argument("--floors-only", action="store_true",
+                    help="stop after phase 2. Used when a later treatment will reuse "
+                         "these floors.")
+    ap.add_argument("--skip-floors", action="store_true",
+                    help="reuse the floors.json already in --out. REFUSES unless that "
+                         "file exists AND its recorded dn / depth_loss_space match this "
+                         "invocation: a floor measured for another configuration is not "
+                         "this arm's floor, which is the whole reason Tier 3 measures its "
+                         "own (section 8.2).")
     ap.add_argument("--regrade", action="store_true",
                     help="recompute grade.json from the artifacts already on disk. No "
                          "GPU, no training: the verdict is a pure function of the "
@@ -218,7 +254,7 @@ def main() -> None:
     if a.regrade:
         out = Path(a.out)
         fl = json.loads((out / "floors.json").read_text())["floors"]
-        doc = grade(a.scene, a.dn, battery(out, "P0"), fl)
+        doc = grade(a.scene, a.dn, battery(out, a.treatment_tag), fl)
         (out / "grade.json").write_text(json.dumps(doc, indent=2))
         print(json.dumps({k: doc[k] for k in
                           ("scene", "scene_pass", "scene_drop",
@@ -244,8 +280,45 @@ def main() -> None:
     # uses seed+1 (the seed floor). The treatment shares the first floor's seed, so the
     # paired comparison exists even though grading is against the n=3 spread.
     floors = [("F0", "center", a.seed), ("F1", "center", a.seed), ("F2", "center", a.seed + 1)]
-    treatment = ("P0", "plane-aux", a.seed)
+    treatment = (a.treatment_tag, a.treatment_depth_source, a.seed)
 
+    if a.skip_floors:
+        prev = json.loads((out / "floors.json").read_text())
+        check_floors_match(prev, a.dn, a.depth_loss_space)
+        fl = prev["floors"]
+        print(f"=== PHASES 1-2 SKIPPED: reusing floors.json ({len(fl)} metrics) ===",
+              flush=True)
+    else:
+        run_floor_phases(a, out, common, floors)
+        fl = json.loads((out / "floors.json").read_text())["floors"]
+    if a.floors_only:
+        print("floors only: stopping before the treatment arm", flush=True)
+        return
+
+    print("=== PHASE 3: treatment arm ===", flush=True)
+    tag, src, seed = treatment
+    run_arm(tag, out, common + ["--seed", str(seed),
+                                "--export", str(out / f"{tag}.ply"),
+                                "--eval-dump", str(out / f"{tag}.dump")],
+            ["--depth-source", src], a.watchdog)
+
+    print("=== PHASE 4: score treatment and grade ===", flush=True)
+    score(out, tag, a.seed_cloud)
+    t = battery(out, tag)
+    if t["depth_source"] != src:
+        raise SystemExit(f"treatment arm reports depth_source={t['depth_source']!r}, asked "
+                         f"for {src!r}: the flag did not survive resolve_depth_source.")
+    doc = grade(a.scene, a.dn, t, fl)
+    (out / f"grade_{tag}.json").write_text(json.dumps(doc, indent=2))
+    (out / "grade.json").write_text(json.dumps(doc, indent=2))
+    (out / "ALL_DONE").write_text("")
+    print(json.dumps({k: doc[k] for k in
+                      ("scene", "scene_pass", "scene_drop",
+                       "falsifier_triggered_on_this_scene", "geometry_gate",
+                       "psnr_verdict")}, indent=2))
+
+
+def run_floor_phases(a, out: Path, common: list[str], floors) -> None:
     print(f"=== PHASE 1: floor arms ({a.scene}) ===", flush=True)
     for tag, src, seed in floors:
         run_arm(tag, out, common + ["--seed", str(seed),
@@ -273,6 +346,7 @@ def main() -> None:
                  "repeat_pair_abs_diff": abs(v[0] - v[1])}
     (out / "floors.json").write_text(json.dumps(
         {"schema": 1, "scene": a.scene, "dn": a.dn,
+         "depth_loss_space": a.depth_loss_space,
          "note": "floor = spread_n3 = max-min over the three base arms. repeat_pair is "
                  "|F0-F1| and is REPORTED ONLY -- an n=2 floor was 25-45x too small once "
                  "(research/metal-gauss.md section 8.2) and is not graded against.",
@@ -280,27 +354,6 @@ def main() -> None:
          "floors": fl}, indent=2))
     (out / "FLOORS_DONE").write_text("")
     print(f"  floors written: {len(fl)} metrics", flush=True)
-
-    print("=== PHASE 3: treatment arm ===", flush=True)
-    tag, src, seed = treatment
-    run_arm(tag, out, common + ["--seed", str(seed),
-                                "--export", str(out / f"{tag}.ply"),
-                                "--eval-dump", str(out / f"{tag}.dump")],
-            ["--depth-source", src], a.watchdog)
-
-    print("=== PHASE 4: score treatment and grade ===", flush=True)
-    score(out, tag, a.seed_cloud)
-    t = battery(out, tag)
-    if t["depth_source"] != "plane-aux":
-        raise SystemExit(f"treatment arm reports depth_source={t['depth_source']!r}: the "
-                         f"flag did not survive resolve_depth_source. Nothing to grade.")
-    doc = grade(a.scene, a.dn, t, fl)
-    (out / "grade.json").write_text(json.dumps(doc, indent=2))
-    (out / "ALL_DONE").write_text("")
-    print(json.dumps({k: doc[k] for k in
-                      ("scene", "scene_pass", "scene_drop",
-                       "falsifier_triggered_on_this_scene", "geometry_gate",
-                       "psnr_verdict")}, indent=2))
 
 
 if __name__ == "__main__":
