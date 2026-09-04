@@ -256,10 +256,9 @@ def grade(scene: str, dn: float, t: dict, fl: dict) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", required=True)
-    ap.add_argument("--colmap", required=True)
-    ap.add_argument("--images", required=True)
-    ap.add_argument("--seed-cloud", required=True)
+    ap.add_argument("--scene", default="")
+    ap.add_argument("--colmap", default=""); ap.add_argument("--images", default="")
+    ap.add_argument("--seed-cloud", default="")
     ap.add_argument("--depth-dir"); ap.add_argument("--normal-dir")
     ap.add_argument("--init-ply")
     ap.add_argument("--out", required=True)
@@ -288,11 +287,32 @@ def main() -> None:
                          "invocation: a floor measured for another configuration is not "
                          "this arm's floor, which is the whole reason Tier 3 measures its "
                          "own (section 8.2).")
+    ap.add_argument("--summary", action="store_true",
+                    help="read every <scene>/grade.json under --out and emit the "
+                         "cross-scene KEEP / OPT-IN / DROP decision. No GPU.")
     ap.add_argument("--regrade", action="store_true",
                     help="recompute grade.json from the artifacts already on disk. No "
                          "GPU, no training: the verdict is a pure function of the "
                          "reports and stats JSONs, and this proves it.")
     a = ap.parse_args()
+
+    if a.summary:
+        # `--out` is the PARENT holding one subdirectory per scene. Reads only grade.json
+        # files, so it needs no GPU and no reports.
+        per = {}
+        root = Path(a.out)
+        if not root.is_dir():
+            raise SystemExit(f"--out {root} is not a directory")
+        for d in sorted(root.iterdir()):
+            g = d / "grade.json"
+            if d.is_dir() and g.exists():
+                per[d.name] = json.loads(g.read_text())
+        if not per:
+            raise SystemExit(f"no <scene>/grade.json under {a.out}")
+        v = combined_verdict(per)
+        (Path(a.out) / "combined_verdict.json").write_text(json.dumps(v, indent=2))
+        print(json.dumps(v, indent=2))
+        return
 
     if a.regrade:
         out = Path(a.out)
@@ -305,6 +325,10 @@ def main() -> None:
                            "psnr_verdict")}, indent=2))
         return
 
+    for req in ("scene", "colmap", "images", "seed_cloud"):
+        if not getattr(a, req):
+            raise SystemExit(f"--{req.replace('_', '-')} is required to run arms "
+                             f"(it is optional only for --summary / --regrade)")
     require_gpu_exclusive()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     common = ["--colmap", a.colmap, "--images", a.images,
