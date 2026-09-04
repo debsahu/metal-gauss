@@ -150,3 +150,38 @@ def test_summary_keys_on_mask_mode_so_the_two_readings_do_not_collide(tmp_path, 
     LA.write_json(tmp_path / "step1" / "a__b__composite.json", comp)
     LR.summary(_args(tmp_path))
     assert "2 arm(s)" in capsys.readouterr().out
+
+
+def test_box_downscale_is_an_exact_area_average():
+    """Not bicubic, not nearest: a box average introduces no ringing and no
+    aliasing of its own, so what moves across the sweep is the METRIC's scale
+    dependence and not a resize filter's artefacts."""
+    import torch
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+    got = LR.box_downscale(x, 2)
+    assert got.shape == (1, 2, 3)
+    assert got[0, 0, 0] == pytest.approx((0 + 3 + 12 + 15) / 4)
+    assert got[0, 1, 2] == pytest.approx((8 + 11 + 20 + 23) / 4)
+
+
+def test_box_downscale_is_the_identity_at_k_1():
+    import torch
+    x = torch.rand(5, 7, 3)
+    assert torch.equal(LR.box_downscale(x, 1), x)
+
+
+def test_box_downscale_crops_rather_than_padding_a_ragged_edge():
+    """Padding would put invented pixels into the metric."""
+    import torch
+    x = torch.rand(5, 7, 3)
+    assert LR.box_downscale(x, 2).shape == (2, 3, 3)
+
+
+def test_summary_keys_on_downscale_so_a_resolution_sweep_is_not_a_duplicate(tmp_path,
+                                                                            capsys):
+    a = _result("s", "a"); a["downscale"] = 1
+    b = _result("s", "a"); b["downscale"] = 2; b["self_check"] = {"passed": None}
+    LA.write_json(tmp_path / "step1" / "s__a.json", a)
+    LA.write_json(tmp_path / "step1" / "s__a__ds2.json", b)
+    LR.summary(_args(tmp_path))
+    assert "2 arm(s)" in capsys.readouterr().out

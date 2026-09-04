@@ -43,6 +43,27 @@ def load_rgb(p: Path) -> torch.Tensor:
     return torch.from_numpy(np.asarray(Image.open(p).convert("RGB"), np.float32) / 255.0)
 
 
+def box_downscale(img: torch.Tensor, k: int) -> torch.Tensor:
+    """Integer box-average downsample, `[H, W, 3] -> [H//k, W//k, 3]`.
+
+    LPIPS IS NOT SCALE-FREE. It is a distance in VGG feature space, and VGG's
+    receptive fields are a fixed number of PIXELS -- so the same reconstruction
+    scored at 1920x1440 and at 480x360 is being asked two different questions
+    about two different physical scales. The Stage 4 threshold of 0.25 was
+    inherited without a resolution attached, and P-GEOM is scored at 2.76 Mpx.
+    This makes the dependence measurable instead of assumed.
+
+    Box averaging (not bicubic, not nearest) because it is the one resize that
+    introduces no ringing and no aliasing of its own, so what moves is the
+    metric's scale and not a filter's artefacts.
+    """
+    if k <= 1:
+        return img
+    h, w, c = img.shape
+    h2, w2 = h // k, w // k
+    return img[:h2 * k, :w2 * k].reshape(h2, k, w2, k, c).mean((1, 3))
+
+
 def to_lpips(img: torch.Tensor) -> torch.Tensor:
     """scripts/lpips_eval.py's convention: [-1, 1], NCHW."""
     return (img * 2.0 - 1.0).permute(2, 0, 1)[None]
@@ -121,13 +142,17 @@ def score(args) -> None:
                 raise ValueError(f"{stem}: render {tuple(r.shape)} vs gt {tuple(g.shape)}")
             if mode == "composite":
                 r = composite(r, g, mp)
+            if getattr(args, "downscale", 1) > 1:
+                r = box_downscale(r, args.downscale)
+                g = box_downscale(g, args.downscale)
             per_view[net][stem] = metric(r, g)
             if net == nets[0]:
                 black[stem] = float((r.sum(-1) == 0).float().mean())
 
     committed = dump / "lpips.json"
     self_check = {"file": str(committed), "present": committed.exists()}
-    if committed.exists() and "vgg" in per_view and mode == "full":
+    if (committed.exists() and "vgg" in per_view and mode == "full"
+            and getattr(args, "downscale", 1) == 1):
         c = json.loads(committed.read_text())
         got = statistics.fmean(per_view["vgg"].values())
         self_check.update(committed_net=c.get("net"), committed_mean=c.get("mean"),
@@ -140,9 +165,10 @@ def score(args) -> None:
 
     out = LA.write_json(
         Path(args.out_root) / "step1" /
-        f"{args.scene}__{args.arm}{'' if mode == 'full' else '__' + mode}.json",
+        f"{args.scene}__{args.arm}{'' if mode == 'full' else '__' + mode}"
+        f"{'' if getattr(args, 'downscale', 1) == 1 else '__ds%d' % args.downscale}.json",
         {"stage": "step1_rescore", "scene": args.scene, "arm": args.arm,
-         "mask_mode": mode,
+         "mask_mode": mode, "downscale": getattr(args, "downscale", 1),
          "dump": str(dump), "n_views": len(ps),
          "has_mask_files": any(m is not None for _, _, _, m in ps),
          "image_hw": list(load_rgb(ps[0][1]).shape[:2]),
@@ -169,7 +195,7 @@ def summary(args) -> None:
         d = LA.read_result(f)                     # refuses a foreign kind/schema
         if d.get("stage") != "step1_rescore":
             raise ValueError(f"{f}: stage {d.get('stage')!r} is not step1_rescore")
-        key = (d["scene"], d["arm"], d.get("mask_mode", "full"))
+        key = (d["scene"], d["arm"], d.get("mask_mode", "full"), d.get("downscale", 1))
         if key in seen:
             raise ValueError(f"duplicate (scene, arm) {key}: {seen[key]} and {f}")
         seen[key] = f
@@ -178,7 +204,7 @@ def summary(args) -> None:
                              f"reproduce the committed lpips.json; no summary is valid")
         rows.append(d)
     if args.require:
-        want = {(a, b, "full") for a, b in
+        want = {(a, b, "full", 1) for a, b in
                 (x.split("/", 1) for x in args.require.split(","))}
         missing = want - set(seen)
         if missing:
@@ -209,6 +235,10 @@ def main(argv=None):
     s.add_argument("--arm", required=True)
     s.add_argument("--out-root", required=True)
     s.add_argument("--nets", default="vgg,alex")
+    s.add_argument("--downscale", type=int, default=1,
+                   help="integer box-average downsample before scoring. LPIPS is a "
+                        "distance in VGG feature space and VGG's receptive fields are "
+                        "a fixed number of PIXELS, so the metric is not scale-free.")
     s.add_argument("--mask-mode", choices=["full", "composite"], default="full",
                    help="full = the shipped convention (masked pixels render black "
                         "against GT content); composite = dropped region replaced by GT")
