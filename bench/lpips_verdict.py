@@ -75,6 +75,34 @@ def usable(entry: dict, fitters: dict | None = None,
                    f"of its own injected distortion, floor {c1.get('floor')}")
 
 
+def pearson(xs, ys) -> float:
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxy = sum((a - mx) * (b - my) for a, b in zip(xs, ys))
+    sxx = sum((a - mx) ** 2 for a in xs)
+    syy = sum((b - my) ** 2 for b in ys)
+    d = (sxx * syy) ** 0.5
+    return float("nan") if d == 0 else sxy / d
+
+
+def coupling(res: dict) -> dict:
+    """Per-VIEW correlation between PSNR and LPIPS inside one arm.
+
+    The arm-level correlation across the Tier 1 arms is near -1 but over an
+    LPIPS range of 0.003, so the coefficient is not the evidence there. Within
+    one arm the held-out views span a real range (pgeom B0a: LPIPS 0.280-0.598)
+    and the question "does LPIPS carry information this scene's PSNR does not"
+    becomes answerable on 25 points.
+    """
+    b = res["baseline"]
+    stems = list(b["lpips_per_view"])
+    l = [b["lpips_per_view"][s] for s in stems]
+    p = [b["psnr_per_view"][s] for s in stems]
+    return {"n_views": len(stems), "pearson_psnr_lpips": pearson(p, l),
+            "lpips_min": min(l), "lpips_max": max(l),
+            "psnr_min": min(p), "psnr_max": max(p)}
+
+
 def verdict(res: dict, capacity_delta: float | None = None,
             capacity_floor: float | None = None) -> dict:
     fitters = res["fitters"]
@@ -93,7 +121,8 @@ def verdict(res: dict, capacity_delta: float | None = None,
            "tag": res.get("tag", ""), "n_views": res["n_views"],
            "baseline_lpips": res["baseline"]["lpips_mean"],
            "baseline_psnr": res["baseline"]["psnr_mean"],
-           "build_threshold": BUILD_THRESHOLD, "rows": rows}
+           "build_threshold": BUILD_THRESHOLD, "rows": rows,
+           "per_view_coupling": coupling(res)}
 
     if not usable_rows:
         out.update(verdict="NO VERDICT", why=(

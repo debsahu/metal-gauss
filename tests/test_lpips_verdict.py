@@ -10,7 +10,10 @@ from bench import lpips_verdict as V
 
 def _res(**fitters):
     return {"stage": "step3_ceiling", "scene": "pgeom", "arm": "R1", "tag": "t",
-            "n_views": 25, "baseline": {"lpips_mean": 0.3968, "psnr_mean": 22.6},
+            "n_views": 3,
+            "baseline": {"lpips_mean": 0.3968, "psnr_mean": 22.6,
+                         "lpips_per_view": {"a": 0.30, "b": 0.40, "c": 0.55},
+                         "psnr_per_view": {"a": 24.0, "b": 22.5, "c": 20.5}},
             "fitters": {n: {"delta_lpips_mean": d, "delta_psnr_mean": 1.0,
                             "n_params_per_view": 12,
                             "synthetic_control_c1": None if c1 is None else
@@ -121,3 +124,27 @@ def test_the_proxy_applies_only_to_the_named_regularised_fitter():
     v = V.verdict(r)
     assert v["rows"]["ppisp"]["usable"] is False
     assert v["ceiling"] == pytest.approx(0.010)
+
+
+def test_pearson_matches_a_hand_computed_value():
+    assert V.pearson([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]) == pytest.approx(1.0)
+    assert V.pearson([1.0, 2.0, 3.0], [6.0, 4.0, 2.0]) == pytest.approx(-1.0)
+    assert V.pearson([1.0, 2.0, 3.0], [1.0, 0.0, 1.0]) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_pearson_is_nan_on_a_constant_series_rather_than_dividing_by_zero():
+    """A flat series has no correlation to report. Returning 0.0 there would read
+    as 'LPIPS carries information PSNR does not', which is the opposite of what a
+    degenerate input means."""
+    import math
+    assert math.isnan(V.pearson([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]))
+
+
+def test_coupling_reports_the_per_view_range_not_only_the_coefficient():
+    """A correlation over a range narrower than the metric's floor is not
+    evidence, so the range travels with the coefficient."""
+    c = V.verdict(_res(affine=(0.004, True)))["per_view_coupling"]
+    assert c["n_views"] == 3
+    assert c["pearson_psnr_lpips"] < -0.95
+    assert c["lpips_max"] - c["lpips_min"] == pytest.approx(0.25)
+    assert c["psnr_max"] - c["psnr_min"] == pytest.approx(3.5)
