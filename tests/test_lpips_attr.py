@@ -522,3 +522,19 @@ def test_every_fitter_runs_on_MPS(fitter):
     assert fit.shape == r.shape
     assert torch.isfinite(fit).all()
     assert info["mse_after"] <= info["mse_before"] * 1.0001
+
+
+@mps
+def test_ppisp_streaming_from_cpu_matches_an_all_mps_fit():
+    """`device=` streams CPU inputs one view at a time. It must be the SAME fit,
+    not a cheaper approximation of it -- otherwise the memory fix would silently
+    change the number the decision rests on."""
+    torch.manual_seed(31)
+    r = [torch.rand(24, 32, 3) for _ in range(3)]
+    g = [(x * 0.9 + 0.03).clamp(0, 1) for x in r]
+    fa, ia = LA.fit_ppisp_shared([x.to("mps") for x in r], [x.to("mps") for x in g],
+                                 steps=40, lr=0.05)
+    fb, ib = LA.fit_ppisp_shared(r, g, steps=40, lr=0.05, device="mps")
+    assert ib["mse_after"] == pytest.approx(ia["mse_after"], rel=1e-4)
+    assert fb[0].device.type == "cpu", "streamed fits come back where the inputs were"
+    assert torch.allclose(fb[0], fa[0].cpu(), atol=1e-5)

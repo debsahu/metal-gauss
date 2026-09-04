@@ -71,20 +71,37 @@ def _smooth_gain(h, w, device):
     return (f[..., None] * torch.tensor([1.0, 0.95, 1.08], device=device))
 
 
-def run_fitter(name, renders, gts, args):
-    """-> (list of fitted images, list of per-view info)."""
+def _free(device):
+    if device == "mps":
+        torch.mps.empty_cache()
+
+
+def run_fitter(name, renders, gts, args, device="cpu"):
+    """-> (list of fitted images, list of per-view info). Inputs stay on the CPU.
+
+    EVERY FITTER STREAMS. Keeping 25 pairs of 2.76 Mpx images resident on MPS and
+    fitting on top of them took this process to 12 GB RSS with the machine's swap
+    87% full, where it stopped making progress: 0% CPU, state `stuck`, and no
+    output at all -- the same signature CONTRIBUTING.md documents for a stale
+    FileBaton, from a completely different cause. One view at a time is the
+    difference between a run that finishes and one that does not.
+    """
     if name == "affine":
-        out = [LA.fit_affine(r, g) for r, g in zip(renders, gts)]
+        out = [LA.fit_affine(r, g) for r, g in zip(renders, gts)]   # solves on CPU
         return [f for f, _ in out], [i for _, i in out]
     if name.startswith("bilagrid_tv"):
         tv = float(name[len("bilagrid_tv"):])
-        out = [LA.fit_bilagrid(r, g, tv_weight=tv, steps=args.bilagrid_steps,
-                               lr=args.bilagrid_lr)
-               for r, g in zip(renders, gts)]
-        return [f for f, _ in out], [i for _, i in out]
+        fits, infos = [], []
+        for r, g in zip(renders, gts):
+            f, i = LA.fit_bilagrid(r.to(device), g.to(device), tv_weight=tv,
+                                   steps=args.bilagrid_steps, lr=args.bilagrid_lr)
+            fits.append(f.to(r.device)); infos.append(i)
+            del f; _free(device)
+        return fits, infos
     if name == "ppisp":
         fits, info = LA.fit_ppisp_shared(renders, gts, steps=args.ppisp_steps,
-                                         lr=args.ppisp_lr)
+                                         lr=args.ppisp_lr, device=device)
+        _free(device)
         return fits, [info] * len(fits)
     raise ValueError(f"unknown fitter {name!r}")
 
@@ -118,16 +135,16 @@ def synthetic_control(name, renders, metric, args, device):
         m = torch.tensor([[1.09, 0.04, -0.02], [0.0, 0.94, 0.03],
                           [0.03, -0.01, 1.06]], device=device)
         b = torch.tensor([0.02, -0.012, 0.025], device=device)
-        target = [(r @ m.T + b).clamp(0, 1) for r in start]
+        target = [(r @ m.T.cpu() + b.cpu()).clamp(0, 1) for r in start]
     elif name.startswith("bilagrid_tv"):
-        target = [(r * _smooth_gain(*r.shape[:2], device)).clamp(0, 1) for r in start]
+        target = [(r * _smooth_gain(*r.shape[:2], r.device)).clamp(0, 1) for r in start]
     elif name == "ppisp":
         vig = torch.tensor([[0.02, -0.01, -1.3, 0.25, 0.0]] * 3, device=device)
         crf = LA.crf_identity_raw(device).expand(3, 4).clone() + 0.35
-        target = [LA.apply_ppisp(r, vig, crf) for r in start]
+        target = [LA.apply_ppisp(r, vig.cpu(), crf.cpu()) for r in start]
     else:
         raise ValueError(name)
-    fits, _ = run_fitter(name, start, target, args)
+    fits, _ = run_fitter(name, start, target, args, device)
     induced = [metric(LA.quantize(s), LA.quantize(t)) for s, t in zip(start, target)]
     left = [metric(LA.quantize(f), LA.quantize(t)) for f, t in zip(fits, target)]
     rec = [(i - l) for i, l in zip(induced, left)]
@@ -172,8 +189,9 @@ def main(argv=None) -> None:
         step = max(1, len(ps) // a.max_views)
         ps = ps[::step][:a.max_views]
     stems = [s for s, _, _, _ in ps]
-    renders = [load_rgb(r).to(dev) for _, r, _, _ in ps]
-    gts = [load_rgb(g).to(dev) for _, _, g, _ in ps]
+    # ON THE CPU on purpose -- see run_fitter. `metric` moves what it needs.
+    renders = [load_rgb(r) for _, r, _, _ in ps]
+    gts = [load_rgb(g) for _, _, g, _ in ps]
     metric = make_metric(a.net, dev)
 
     base_l = [metric(r, g) for r, g in zip(renders, gts)]
@@ -201,7 +219,7 @@ def main(argv=None) -> None:
 
     for name in a.fitters.split(","):
         t0 = time.perf_counter()
-        fits, info = run_fitter(name, renders, gts, a)
+        fits, info = run_fitter(name, renders, gts, a, dev)
         qf = [LA.quantize(f) for f in fits]
         dl = LA.delta_lpips(metric, renders, qf, gts)
         fit_l = [b - d for b, d in zip(base_l, dl)]
@@ -228,7 +246,9 @@ def main(argv=None) -> None:
         print(f"{a.scene}/{a.arm} {name:14s} dLPIPS {entry['delta_lpips_mean']:+.5f} "
               f"dPSNR {entry['delta_psnr_mean']:+.3f} dB  "
               f"mse {entry['mse_before_mean']:.5f}->{entry['mse_after_mean']:.5f}  "
-              f"{entry['wall_s']}s", flush=True)
+              f"{entry['wall_s']}s"
+              + (f"  mps {torch.mps.current_allocated_memory() / 2**30:.2f}GiB"
+                 if dev == "mps" else ""), flush=True)
         if c1:
             print(f"    C1 recovered {c1['recovered_fraction_mean']:.3f} of induced "
                   f"{c1['induced_lpips_mean']:.4f}  passed={c1['passed']}", flush=True)

@@ -298,32 +298,44 @@ def fit_bilagrid(render: torch.Tensor, gt: torch.Tensor, dims=BILAGRID_DIMS,
 
 def fit_ppisp_shared(renders: list[torch.Tensor], gts: list[torch.Tensor],
                      steps: int = 500, lr: float = 2e-3, betas=(0.9, 0.999),
-                     log_every: int = 100) -> tuple[list[torch.Tensor], dict]:
+                     log_every: int = 100,
+                     device: str | None = None) -> tuple[list[torch.Tensor], dict]:
     """ONE vignetting + CRF for the whole scene: 15 + 12 = 27 parameters total.
 
     Gradients are accumulated view by view rather than in one batch -- identical
     to a full-batch step on the mean loss, and the only way 25 views at 2.8 Mpx
     fit in memory with a graph attached.
+
+    `device` STREAMS: the inputs stay wherever they are (CPU) and each view is
+    moved to `device` for its own forward/backward and freed. Holding 25 pairs of
+    2.76 Mpx images resident on MPS *and* fitting drove this process to 12 GB RSS
+    with the machine's 5 GB swap 87% full, at which point it stopped making
+    progress entirely -- 0% CPU, state `stuck`, no output. Streaming costs a
+    transfer per view per step and is the difference between a run that finishes
+    and one that does not.
     """
-    dev = renders[0].device
+    dev = device or renders[0].device
     vig = torch.zeros(3, 5, device=dev, requires_grad=True)
     crf = crf_identity_raw(dev).expand(3, 4).clone().requires_grad_(True)
     opt = torch.optim.Adam([vig, crf], lr=lr, betas=tuple(betas))
     n = len(renders)
-    uvs = [vig_uv(*r.shape[:2], r.device, r.dtype) for r in renders]
+    uvs = [vig_uv(*r.shape[:2], dev, r.dtype) for r in renders]
     curve = []
     for s in range(steps):
         opt.zero_grad(set_to_none=True)
         tot = 0.0
         for r, g, uv in zip(renders, gts, uvs):
-            mse = ((apply_ppisp(r, vig, crf, uv) - g) ** 2).mean() / n
+            rd, gd = r.to(dev), g.to(dev)
+            mse = ((apply_ppisp(rd, vig, crf, uv) - gd) ** 2).mean() / n
             mse.backward()
             tot += float(mse.detach())
+            del rd, gd, mse
         opt.step()
         if s % log_every == 0 or s == steps - 1:
             curve.append([s, tot])
     with torch.no_grad():
-        fits = [apply_ppisp(r, vig, crf, uv) for r, uv in zip(renders, uvs)]
+        fits = [apply_ppisp(r.to(dev), vig, crf, uv).to(r.device)
+                for r, uv in zip(renders, uvs)]
     before = float(sum(((r - g) ** 2).mean() for r, g in zip(renders, gts)) / n)
     after = float(sum(((f - g) ** 2).mean() for f, g in zip(fits, gts)) / n)
     return fits, {"fitter": "ppisp_shared", "steps": steps, "lr": lr, "n_params": 27,

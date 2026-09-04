@@ -36,7 +36,7 @@ def test_c1_reports_a_pass_for_a_fitter_that_actually_reaches_the_target(monkeyp
     torch.manual_seed(0)
     renders = [torch.rand(16, 20, 3) for _ in range(2)]
     monkeypatch.setattr(CP, "run_fitter",
-                        lambda name, start, target, args: (list(target), [{}] * len(start)))
+                        lambda name, start, target, args, device='cpu': (list(target), [{}] * len(start)))
     r = CP.synthetic_control("affine", renders, _l2_metric, _args(), "cpu")
     assert r["recovered_fraction_mean"] == pytest.approx(1.0, abs=1e-6)
     assert r["passed"] is True
@@ -48,7 +48,7 @@ def test_c1_reports_a_FAILURE_for_a_fitter_that_does_nothing(monkeypatch):
     torch.manual_seed(1)
     renders = [torch.rand(16, 20, 3) for _ in range(2)]
     monkeypatch.setattr(CP, "run_fitter",
-                        lambda name, start, target, args: (list(start), [{}] * len(start)))
+                        lambda name, start, target, args, device='cpu': (list(start), [{}] * len(start)))
     r = CP.synthetic_control("affine", renders, _l2_metric, _args(), "cpu")
     assert r["recovered_fraction_mean"] == pytest.approx(0.0, abs=1e-6)
     assert r["passed"] is False
@@ -59,7 +59,7 @@ def test_c1_fails_a_fitter_that_recovers_most_but_not_enough(monkeypatch):
     torch.manual_seed(2)
     renders = [torch.rand(16, 20, 3) for _ in range(2)]
 
-    def half(name, start, target, args):
+    def half(name, start, target, args, device='cpu'):
         return [0.5 * (a + b) for a, b in zip(start, target)], [{}] * len(start)
     monkeypatch.setattr(CP, "run_fitter", half)
     r = CP.synthetic_control("affine", renders, _l2_metric, _args(), "cpu")
@@ -75,7 +75,7 @@ def test_c1_injects_a_distortion_large_enough_to_measure(monkeypatch):
     renders = [torch.rand(64, 80, 3) * 0.8 + 0.1]
     seen = {}
 
-    def cap(name, start, target, args):
+    def cap(name, start, target, args, device='cpu'):
         seen[name] = float(((start[0] - target[0]) ** 2).mean().sqrt())
         return list(target), [{}]
     monkeypatch.setattr(CP, "run_fitter", cap)
@@ -109,7 +109,7 @@ def test_c1_direction_is_FORWARD_because_ppisps_family_cannot_invert_itself(monk
     renders = [torch.rand(32, 40, 3) * 0.7 + 0.15]
     seen = {}
 
-    def cap(name, start, target, args):
+    def cap(name, start, target, args, device='cpu'):
         seen["start"], seen["target"] = start[0], target[0]
         return list(target), [{}]
     monkeypatch.setattr(CP, "run_fitter", cap)
