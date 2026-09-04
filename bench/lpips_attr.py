@@ -316,7 +316,7 @@ def fit_ppisp_shared(renders: list[torch.Tensor], gts: list[torch.Tensor],
         for r, g in zip(renders, gts):
             mse = ((apply_ppisp(r, vig, crf) - g) ** 2).mean() / n
             mse.backward()
-            tot += float(mse)
+            tot += float(mse.detach())
         opt.step()
         if s % log_every == 0 or s == steps - 1:
             curve.append([s, tot])
