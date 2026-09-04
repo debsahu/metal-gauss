@@ -85,9 +85,11 @@ def _trilinear_coeffs(grid: torch.Tensor, rgb: torch.Tensor) -> torch.Tensor:
     y1i = (y0i + 1).clamp(max=gh - 1)
     z1i = (z0i + 1).clamp(max=gl - 1)
 
+    # All 12 coefficients are gathered in ONE index_select per corner rather than
+    # twelve, which is the difference between 96 and 8 gathers per forward and
+    # therefore between a fit that takes minutes and one that takes an hour.
     flat = grid.reshape(12, -1)
-    cells = gl * gh * gw
-    out = torch.zeros(h, w, 12, device=dev, dtype=rgb.dtype)
+    acc = torch.zeros(12, h * w, device=dev, dtype=rgb.dtype)
     for corner in range(8):
         cx = x1i if corner & 1 else x0i
         cy = y1i if corner & 2 else y0i
@@ -95,12 +97,10 @@ def _trilinear_coeffs(grid: torch.Tensor, rgb: torch.Tensor) -> torch.Tensor:
         wx = tx if corner & 1 else 1.0 - tx
         wy = ty if corner & 2 else 1.0 - ty
         wz = tz if corner & 4 else 1.0 - tz
-        wgt = wx * wy * wz
-        idx = (cz * gh + cy) * gw + cx                     # [H, W] into one cell plane
-        for k in range(12):
-            out[..., k] = out[..., k] + flat[k][idx.reshape(-1)].reshape(h, w) * wgt
-    del cells
-    return out
+        wgt = (wx * wy * wz).reshape(-1)
+        idx = ((cz * gh + cy) * gw + cx).reshape(-1)
+        acc = acc + flat.index_select(1, idx) * wgt
+    return acc.reshape(12, h, w).permute(1, 2, 0)
 
 
 def bilagrid_apply(grid: torch.Tensor, rgb: torch.Tensor) -> torch.Tensor:
@@ -220,3 +220,109 @@ def read_result(path) -> dict:
     if d.get("schema") != SCHEMA:
         raise ValueError(f"{path}: schema {d.get('schema')!r} is not {SCHEMA}")
     return d
+
+
+# ------------------------------------------------------------------- the fitters
+#
+# All three fit POST HOC to a FROZEN render, minimising L2 to the ground truth.
+# None of them is a training arm and none of them touches a splat. What they
+# bound is the PHOTOMETRIC COMPONENT of the held-out residual -- the only
+# component any appearance model could reduce by any route, direct or indirect.
+
+def apply_ppisp(rgb: torch.Tensor, vig: torch.Tensor, crf: torch.Tensor) -> torch.Tensor:
+    """PPISP's PER-CAMERA stages only: vignetting then CRF (ppisp_kernels.rs:82-168).
+
+    The per-FRAME stages (exposure, colour homography) are deliberately absent.
+    A per-frame stage evaluated on a held-out view is exactly the per-view cheat
+    this trainer forbids, and including them would make (c) a per-view fitter
+    wearing a shared model's name.
+    """
+    h, w, _ = rgb.shape
+    f = vig_falloff(vig_uv(h, w, rgb.device, rgb.dtype), vig)
+    return crf_apply((rgb * f).clamp(0.0, 1.0), crf)
+
+
+def fit_affine(render: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, dict]:
+    """Per-view global 3x4 affine, solved in CLOSED FORM.
+
+    A global affine's L2 optimum is an ordinary least-squares solve, so there is
+    no optimiser to converge and (a)'s ceiling is exact rather than
+    optimisation-limited. That matters: the whole decision turns on a number
+    being SMALL, and "small because the fitter did not converge" is the failure
+    mode this task is most exposed to. Normal equations in float64 on the CPU --
+    MPS has no float64 and a float32 sum over 2.8M pixels is not free.
+    """
+    h, w, _ = render.shape
+    x = render.reshape(-1, 3).double().cpu()
+    y = gt.reshape(-1, 3).double().cpu()
+    x1 = torch.cat([x, torch.ones(x.shape[0], 1, dtype=x.dtype)], 1)     # [N, 4]
+    a = x1.T @ x1
+    b = x1.T @ y
+    wmat = torch.linalg.solve(a + 1e-9 * torch.eye(4, dtype=a.dtype), b)  # [4, 3]
+    fit = (x1 @ wmat).reshape(h, w, 3).to(render.dtype).to(render.device)
+    return fit, {"fitter": "affine", "params": wmat.T.tolist(), "n_params": 12,
+                 "mse_before": float(((render - gt) ** 2).mean()),
+                 "mse_after": float(((fit - gt) ** 2).mean())}
+
+
+def fit_bilagrid(render: torch.Tensor, gt: torch.Tensor, dims=BILAGRID_DIMS,
+                 tv_weight: float = BILAGRID_TV_WEIGHT, steps: int = BILAGRID_STEPS,
+                 lr: float = BILAGRID_LR, betas=BILAGRID_BETAS,
+                 log_every: int = 100) -> tuple[torch.Tensor, dict]:
+    """Per-view 16x16x8 bilateral grid of 3x4 affines, Brush's configuration."""
+    gx, gy, gl = dims
+    grid = bilagrid_identity(gl, gy, gx, device=render.device).requires_grad_(True)
+    opt = torch.optim.Adam([grid], lr=lr, betas=tuple(betas))
+    curve = []
+    for s in range(steps):
+        opt.zero_grad(set_to_none=True)
+        out = bilagrid_apply(grid, render)
+        mse = ((out - gt) ** 2).mean()
+        loss = mse + tv_weight * bilagrid_tv(grid)
+        loss.backward()
+        opt.step()
+        if s % log_every == 0 or s == steps - 1:
+            curve.append([s, float(mse.detach()), float(loss.detach())])
+    with torch.no_grad():
+        fit = bilagrid_apply(grid, render)
+    return fit.detach(), {"fitter": f"bilagrid_tv{tv_weight:g}", "dims": list(dims),
+                          "tv_weight": tv_weight, "steps": steps, "lr": lr,
+                          "n_params": 12 * gx * gy * gl, "mse_curve": curve,
+                          "mse_before": float(((render - gt) ** 2).mean()),
+                          "mse_after": float(((fit - gt) ** 2).mean())}
+
+
+def fit_ppisp_shared(renders: list[torch.Tensor], gts: list[torch.Tensor],
+                     steps: int = 500, lr: float = 2e-3, betas=(0.9, 0.999),
+                     log_every: int = 100) -> tuple[list[torch.Tensor], dict]:
+    """ONE vignetting + CRF for the whole scene: 15 + 12 = 27 parameters total.
+
+    Gradients are accumulated view by view rather than in one batch -- identical
+    to a full-batch step on the mean loss, and the only way 25 views at 2.8 Mpx
+    fit in memory with a graph attached.
+    """
+    dev = renders[0].device
+    vig = torch.zeros(3, 5, device=dev, requires_grad=True)
+    crf = crf_identity_raw(dev).expand(3, 4).clone().requires_grad_(True)
+    opt = torch.optim.Adam([vig, crf], lr=lr, betas=tuple(betas))
+    n = len(renders)
+    curve = []
+    for s in range(steps):
+        opt.zero_grad(set_to_none=True)
+        tot = 0.0
+        for r, g in zip(renders, gts):
+            mse = ((apply_ppisp(r, vig, crf) - g) ** 2).mean() / n
+            mse.backward()
+            tot += float(mse)
+        opt.step()
+        if s % log_every == 0 or s == steps - 1:
+            curve.append([s, tot])
+    with torch.no_grad():
+        fits = [apply_ppisp(r, vig, crf) for r in renders]
+    before = float(sum(((r - g) ** 2).mean() for r, g in zip(renders, gts)) / n)
+    after = float(sum(((f - g) ** 2).mean() for f, g in zip(fits, gts)) / n)
+    return fits, {"fitter": "ppisp_shared", "steps": steps, "lr": lr, "n_params": 27,
+                  "n_views_shared_over": n, "mse_curve": curve,
+                  "vignetting": vig.detach().cpu().tolist(),
+                  "crf_raw": crf.detach().cpu().tolist(),
+                  "mse_before": before, "mse_after": after}

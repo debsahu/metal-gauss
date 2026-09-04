@@ -249,3 +249,247 @@ def test_read_result_refuses_a_foreign_or_fabricated_file(tmp_path):
     q.write_text(json.dumps({"kind": LA.KIND, "schema": LA.SCHEMA + 99}))
     with pytest.raises(ValueError, match="schema"):
         LA.read_result(q)
+
+
+# ------------------------------------------------- C1: the fitters actually fit
+#
+# A fitter that silently does not fit returns dLPIPS ~= 0 and reads as "there is
+# nothing for an appearance model to fix". These are the mechanical positive
+# controls that make a null result mean something.
+
+def _smooth_field(h, w, seed=0):
+    """A low-frequency multiplicative gain field -- the thing an appearance
+    model is FOR, and the thing LPIPS is argued to be nearly blind to."""
+    torch.manual_seed(seed)
+    y = torch.linspace(-1, 1, h)[:, None]
+    x = torch.linspace(-1, 1, w)[None, :]
+    f = 1.0 + 0.25 * torch.cos(1.7 * x) * torch.cos(1.1 * y) - 0.15 * (x ** 2 + y ** 2)
+    return f[..., None].repeat(1, 1, 3) * torch.tensor([1.0, 0.95, 1.08])
+
+
+def test_affine_fit_recovers_a_known_affine_exactly():
+    torch.manual_seed(10)
+    render = torch.rand(40, 55, 3)
+    m = torch.tensor([[1.1, 0.05, -0.02], [0.0, 0.93, 0.04], [0.03, -0.01, 1.07]])
+    b = torch.tensor([0.02, -0.01, 0.03])
+    gt = render @ m.T + b
+    fit, info = fit_call = LA.fit_affine(render, gt)
+    assert info["mse_after"] < 1e-12, info["mse_after"]
+    assert torch.allclose(fit, gt, atol=1e-5)
+    assert info["mse_after"] < 1e-6 * info["mse_before"]
+
+
+def test_affine_fit_is_the_global_optimum_not_merely_an_improvement():
+    """Catches a wrong normal-equation solve that still improves on identity.
+    Perturbing the returned parameters in any direction must make it worse."""
+    torch.manual_seed(11)
+    render = torch.rand(30, 40, 3)
+    gt = (render * 0.8 + 0.1 + 0.05 * torch.rand(30, 40, 3)).clamp(0, 1)
+    fit, info = LA.fit_affine(render, gt)
+    w = torch.tensor(info["params"]).T                      # [4, 3]
+    x1 = torch.cat([render.reshape(-1, 3), torch.ones(30 * 40, 1)], 1)
+    base = float(((x1 @ w - gt.reshape(-1, 3)) ** 2).mean())
+    for k in range(8):
+        torch.manual_seed(100 + k)
+        w2 = w + 0.01 * torch.randn_like(w)
+        assert float(((x1 @ w2 - gt.reshape(-1, 3)) ** 2).mean()) > base
+
+
+def test_bilagrid_fit_recovers_a_known_low_frequency_gain_field():
+    torch.manual_seed(12)
+    render = torch.rand(48, 64, 3)
+    gt = (render * _smooth_field(48, 64)).clamp(0, 1)
+    fit, info = LA.fit_bilagrid(render, gt, steps=400, lr=0.02, tv_weight=0.0)
+    assert info["mse_after"] < 0.1 * info["mse_before"], info
+
+
+def test_bilagrid_fit_cannot_manufacture_a_delta_when_there_is_nothing_to_fit():
+    """render == gt. An identity grid has TV exactly zero, so the only gradient
+    is float32 noise in the trilinear sum -- and ADAM NORMALISES BY THE GRADIENT
+    MAGNITUDE, so a ~1e-7 gradient still buys a full lr-sized step. Measured
+    drift after 50 steps is RMS ~7e-5, real but a fiftieth of a uint8 level.
+
+    So the property that matters is not "the raw fit does not move" -- it does --
+    but that it cannot move ACROSS THE SCORING, which quantises.
+
+    BIT-EQUALITY OF THE QUANTISED IMAGES IS THE WRONG ASSERTION and the first
+    version of this test used it: a value sitting exactly on a rounding boundary
+    flips under an arbitrarily small perturbation, so 29 of 2304 levels move
+    while the largest raw drift is 0.08 OF ONE LEVEL. A correct implementation
+    fails a bit-equality test, which makes it a check the thing being checked
+    cannot satisfy. The bound that is both true and load-bearing is: no value
+    moves by half a level, so no value can move by more than one level, and only
+    boundary values move at all. A fitter that genuinely drifted -- one dragged
+    off identity by its own regulariser -- would move by many levels and is
+    still caught.
+    """
+    torch.manual_seed(13)
+    render = torch.rand(24, 32, 3)
+    fit, info = LA.fit_bilagrid(render, render, steps=50)
+    level = 1.0 / 255.0
+    drift = (fit - render).abs().max()
+    assert float(drift) < 0.5 * level, float(drift) / level
+    # Compared in INTEGER levels: (1/255 - 1/255) in float32 is not 0, so a
+    # tolerance in image units here is a tolerance on float32 noise.
+    q = ((LA.quantize(fit) - LA.quantize(render)) * 255.0).round().abs()
+    assert float(q.max()) <= 1.0, float(q.max())
+    assert float((q > 0).float().mean()) < 0.05, float((q > 0).float().mean())
+
+
+def test_ppisp_fit_recovers_a_known_vignetting_and_crf():
+    torch.manual_seed(14)
+    renders = [torch.rand(40, 52, 3) for _ in range(3)]
+    vig = torch.tensor([[0.02, -0.01, -1.4, 0.3, 0.0]] * 3)
+    crf = LA.crf_identity_raw().expand(3, 4).clone()
+    crf[:, 2] += 0.4
+    # Built by the INDEPENDENT reference, never by the function under test --
+    # see _reference_ppisp: constructing the target with apply_ppisp made two
+    # whole-stage deletions invisible.
+    gts = [_reference_ppisp(r, vig, crf) for r in renders]
+    fits, info = LA.fit_ppisp_shared(renders, gts, steps=1200, lr=0.05)
+    assert info["mse_after"] < 0.1 * info["mse_before"], info
+
+
+def test_ppisp_parameters_are_SHARED_and_have_no_per_view_axis():
+    """The 80%-of-(b) shape rule compares a SHARED 27-parameter model against a
+    per-view one. A (c) that had silently become per-view would be a different
+    comparison wearing the same name."""
+    torch.manual_seed(15)
+    renders = [torch.rand(20, 24, 3) for _ in range(2)]
+    gts = [r.clamp(0, 1) for r in renders]
+    _, info = LA.fit_ppisp_shared(renders, gts, steps=5)
+    assert np.array(info["vignetting"]).shape == (3, 5)
+    assert np.array(info["crf_raw"]).shape == (3, 4)
+    assert info["n_params"] == 27 and info["n_views_shared_over"] == 2
+
+
+def test_ppisp_shared_cannot_fit_two_views_that_disagree():
+    """Discriminating power for the sharing: two views needing OPPOSITE spatial
+    falloff cannot both be corrected by one lens model, while a per-view fitter
+    would flatten both. If this ever passes trivially, (c) has stopped being
+    shared."""
+    torch.manual_seed(16)
+    base = torch.rand(40, 52, 3) * 0.6 + 0.2
+    uv = LA.vig_uv(40, 52)
+    left = LA.vig_falloff(uv, torch.tensor([[-0.35, 0.0, -3.0, 0.0, 0.0]] * 3))
+    right = LA.vig_falloff(uv, torch.tensor([[0.35, 0.0, -3.0, 0.0, 0.0]] * 3))
+    renders = [base.clone(), base.clone()]
+    gts = [(base * left).clamp(0, 1), (base * right).clamp(0, 1)]
+    _, shared = LA.fit_ppisp_shared(renders, gts, steps=600, lr=0.05)
+    per_view = [LA.fit_ppisp_shared([r], [g], steps=600, lr=0.05)[1]
+                for r, g in zip(renders, gts)]
+    solo = sum(i["mse_after"] for i in per_view) / 2
+    assert solo < 0.25 * shared["mse_after"], (solo, shared["mse_after"])
+
+
+def test_bilagrid_fit_cannot_reproduce_an_unrelated_target():
+    """The fit must be a FUNCTION OF THE RENDER. A fitter that read the ground
+    truth directly -- one transposed argument -- would return ~gt and report a
+    huge recovered dLPIPS, which is the most attractive way for this probe to
+    produce a false BUILD.
+
+    THE IMAGE SIZE IS PART OF THE FIXTURE. A 16x16x8 grid is 2048 cells of 12
+    parameters; how much unrelated content it can absorb is set by PIXELS PER
+    CELL-BIN, measured here on white noise at steps=400, lr=0.02, tv=0:
+
+        48x64     1.5 px/cell-bin   residual 0.033 of baseline  (fits noise)
+        240x320  37.5               0.463
+        480x640 150.0               0.490                       (plateau)
+
+    The first version of this test used 48x64 and FAILED for a real reason: at
+    1.5 pixels per cell-bin the grid genuinely can fit noise. The production
+    images sit at 1350 (1920x1440) and 369 (1008x756) px/cell-bin, deep in the
+    plateau -- which is also why the nuisance control C3 has to be run at the
+    real resolution and cannot be inferred from a small fixture.
+    """
+    torch.manual_seed(17)
+    render = torch.rand(240, 320, 3)
+    unrelated = torch.rand(240, 320, 3)
+    fit, info = LA.fit_bilagrid(render, unrelated, steps=400, lr=0.02, tv_weight=0.0)
+    assert info["mse_after"] > 0.3 * info["mse_before"], info
+    assert info["mse_after"] > 1e-3, "a fitter reading gt directly would reach ~0"
+
+
+def test_the_same_target_from_two_renders_gives_two_different_fits():
+    """Decisive form of the same guard: a fitter that read gt would return the
+    SAME image for both."""
+    torch.manual_seed(19)
+    gt = torch.rand(64, 80, 3)
+    a, _ = LA.fit_bilagrid(torch.rand(64, 80, 3), gt, steps=60, lr=0.02)
+    b, _ = LA.fit_bilagrid(torch.rand(64, 80, 3), gt, steps=60, lr=0.02)
+    assert float(((a - b) ** 2).mean()) > 1e-3
+
+
+def test_ppisp_fit_cannot_reproduce_an_unrelated_target():
+    torch.manual_seed(18)
+    renders = [torch.rand(40, 52, 3)]
+    unrelated = [torch.rand(40, 52, 3)]
+    _, info = LA.fit_ppisp_shared(renders, unrelated, steps=400, lr=0.05)
+    assert info["mse_after"] > 0.5 * info["mse_before"], info
+
+
+def _reference_ppisp(rgb, vig, crf):
+    """INDEPENDENT transcription of the per-camera PPISP stages, from
+    ppisp_kernels.rs:82-125 and ppisp_math.rs:332-347,360-382. Deliberately does
+    not call anything in lpips_attr: the first version of
+    `test_ppisp_fit_recovers_a_known_vignetting_and_crf` built its ground truth
+    by calling `LA.apply_ppisp` itself, so DELETING A WHOLE STAGE left the test
+    green -- the target lost the stage at the same moment the model did. A
+    fixture a wrong implementation can also produce is not a fixture.
+    """
+    h, w, _ = rgb.shape
+    m = float(max(w, h))
+    ux = (torch.arange(w, dtype=rgb.dtype) + 0.5 - w * 0.5) / m
+    uy = (torch.arange(h, dtype=rgb.dtype) + 0.5 - h * 0.5) / m
+    out = torch.zeros_like(rgb)
+    for c in range(3):
+        cx, cy, a0, a1, a2 = (float(v) for v in vig[c])
+        dx = ux[None, :] - cx
+        dy = uy[:, None] - cy
+        r2 = dx * dx + dy * dy
+        f = (1.0 + a0 * r2 + a1 * r2 ** 2 + a2 * r2 ** 3).clamp(0.0, 1.0)
+        x = (rgb[..., c] * f).clamp(0.0, 1.0)
+        t_r, s_r, g_r, c_r = (float(v) for v in crf[c])
+        toe = 0.3 + math.log1p(math.exp(-abs(t_r))) + max(t_r, 0.0)
+        sho = 0.3 + math.log1p(math.exp(-abs(s_r))) + max(s_r, 0.0)
+        gam = 0.1 + math.log1p(math.exp(-abs(g_r))) + max(g_r, 0.0)
+        ctr = 1.0 / (1.0 + math.exp(-c_r))
+        lerp = toe + ctr * (sho - toe)
+        aa = sho * ctr / lerp
+        bb = 1.0 - aa
+        lo = aa * (x / ctr).clamp_min(1e-12) ** toe
+        hi = 1.0 - bb * ((1.0 - x) / (1.0 - ctr)).clamp_min(1e-12) ** sho
+        out[..., c] = torch.where(x <= ctr, lo, hi).clamp_min(0.0) ** gam
+    return out
+
+
+def test_apply_ppisp_matches_an_independent_transcription_of_brush():
+    torch.manual_seed(20)
+    rgb = torch.rand(17, 23, 3)
+    vig = torch.tensor([[0.02, -0.01, -1.4, 0.3, 0.0],
+                        [-0.03, 0.05, -0.9, 0.0, 0.2],
+                        [0.0, 0.0, -2.1, 0.6, -0.3]])
+    crf = LA.crf_identity_raw().expand(3, 4).clone()
+    crf = crf + torch.tensor([[0.2, -0.3, 0.4, 0.1],
+                              [-0.1, 0.2, -0.2, -0.3],
+                              [0.3, 0.1, 0.15, 0.05]])
+    got = LA.apply_ppisp(rgb, vig, crf)
+    ref = _reference_ppisp(rgb, vig, crf)
+    assert torch.allclose(got, ref, atol=2e-6), (got - ref).abs().max()
+
+
+def test_the_ppisp_fixture_separates_the_two_stages():
+    """Discriminating power against the two mutants that survived first time:
+    the fixture's parameters must make BOTH stages matter, or dropping either is
+    invisible."""
+    torch.manual_seed(21)
+    rgb = torch.rand(17, 23, 3)
+    vig = torch.tensor([[0.02, -0.01, -1.4, 0.3, 0.0]] * 3)
+    crf = LA.crf_identity_raw().expand(3, 4).clone() + 0.4
+    ident_v = torch.zeros(3, 5)
+    ident_c = LA.crf_identity_raw().expand(3, 4).clone()
+    full = _reference_ppisp(rgb, vig, crf)
+    no_vig = _reference_ppisp(rgb, ident_v, crf)
+    no_crf = _reference_ppisp(rgb, vig, ident_c)
+    assert float(((full - no_vig) ** 2).mean()) > 1e-3
+    assert float(((full - no_crf) ** 2).mean()) > 1e-3
