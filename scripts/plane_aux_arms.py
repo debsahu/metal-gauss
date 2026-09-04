@@ -200,6 +200,27 @@ def check_floors_match(configs: list[dict], base_depth_source: str, dn: float,
                 f"drop --skip-floors.")
 
 
+PRIMARY_TAG = "P0"
+
+
+def write_grade(out: Path, tag: str, doc: dict) -> None:
+    """Write `grade_<tag>.json` always, and `grade.json` ONLY for the primary treatment.
+
+    A DEFECT THIS FIXES, caught in flight rather than by review. `--regrade` wrote
+    `grade.json` unconditionally, so re-grading the step-7 arm (`--treatment-tag M0`)
+    OVERWROTE the step-5 scene verdict with the metric-space one -- and `--summary` reads
+    `grade.json`. The cross-scene decision would then have been computed from the wrong
+    arm's verdicts and reported as the plane-aux result, with nothing erroring: both files
+    are well-formed grades of real arms, differing only in which arm they grade.
+
+    The scene decision belongs to the PRE-REGISTERED arm (P0). Everything else gets its own
+    file and cannot silently take its place.
+    """
+    (out / f"grade_{tag}.json").write_text(json.dumps(doc, indent=2))
+    if tag == PRIMARY_TAG:
+        (out / "grade.json").write_text(json.dumps(doc, indent=2))
+
+
 def collect_scenes(root: Path, scenes_csv: str) -> dict[str, dict]:
     """Load exactly the named scenes' grade.json, and refuse anything else.
 
@@ -404,7 +425,7 @@ def main() -> None:
         out = Path(a.out)
         fl = json.loads((out / "floors.json").read_text())["floors"]
         doc = grade(a.scene, a.dn, battery(out, a.treatment_tag), fl)
-        (out / "grade.json").write_text(json.dumps(doc, indent=2))
+        write_grade(out, a.treatment_tag, doc)
         print(json.dumps({k: doc[k] for k in
                           ("scene", "scene_pass", "scene_drop",
                            "falsifier_triggered_on_this_scene", "geometry_gate",
@@ -467,8 +488,7 @@ def main() -> None:
         raise SystemExit(f"treatment arm reports depth_source={t['depth_source']!r}, asked "
                          f"for {src!r}: the flag did not survive resolve_depth_source.")
     doc = grade(a.scene, a.dn, t, fl)
-    (out / f"grade_{tag}.json").write_text(json.dumps(doc, indent=2))
-    (out / "grade.json").write_text(json.dumps(doc, indent=2))
+    write_grade(out, tag, doc)
     (out / "ALL_DONE").write_text("")
     print(json.dumps({k: doc[k] for k in
                       ("scene", "scene_pass", "scene_drop",

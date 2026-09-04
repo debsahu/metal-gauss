@@ -7,6 +7,7 @@ and least likely to be noticed.
 
 These need no GPU and no artifacts.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -340,3 +341,30 @@ def test_the_floors_space_override_DEFAULTS_to_the_treatments_space():
         check_floors_match(disparity_floors, "center", 0.0, "" or "metric")
     # flag set to the BASE's space -> allowed, and only then
     check_floors_match(disparity_floors, "center", 0.0, "disparity" or "metric")
+
+
+# ------------------------------------- a non-primary grade must not become THE verdict
+
+def test_only_the_PRIMARY_treatment_writes_grade_json(tmp_path):
+    """A DEFECT CAUGHT IN FLIGHT, now pinned.
+
+    `--regrade` wrote `grade.json` unconditionally, so re-grading the step-7 arm
+    (`--treatment-tag M0`) OVERWROTE the step-5 scene verdict with the metric-space one --
+    and `--summary` reads `grade.json`. The cross-scene decision would then have been
+    computed from the wrong arm and reported as the plane-aux result, with NOTHING
+    ERRORING: both files are well-formed grades of real arms, differing only in which arm
+    they grade. It actually happened, and was caught only because the two verdicts
+    disagreed visibly.
+
+    The scene verdict belongs to the pre-registered arm. P0 writes both files; every other
+    tag writes only its own.
+    """
+    from plane_aux_arms import write_grade
+    write_grade(tmp_path, "P0", {"scene": "s", "which": "plane-aux"})
+    assert (tmp_path / "grade_P0.json").exists()
+    assert json.loads((tmp_path / "grade.json").read_text())["which"] == "plane-aux"
+
+    write_grade(tmp_path, "M0", {"scene": "s", "which": "metric-space"})
+    assert json.loads((tmp_path / "grade_M0.json").read_text())["which"] == "metric-space"
+    assert json.loads((tmp_path / "grade.json").read_text())["which"] == "plane-aux", \
+        "a non-primary arm overwrote the scene verdict that --summary reads"
