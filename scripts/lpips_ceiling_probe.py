@@ -90,41 +90,58 @@ def run_fitter(name, renders, gts, args):
 
 
 def synthetic_control(name, renders, metric, args, device):
-    """C1. Corrupt the render with `name`'s OWN family, then refit toward the
-    UNCORRUPTED render and report the fraction of the induced dLPIPS recovered.
+    """C1. Build a TARGET that `name`'s own family can express exactly, starting
+    from the render, and report the fraction of the induced dLPIPS the fitter
+    recovers. A no-op fitter recovers 0; a working one recovers ~1.
 
-    The target is the clean render, so LPIPS(target, target) == 0 and the induced
-    distance IS the whole of what a working fitter must remove.
+    THE DIRECTION IS FORWARD, AND THE FIRST VERSION HAD IT BACKWARDS. It
+    corrupted the render and asked the fitter to INVERT the corruption, which is
+    only legitimate for an invertible family. PPISP's vignetting is
+    `clamp(1 + a0 r^2 + ..., 0, 1)` -- capped at 1, so it can only DARKEN
+    (ppisp_math.rs:332-347, and this repo's own
+    `test_vig_falloff_matches_the_hand_computed_polynomial` asserts the clamp).
+    Undoing a radial darkening needs a radial BRIGHTENING, which the per-camera
+    stages cannot express at all: Brush brightens with the per-FRAME exposure
+    stage, which is deliberately absent here because a per-frame stage on a
+    held-out view is the per-view cheat this trainer forbids.
+
+    Measured, 1500 steps, lr 0.05, one 64x80 view: fitting the INVERSE direction
+    leaves 12.2% of the MSE; fitting the FORWARD direction leaves 0.001%. So the
+    old control was reporting `passed=False` for a fitter that works perfectly,
+    on a task no correct implementation could have done -- a control that a
+    correct implementation fails, which is the mirror image of a control that a
+    broken one passes, and just as useless.
     """
     torch.manual_seed(0)
-    clean = renders
+    start = renders
     if name == "affine":
         m = torch.tensor([[1.09, 0.04, -0.02], [0.0, 0.94, 0.03],
                           [0.03, -0.01, 1.06]], device=device)
         b = torch.tensor([0.02, -0.012, 0.025], device=device)
-        bad = [(r @ m.T + b).clamp(0, 1) for r in clean]
+        target = [(r @ m.T + b).clamp(0, 1) for r in start]
     elif name.startswith("bilagrid_tv"):
-        bad = [(r * _smooth_gain(*r.shape[:2], device)).clamp(0, 1) for r in clean]
+        target = [(r * _smooth_gain(*r.shape[:2], device)).clamp(0, 1) for r in start]
     elif name == "ppisp":
         vig = torch.tensor([[0.02, -0.01, -1.3, 0.25, 0.0]] * 3, device=device)
         crf = LA.crf_identity_raw(device).expand(3, 4).clone() + 0.35
-        bad = [LA.apply_ppisp(r, vig, crf) for r in clean]
+        target = [LA.apply_ppisp(r, vig, crf) for r in start]
     else:
         raise ValueError(name)
-    fits, _ = run_fitter(name, bad, clean, args)
-    induced = [metric(LA.quantize(b), LA.quantize(c)) for b, c in zip(bad, clean)]
-    left = [metric(LA.quantize(f), LA.quantize(c)) for f, c in zip(fits, clean)]
+    fits, _ = run_fitter(name, start, target, args)
+    induced = [metric(LA.quantize(s), LA.quantize(t)) for s, t in zip(start, target)]
+    left = [metric(LA.quantize(f), LA.quantize(t)) for f, t in zip(fits, target)]
     rec = [(i - l) for i, l in zip(induced, left)]
     frac = [r / i if i > 1e-9 else float("nan") for r, i in zip(rec, induced)]
     ok = [f for f in frac if f == f]
-    return {"induced_lpips_mean": statistics.fmean(induced),
+    return {"direction": "forward: target = family(render), fit render -> target",
+            "induced_lpips_mean": statistics.fmean(induced),
             "residual_lpips_mean": statistics.fmean(left),
             "recovered_mean": statistics.fmean(rec),
             "recovered_fraction_mean": statistics.fmean(ok) if ok else float("nan"),
             "recovered_fraction_min": min(ok) if ok else float("nan"),
             "floor": RECOVERY_FLOOR,
             "passed": bool(ok) and statistics.fmean(ok) >= RECOVERY_FLOOR,
-            "n_views": len(clean)}
+            "n_views": len(start)}
 
 
 def main(argv=None) -> None:

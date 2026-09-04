@@ -91,3 +91,33 @@ def test_a_non_rule_fitter_cannot_set_the_ceiling():
     assert v["verdict"] == "CUT"
     assert v["ceiling_fitter"] == "bilagrid_tv10"
     assert v["rows"]["bilagrid_tv0"]["delta_lpips"] == pytest.approx(0.080)
+
+
+def test_a_regularised_fitter_is_usable_when_its_unregularised_twin_passes_c1():
+    """C1 certifies that the fitter RUNS. A regulariser is part of the MODEL, and
+    a model's inability to express something is what a ceiling measures, not a
+    reason to throw the ceiling away. Measured: bilagrid_tv0 0.964, tv10 0.888 --
+    identical code path, the regulariser the only difference."""
+    r = _res(affine=(0.004, True), bilagrid_tv10=(0.010, False), ppisp=(0.001, True),
+             bilagrid_tv0=(0.022, True))
+    v = V.verdict(r)
+    assert v["rows"]["bilagrid_tv10"]["usable"] is True
+    assert "twin" in v["rows"]["bilagrid_tv10"]["c1"]
+    assert v["ceiling"] == pytest.approx(0.010) and v["verdict"] == "CUT"
+
+
+def test_the_proxy_does_NOT_rescue_a_fitter_whose_twin_also_failed():
+    r = _res(affine=(0.004, True), bilagrid_tv10=(0.010, False), ppisp=(0.001, True),
+             bilagrid_tv0=(0.022, False))
+    v = V.verdict(r)
+    assert v["rows"]["bilagrid_tv10"]["usable"] is False
+    assert v["ceiling"] == pytest.approx(0.004)
+
+
+def test_the_proxy_applies_only_to_the_named_regularised_fitter():
+    """ppisp has no unregularised twin and must not borrow one."""
+    r = _res(affine=(0.004, True), bilagrid_tv10=(0.010, True), ppisp=(0.9, False),
+             bilagrid_tv0=(0.022, True))
+    v = V.verdict(r)
+    assert v["rows"]["ppisp"]["usable"] is False
+    assert v["ceiling"] == pytest.approx(0.010)

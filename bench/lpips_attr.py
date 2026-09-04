@@ -226,7 +226,8 @@ def read_result(path) -> dict:
 # bound is the PHOTOMETRIC COMPONENT of the held-out residual -- the only
 # component any appearance model could reduce by any route, direct or indirect.
 
-def apply_ppisp(rgb: torch.Tensor, vig: torch.Tensor, crf: torch.Tensor) -> torch.Tensor:
+def apply_ppisp(rgb: torch.Tensor, vig: torch.Tensor, crf: torch.Tensor,
+                uv: torch.Tensor | None = None) -> torch.Tensor:
     """PPISP's PER-CAMERA stages only: vignetting then CRF (ppisp_kernels.rs:82-168).
 
     The per-FRAME stages (exposure, colour homography) are deliberately absent.
@@ -235,7 +236,9 @@ def apply_ppisp(rgb: torch.Tensor, vig: torch.Tensor, crf: torch.Tensor) -> torc
     wearing a shared model's name.
     """
     h, w, _ = rgb.shape
-    f = vig_falloff(vig_uv(h, w, rgb.device, rgb.dtype), vig)
+    if uv is None:                       # constant across a fit; pass it in to reuse
+        uv = vig_uv(h, w, rgb.device, rgb.dtype)
+    f = vig_falloff(uv, vig)
     return crf_apply((rgb * f).clamp(0.0, 1.0), crf)
 
 
@@ -307,19 +310,20 @@ def fit_ppisp_shared(renders: list[torch.Tensor], gts: list[torch.Tensor],
     crf = crf_identity_raw(dev).expand(3, 4).clone().requires_grad_(True)
     opt = torch.optim.Adam([vig, crf], lr=lr, betas=tuple(betas))
     n = len(renders)
+    uvs = [vig_uv(*r.shape[:2], r.device, r.dtype) for r in renders]
     curve = []
     for s in range(steps):
         opt.zero_grad(set_to_none=True)
         tot = 0.0
-        for r, g in zip(renders, gts):
-            mse = ((apply_ppisp(r, vig, crf) - g) ** 2).mean() / n
+        for r, g, uv in zip(renders, gts, uvs):
+            mse = ((apply_ppisp(r, vig, crf, uv) - g) ** 2).mean() / n
             mse.backward()
             tot += float(mse.detach())
         opt.step()
         if s % log_every == 0 or s == steps - 1:
             curve.append([s, tot])
     with torch.no_grad():
-        fits = [apply_ppisp(r, vig, crf) for r in renders]
+        fits = [apply_ppisp(r, vig, crf, uv) for r, uv in zip(renders, uvs)]
     before = float(sum(((r - g) ** 2).mean() for r, g in zip(renders, gts)) / n)
     after = float(sum(((f - g) ** 2).mean() for f, g in zip(fits, gts)) / n)
     return fits, {"fitter": "ppisp_shared", "steps": steps, "lr": lr, "n_params": 27,
