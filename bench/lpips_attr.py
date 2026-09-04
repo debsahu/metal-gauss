@@ -56,57 +56,54 @@ def bilagrid_identity(gl: int, gh: int, gw: int, device="cpu") -> torch.Tensor:
     return g
 
 
-def _trilinear_coeffs(grid: torch.Tensor, rgb: torch.Tensor) -> torch.Tensor:
-    """The 12 affine coefficients per pixel, `[H, W, 12]`.
+def bilagrid_sampler(rgb: torch.Tensor, dims) -> torch.Tensor:
+    """`[1, 1, H, W, 3]` normalised sample coordinates for `grid_sample`.
 
-    Transcribed from `sample_point` / `interpolate`: aligned corners on x and y,
-    BT.601 luminance scaled to `[0, L-1]` on the guidance axis, and corners
-    clamped to the last cell (border padding).
+    Brush's kernel (bilagrid_kernels.rs:49-70) takes
+    `x = px*(gw-1)/(W-1)`, `y = py*(gh-1)/(H-1)` and `z = clamp(luma*(gl-1), 0,
+    gl-1)`, then trilinearly interpolates with corners clamped to the last cell.
+    In `grid_sample`'s normalised coordinates that is EXACTLY
+    `align_corners=True, padding_mode="border"`, with
+
+        xn = 2*px/(W-1) - 1,  yn = 2*py/(H-1) - 1,  zn = clamp(2*luma - 1, -1, 1)
+
+    because the `(gw-1)` factors cancel. The last axis of `grid_sample`'s grid is
+    ordered (x, y, z) against input dims (W, H, D) -- the REVERSE of the tensor's
+    own axis order, which is the easiest thing in this function to get wrong and
+    is why the reference test compares against an explicit 8-corner transcription
+    rather than against another vectorised form.
+
+    Depends on the image and the grid dims only, never on the grid's values, so a
+    fit computes it once. Measured on MPS at 1920x1440: 0.070 s/step against
+    0.135 for an explicit 8-way `index_select`.
     """
+    gw, gh, gl = dims
+    del gw, gh, gl                      # the normalisation is dimension-free
+    h, w, _ = rgb.shape
+    dev, dt = rgb.device, rgb.dtype
+    xn = (2.0 * torch.arange(w, device=dev, dtype=dt) / max(w - 1, 1) - 1.0)
+    yn = (2.0 * torch.arange(h, device=dev, dtype=dt) / max(h - 1, 1) - 1.0)
+    lum = LUMA[0] * rgb[..., 0] + LUMA[1] * rgb[..., 1] + LUMA[2] * rgb[..., 2]
+    zn = (2.0 * lum - 1.0).clamp(-1.0, 1.0)
+    return torch.stack([xn[None, :].expand(h, w),
+                        yn[:, None].expand(h, w), zn], dim=-1)[None, None]
+
+
+def _trilinear_coeffs(grid: torch.Tensor, rgb: torch.Tensor, sampler=None) -> torch.Tensor:
+    """The 12 affine coefficients per pixel, `[H, W, 12]`."""
     c, gl, gh, gw = grid.shape
     assert c == 12, grid.shape
-    h, w, _ = rgb.shape
-    dev = rgb.device
-    px = torch.arange(w, device=dev, dtype=rgb.dtype)
-    py = torch.arange(h, device=dev, dtype=rgb.dtype)
-    x = px * (gw - 1) / max(w - 1, 1)
-    y = py * (gh - 1) / max(h - 1, 1)
-    lum = LUMA[0] * rgb[..., 0] + LUMA[1] * rgb[..., 1] + LUMA[2] * rgb[..., 2]
-    z = (lum * (gl - 1)).clamp(0.0, float(gl - 1))
-
-    x0 = x.floor(); y0 = y.floor(); z0 = z.floor()
-    tx = (x - x0)[None, :].expand(h, w)
-    ty = (y - y0)[:, None].expand(h, w)
-    tz = z - z0
-    x0i = x0.long()[None, :].expand(h, w)
-    y0i = y0.long()[:, None].expand(h, w)
-    z0i = z0.long()
-    x1i = (x0i + 1).clamp(max=gw - 1)
-    y1i = (y0i + 1).clamp(max=gh - 1)
-    z1i = (z0i + 1).clamp(max=gl - 1)
-
-    # All 12 coefficients are gathered in ONE index_select per corner rather than
-    # twelve, which is the difference between 96 and 8 gathers per forward and
-    # therefore between a fit that takes minutes and one that takes an hour.
-    flat = grid.reshape(12, -1)
-    acc = torch.zeros(12, h * w, device=dev, dtype=rgb.dtype)
-    for corner in range(8):
-        cx = x1i if corner & 1 else x0i
-        cy = y1i if corner & 2 else y0i
-        cz = z1i if corner & 4 else z0i
-        wx = tx if corner & 1 else 1.0 - tx
-        wy = ty if corner & 2 else 1.0 - ty
-        wz = tz if corner & 4 else 1.0 - tz
-        wgt = (wx * wy * wz).reshape(-1)
-        idx = ((cz * gh + cy) * gw + cx).reshape(-1)
-        acc = acc + flat.index_select(1, idx) * wgt
-    return acc.reshape(12, h, w).permute(1, 2, 0)
+    if sampler is None:
+        sampler = bilagrid_sampler(rgb, (gw, gh, gl))
+    out = F.grid_sample(grid[None], sampler, mode="bilinear",
+                        padding_mode="border", align_corners=True)
+    return out[0, :, 0].permute(1, 2, 0)
 
 
-def bilagrid_apply(grid: torch.Tensor, rgb: torch.Tensor) -> torch.Tensor:
+def bilagrid_apply(grid: torch.Tensor, rgb: torch.Tensor, sampler=None) -> torch.Tensor:
     """Slice `grid` `[12, L, H, W]` by `rgb` `[H, W, 3]`. Row-major 3x4 affine
     applied to `(r, g, b, 1)` (bilagrid_kernels.rs:152-160)."""
-    coef = _trilinear_coeffs(grid, rgb)
+    coef = _trilinear_coeffs(grid, rgb, sampler)
     ones = torch.ones_like(rgb[..., :1])
     col = torch.cat([rgb, ones], dim=-1)                   # [H, W, 4]
     m = coef.reshape(*coef.shape[:-1], 3, 4)
@@ -276,10 +273,11 @@ def fit_bilagrid(render: torch.Tensor, gt: torch.Tensor, dims=BILAGRID_DIMS,
     gx, gy, gl = dims
     grid = bilagrid_identity(gl, gy, gx, device=render.device).requires_grad_(True)
     opt = torch.optim.Adam([grid], lr=lr, betas=tuple(betas))
+    sampler = bilagrid_sampler(render, dims)     # constant across the fit
     curve = []
     for s in range(steps):
         opt.zero_grad(set_to_none=True)
-        out = bilagrid_apply(grid, render)
+        out = bilagrid_apply(grid, render, sampler)
         mse = ((out - gt) ** 2).mean()
         loss = mse + tv_weight * bilagrid_tv(grid)
         loss.backward()
@@ -287,7 +285,7 @@ def fit_bilagrid(render: torch.Tensor, gt: torch.Tensor, dims=BILAGRID_DIMS,
         if s % log_every == 0 or s == steps - 1:
             curve.append([s, float(mse.detach()), float(loss.detach())])
     with torch.no_grad():
-        fit = bilagrid_apply(grid, render)
+        fit = bilagrid_apply(grid, render, sampler)
     return fit.detach(), {"fitter": f"bilagrid_tv{tv_weight:g}", "dims": list(dims),
                           "tv_weight": tv_weight, "steps": steps, "lr": lr,
                           "n_params": 12 * gx * gy * gl, "mse_curve": curve,

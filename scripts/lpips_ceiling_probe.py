@@ -78,11 +78,13 @@ def run_fitter(name, renders, gts, args):
         return [f for f, _ in out], [i for _, i in out]
     if name.startswith("bilagrid_tv"):
         tv = float(name[len("bilagrid_tv"):])
-        out = [LA.fit_bilagrid(r, g, tv_weight=tv, steps=args.bilagrid_steps)
+        out = [LA.fit_bilagrid(r, g, tv_weight=tv, steps=args.bilagrid_steps,
+                               lr=args.bilagrid_lr)
                for r, g in zip(renders, gts)]
         return [f for f, _ in out], [i for _, i in out]
     if name == "ppisp":
-        fits, info = LA.fit_ppisp_shared(renders, gts, steps=args.ppisp_steps)
+        fits, info = LA.fit_ppisp_shared(renders, gts, steps=args.ppisp_steps,
+                                         lr=args.ppisp_lr)
         return fits, [info] * len(fits)
     raise ValueError(f"unknown fitter {name!r}")
 
@@ -136,8 +138,14 @@ def main(argv=None) -> None:
     ap.add_argument("--device", default="mps")
     ap.add_argument("--net", default="vgg")
     ap.add_argument("--bilagrid-steps", type=int, default=LA.BILAGRID_STEPS)
+    ap.add_argument("--bilagrid-lr", type=float, default=LA.BILAGRID_LR)
     ap.add_argument("--ppisp-steps", type=int, default=500)
+    ap.add_argument("--ppisp-lr", type=float, default=2e-3)
     ap.add_argument("--synthetic-control", action="store_true")
+    ap.add_argument("--control-views", type=int, default=6,
+                    help="views used by C1. C1 is a control on the FITTER's "
+                         "mechanics, not a scene statistic, so it does not need "
+                         "the full split; the count used is recorded.")
     ap.add_argument("--tag", default="")
     a = ap.parse_args(argv)
 
@@ -162,6 +170,9 @@ def main(argv=None) -> None:
     res = {"stage": "step3_ceiling", "scene": a.scene, "arm": a.arm, "tag": a.tag,
            "dump": str(a.dump), "device": dev, "net": a.net,
            "image_hw": list(renders[0].shape[:2]), "n_views": len(ps), "views": stems,
+           "config": {"bilagrid_steps": a.bilagrid_steps, "bilagrid_lr": a.bilagrid_lr,
+                      "ppisp_steps": a.ppisp_steps, "ppisp_lr": a.ppisp_lr,
+                      "max_views": a.max_views},
            "px_per_bilagrid_cell_bin":
                renders[0].shape[0] * renders[0].shape[1] / (16 * 16 * 8),
            "baseline": {"lpips_per_view": dict(zip(stems, base_l)),
@@ -192,7 +203,9 @@ def main(argv=None) -> None:
                  "wall_s": round(time.perf_counter() - t0, 1),
                  "info_first_view": info[0]}
         if a.synthetic_control:
-            entry["synthetic_control_c1"] = synthetic_control(name, renders, metric, a, dev)
+            k = max(1, len(renders) // max(1, a.control_views))
+            entry["synthetic_control_c1"] = synthetic_control(
+                name, renders[::k][:a.control_views], metric, a, dev)
         res["fitters"][name] = entry
         c1 = entry.get("synthetic_control_c1")
         print(f"{a.scene}/{a.arm} {name:14s} dLPIPS {entry['delta_lpips_mean']:+.5f} "
