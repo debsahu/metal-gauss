@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Task 21 step 5: apply the pre-registered decision rule to the measurements.
+
+    bench/lpips_verdict.py --out-root R --scene pgeom --arm R1 [--tag T]
+                           [--capacity-delta X] [--capacity-floor F]
+
+The rule, from the pre-registration commit and its one amendment, restated here
+so the code and the record cannot drift apart:
+
+  BUILD Task 22 iff the best of fitters (a) affine, (b) bilagrid at Brush's
+        tv 10, (c) shared PPISP recovers dLPIPS >= 0.015 on P-GEOM held-out --
+        10% of the 0.147 gap to the gate, 20x the 0.00073 floor.
+  SHAPE if built: (c) >= 0.80 * (b) => PPISP stages, else the bilateral grid.
+  DEFER, overriding BUILD: if the capacity arm moves LPIPS by more than (b)'s
+        ceiling, capacity is the finding and Task 22 waits behind it.
+  AMENDMENT: a fitter's number is usable only if its C1 synthetic control passed
+        (>= 0.90 of its own injected distortion recovered). A fitter that failed
+        C1 is a failed control, NEVER a null.
+
+THE CONSEQUENCE OF THAT LAST CLAUSE IS THE POINT OF THIS FILE. If every fitter
+in the rule fails C1, there is NO VERDICT -- not a CUT. An unconverged fit and a
+scene with no photometric component both return dLPIPS ~= 0, and letting the
+first masquerade as the second is precisely how a probe manufactures the answer
+it was built to test.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from bench import lpips_attr as LA                                    # noqa: E402
+
+BUILD_THRESHOLD = 0.015          # pre-registered
+SHAPE_FRACTION = 0.80            # pre-registered
+RULE_FITTERS = ("affine", "bilagrid_tv10", "ppisp")     # the plan's (a), (b), (c)
+GRID_FITTER = "bilagrid_tv10"
+PPISP_FITTER = "ppisp"
+
+
+def usable(entry: dict) -> tuple[bool, str]:
+    c1 = entry.get("synthetic_control_c1")
+    if c1 is None:
+        return False, "no C1 synthetic control was run"
+    if not c1.get("passed"):
+        return False, (f"C1 FAILED: recovered {c1.get('recovered_fraction_mean'):.3f} "
+                       f"of its own injected distortion, floor {c1.get('floor')}")
+    return True, "C1 passed"
+
+
+def verdict(res: dict, capacity_delta: float | None = None,
+            capacity_floor: float | None = None) -> dict:
+    fitters = res["fitters"]
+    rows, usable_rows = {}, {}
+    for name in sorted(fitters):
+        e = fitters[name]
+        ok, why = usable(e)
+        rows[name] = {"delta_lpips": e["delta_lpips_mean"],
+                      "delta_psnr": e["delta_psnr_mean"],
+                      "n_params_per_view": e["n_params_per_view"],
+                      "usable": ok, "c1": why}
+        if ok and name in RULE_FITTERS:
+            usable_rows[name] = e["delta_lpips_mean"]
+
+    out = {"stage": "step5_verdict", "scene": res["scene"], "arm": res["arm"],
+           "tag": res.get("tag", ""), "n_views": res["n_views"],
+           "baseline_lpips": res["baseline"]["lpips_mean"],
+           "baseline_psnr": res["baseline"]["psnr_mean"],
+           "build_threshold": BUILD_THRESHOLD, "rows": rows}
+
+    if not usable_rows:
+        out.update(verdict="NO VERDICT", why=(
+            "every fitter in the rule failed or lacked its C1 synthetic control. "
+            "An unconverged fit and a scene with no photometric component return "
+            "the same dLPIPS; a CUT may not be read off a failed control."))
+        return out
+
+    best_name = max(usable_rows, key=usable_rows.get)
+    ceiling = usable_rows[best_name]
+    out.update(ceiling_fitter=best_name, ceiling=ceiling,
+               excluded=[n for n in RULE_FITTERS if n not in usable_rows])
+
+    if capacity_delta is not None:
+        grid = usable_rows.get(GRID_FITTER)
+        out["capacity_delta_lpips"] = capacity_delta
+        out["capacity_floor"] = capacity_floor
+        out["capacity_grid_ceiling"] = grid
+        if grid is not None and capacity_delta > grid:
+            out.update(verdict="DEFER",
+                       why=(f"the capacity arm moved LPIPS by {capacity_delta:.5f}, "
+                            f"more than fitter (b)'s ceiling {grid:.5f}. Capacity is "
+                            f"the finding; Task 22 waits behind a capacity item."))
+            return out
+
+    if ceiling < BUILD_THRESHOLD:
+        out.update(verdict="CUT", why=(
+            f"the best usable fitter ({best_name}) recovers {ceiling:.5f}, under the "
+            f"pre-registered {BUILD_THRESHOLD}. A free post-hoc per-view fit cannot "
+            f"recover the LPIPS, so nothing constrained and indirect can."))
+        return out
+
+    grid = usable_rows.get(GRID_FITTER)
+    pp = usable_rows.get(PPISP_FITTER)
+    if grid is not None and pp is not None and pp >= SHAPE_FRACTION * grid:
+        shape = "ppisp"
+    elif grid is not None:
+        shape = "bilagrid"
+    else:
+        shape = "UNDECIDED (fitter (b) is not usable)"
+    out.update(verdict="BUILD", shape=shape, why=(
+        f"the best usable fitter ({best_name}) recovers {ceiling:.5f} >= "
+        f"{BUILD_THRESHOLD}. Shape from (c)/(b) = "
+        f"{'n/a' if not (grid and pp) else f'{pp / grid:.3f}'}."))
+    return out
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out-root", required=True)
+    ap.add_argument("--scene", default="pgeom")
+    ap.add_argument("--arm", default="R1")
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--capacity-delta", type=float, default=None)
+    ap.add_argument("--capacity-floor", type=float, default=None)
+    ap.add_argument("--write", default=None)
+    a = ap.parse_args(argv)
+    name = f"{a.scene}__{a.arm}{('__' + a.tag) if a.tag else ''}.json"
+    res = LA.read_result(Path(a.out_root) / "step3" / name)
+    if res.get("stage") != "step3_ceiling":
+        raise ValueError(f"{name}: stage {res.get('stage')!r} is not step3_ceiling")
+    v = verdict(res, a.capacity_delta, a.capacity_floor)
+    print(json.dumps(v, indent=2))
+    if a.write:
+        LA.write_json(a.write, v)
+
+
+if __name__ == "__main__":
+    main()

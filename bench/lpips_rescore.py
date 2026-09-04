@@ -86,25 +86,48 @@ def dist(vals: list[float]) -> dict:
             "frac_above_mean_plus_0p1": sum(1 for x in v if x > mean + 0.1) / n}
 
 
+def composite(render: torch.Tensor, gt: torch.Tensor, mask_path) -> torch.Tensor:
+    """Replace the DROPPED region with ground truth, so it contributes nothing.
+
+    `View.mask` is uint8 with 255 = KEEP, so `m01 = mask/255` is 1 where the
+    pixel is trained on. The shipped LPIPS convention is full-frame with those
+    regions rendered BLACK against real GT content, which on a masked capture
+    charges the metric for pixels the trainer was told to ignore. The difference
+    between the two numbers is the size of that convention effect.
+
+    CAVEAT, stated because it bounds what the number means: LPIPS is not
+    pixel-local, so pasting GT in leaves a seam at the mask boundary that VGG
+    still sees. This is an estimate of the convention's contribution, not an
+    exact removal of it.
+    """
+    m = load_rgb(mask_path)[..., :1]
+    return render * m + gt * (1.0 - m)
+
+
 def score(args) -> None:
     dump = Path(args.dump)
     ps = pairs(dump)
     nets = args.nets.split(",")
+    mode = getattr(args, "mask_mode", "full")
+    if mode == "composite" and not any(m is not None for _, _, _, m in ps):
+        raise ValueError(f"{dump}: --mask-mode composite but the dump has no *_mask.png")
     per_view: dict[str, dict[str, float]] = {n: {} for n in nets}
     black = {}
     for net in nets:
         metric = make_metric(net)
-        for stem, rp, gp, _ in ps:
+        for stem, rp, gp, mp in ps:
             r, g = load_rgb(rp), load_rgb(gp)
             if r.shape != g.shape:
                 raise ValueError(f"{stem}: render {tuple(r.shape)} vs gt {tuple(g.shape)}")
+            if mode == "composite":
+                r = composite(r, g, mp)
             per_view[net][stem] = metric(r, g)
             if net == nets[0]:
                 black[stem] = float((r.sum(-1) == 0).float().mean())
 
     committed = dump / "lpips.json"
     self_check = {"file": str(committed), "present": committed.exists()}
-    if committed.exists() and "vgg" in per_view:
+    if committed.exists() and "vgg" in per_view and mode == "full":
         c = json.loads(committed.read_text())
         got = statistics.fmean(per_view["vgg"].values())
         self_check.update(committed_net=c.get("net"), committed_mean=c.get("mean"),
@@ -116,8 +139,10 @@ def score(args) -> None:
         self_check["passed"] = None
 
     out = LA.write_json(
-        Path(args.out_root) / "step1" / f"{args.scene}__{args.arm}.json",
+        Path(args.out_root) / "step1" /
+        f"{args.scene}__{args.arm}{'' if mode == 'full' else '__' + mode}.json",
         {"stage": "step1_rescore", "scene": args.scene, "arm": args.arm,
+         "mask_mode": mode,
          "dump": str(dump), "n_views": len(ps),
          "has_mask_files": any(m is not None for _, _, _, m in ps),
          "image_hw": list(load_rgb(ps[0][1]).shape[:2]),
@@ -144,7 +169,7 @@ def summary(args) -> None:
         d = LA.read_result(f)                     # refuses a foreign kind/schema
         if d.get("stage") != "step1_rescore":
             raise ValueError(f"{f}: stage {d.get('stage')!r} is not step1_rescore")
-        key = (d["scene"], d["arm"])
+        key = (d["scene"], d["arm"], d.get("mask_mode", "full"))
         if key in seen:
             raise ValueError(f"duplicate (scene, arm) {key}: {seen[key]} and {f}")
         seen[key] = f
@@ -153,7 +178,8 @@ def summary(args) -> None:
                              f"reproduce the committed lpips.json; no summary is valid")
         rows.append(d)
     if args.require:
-        want = {tuple(x.split("/", 1)) for x in args.require.split(",")}
+        want = {(a, b, "full") for a, b in
+                (x.split("/", 1) for x in args.require.split(","))}
         missing = want - set(seen)
         if missing:
             raise ValueError(f"missing required (scene, arm): {sorted(missing)}")
@@ -183,6 +209,9 @@ def main(argv=None):
     s.add_argument("--arm", required=True)
     s.add_argument("--out-root", required=True)
     s.add_argument("--nets", default="vgg,alex")
+    s.add_argument("--mask-mode", choices=["full", "composite"], default="full",
+                   help="full = the shipped convention (masked pixels render black "
+                        "against GT content); composite = dropped region replaced by GT")
     s.set_defaults(fn=score)
     m = sub.add_parser("summary")
     m.add_argument("--out-root", required=True)

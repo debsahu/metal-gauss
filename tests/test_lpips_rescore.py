@@ -109,3 +109,44 @@ def test_dist_reports_the_tail_not_only_the_mean():
 def _args(root, require="", scenes=""):
     import argparse
     return argparse.Namespace(out_root=str(root), scenes=scenes, require=require)
+
+
+def test_composite_replaces_the_DROPPED_region_and_not_the_kept_one(tmp_path):
+    """MASK POLARITY, and it is the expensive one to get wrong. `View.mask` is
+    uint8 255 = KEEP, so compositing must paste ground truth where the mask is
+    0. Inverted, it would neutralise the region the trainer was actually scored
+    on and leave the ignored region charged -- and it would still return a
+    plausible, smaller LPIPS, which is exactly the shape of answer step 1b is
+    looking for."""
+    import torch
+    from PIL import Image
+    render = torch.zeros(4, 4, 3)
+    gt = torch.ones(4, 4, 3)
+    m = np.zeros((4, 4), np.uint8)
+    m[:, :2] = 255                       # left half KEPT, right half dropped
+    p = tmp_path / "m.png"
+    Image.fromarray(m).save(p)
+    out = LR.composite(render, gt, p)
+    assert torch.equal(out[:, :2], render[:, :2]), "kept region must survive"
+    assert torch.equal(out[:, 2:], gt[:, 2:]), "dropped region must become GT"
+
+
+def test_score_refuses_composite_on_a_dump_with_no_masks(tmp_path):
+    import argparse
+    d = _dump(tmp_path)
+    a = argparse.Namespace(dump=str(d), scene="s", arm="a", out_root=str(tmp_path / "o"),
+                           nets="vgg", mask_mode="composite")
+    with pytest.raises(ValueError, match="no \\*_mask.png"):
+        LR.score(a)
+
+
+def test_summary_keys_on_mask_mode_so_the_two_readings_do_not_collide(tmp_path, capsys):
+    """The full-frame and composite numbers for one arm are two measurements of
+    the same arm, not a duplicate."""
+    full = _result("a", "b"); full["mask_mode"] = "full"
+    comp = _result("a", "b"); comp["mask_mode"] = "composite"
+    comp["self_check"] = {"passed": None}
+    LA.write_json(tmp_path / "step1" / "a__b.json", full)
+    LA.write_json(tmp_path / "step1" / "a__b__composite.json", comp)
+    LR.summary(_args(tmp_path))
+    assert "2 arm(s)" in capsys.readouterr().out
