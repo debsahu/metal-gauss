@@ -247,6 +247,19 @@ def split_sh(p: dict) -> dict:
     return p
 
 
+def appearance_lr_at(step: int, base: float, total_steps: int) -> float:
+    """The bilateral grid's LR at `step`, Brush's schedule.
+
+    Thin wrapper so the training loop's one-liner stays readable AND so the
+    schedule is reachable from a test without constructing a trainer. The
+    arithmetic itself is `bilagrid.warmup_exp_lr`, transcribed from
+    brush-appearance/src/lib.rs:159-174 and pinned against an independent
+    transcription in tests/test_bilagrid.py.
+    """
+    from metal_gauss.bilagrid import warmup_exp_lr
+    return warmup_exp_lr(step, base, decay_steps=max(int(total_steps), 1))
+
+
 def make_optimizer(p: dict, lr_means0: float, *, lr_opac: float = 1e-2,
                    sh_lr_div: float = 20.0, selective: bool = False,
                    fused: bool = True):
@@ -533,12 +546,20 @@ def train(args, scene: Scene | None = None) -> dict:
 
     appearance = None
     if args.appearance != "off":
-        appearance = AppearanceModel(len(scene.train), args.appearance, device)
+        bila = args.appearance == "bilagrid"
+        appearance = AppearanceModel(
+            len(scene.train), args.appearance, device,
+            reg_weight=args.appearance_reg,
+            tv_weight=getattr(args, "bilagrid_tv_weight", 10.0),
+            dims=tuple(getattr(args, "bilagrid_dims", (16, 16, 8))))
         opt.add_param_group({"params": list(appearance.parameters()),
-                             "lr": args.lr_appearance, "name": "appearance"})
+                             "lr": args.bilagrid_lr if bila else args.lr_appearance,
+                             "name": "appearance"})
         print(f"appearance correction: {args.appearance} "
               f"({sum(x.numel() for x in appearance.parameters())} params "
-              f"over {len(scene.train)} training images)")
+              f"over {len(scene.train)} training images"
+              + (f", dims {tuple(args.bilagrid_dims)}, tv {args.bilagrid_tv_weight}, "
+                 f"lr {args.bilagrid_lr} warmup-decayed" if bila else "") + ")")
 
     kernel = _gaussian_kernel(device=device)
     rng = np.random.default_rng(0)
@@ -605,6 +626,19 @@ def train(args, scene: Scene | None = None) -> dict:
         gt = v.image.to(device).float() / 255.0
         # Correct the RENDER (not the ground truth) so the exported splat stays
         # in the true photometric space and held-out views need no transform.
+        if appearance is not None and appearance.mode == "bilagrid":
+            # Brush schedules the grid's LR and only the grid's: warmup then
+            # exponential decay (brush-appearance/src/train_state.rs:16-19, 44-53).
+            # Written onto the named group so no gaussian group can be caught by it.
+            for grp in opt.param_groups:
+                if grp.get("name") == "appearance":
+                    # `step - 1`: this trainer's loop is 1-BASED and Brush's step
+                    # counter is 0-based (train_state.rs:388, `self.step` starts at
+                    # 0 and is incremented in end_step). Passing `step` would shift
+                    # the whole schedule by one and, more to the point, would make
+                    # the run's FIRST step skip the coldest warmup value. One step
+                    # in 1000 is negligible in effect and free to get right.
+                    grp["lr"] = appearance_lr_at(step - 1, args.bilagrid_lr, args.steps)
         rgb_c = appearance(rgb, view_idx) if appearance is not None else rgb
         m01 = None if v.mask is None else v.mask.to(device).float() / 255.0
 
@@ -633,7 +667,11 @@ def train(args, scene: Scene | None = None) -> dict:
                 if name in g:
                     loss = loss + w * g[name]
         if appearance is not None:
-            loss = loss + args.appearance_reg * appearance.regulariser()
+            # `reg_weight` is carried on the model because it is a property of the
+            # MODE -- Brush's TV weight 10.0 for the grid, --appearance-reg 1e-2 for
+            # the global modes. The old modes are bit-unchanged by this: their
+            # reg_weight IS args.appearance_reg and they ignore the view index.
+            loss = loss + appearance.reg_weight * appearance.regulariser(view_idx)
         # MCMC regularisers: keep opacity and scale mass in check
         # Regularisers ramp down: they exist to keep early growth honest, not
         # to fight the reconstruction at convergence (Brush's aux_loss_weight).
@@ -778,6 +816,24 @@ def train(args, scene: Scene | None = None) -> dict:
                         "shape": shape})
 
     out = _run_report(args, log, time.perf_counter() - t0, active, env=env)
+    if appearance is not None:
+        ap_sum = appearance.state_summary()
+        # The LR the OPTIMISER actually finished on, read off the group rather than
+        # recomputed from the schedule. A schedule that is computed and never
+        # written to the group is invisible to any test that only checks the
+        # schedule function, and this is the artifact that makes it visible.
+        ap_sum["lr_final"] = next(
+            (g["lr"] for g in opt.param_groups if g.get("name") == "appearance"), None)
+        out["metrics"]["appearance"] = ap_sum
+    else:
+        out["metrics"]["appearance"] = None
+    # EVERY group's finishing LR, not just appearance's. The mutation battery found
+    # that a schedule written to `for grp in opt.param_groups` with the name check
+    # removed would silently overwrite the means, scales, opacity and SH learning
+    # rates with the appearance schedule -- a run-destroying change that no test saw,
+    # because every assertion was about the appearance group. This is the artifact
+    # that makes the OTHER groups checkable.
+    out["metrics"]["lr_groups"] = {g.get("name"): g["lr"] for g in opt.param_groups}
     out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
     out["metrics"]["term_coverage_warning"] = geometry_coverage_warning(term_cov)
     for dest in (args.out, getattr(args, "report", None)):
@@ -1031,12 +1087,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "The earthbyte indoor recipe is 1.0, applied at constant weight "
                          "with no metric normalisation. Dominant measured geometry lever "
                          "in Brush (-14.3 deg thin-axis on playroom, -8.9 on ARKitScenes).")
-    ap.add_argument("--appearance", choices=["off", "gain_bias", "affine"],
+    ap.add_argument("--appearance", choices=["off", "gain_bias", "affine", "bilagrid"],
                     default="off",
                     help="per-training-image photometric correction; held-out "
                          "views always render with the identity transform")
     ap.add_argument("--lr-appearance", type=float, default=1e-3)
     ap.add_argument("--appearance-reg", type=float, default=1e-2)
+    # Bilateral-grid knobs, ALL at Brush's defaults (brush-train/src/config.rs:1005-1031).
+    # They are separate flags rather than reuses of --lr-appearance/--appearance-reg
+    # because the ported values differ by 2x and 1000x respectively, and silently
+    # inheriting this trainer's would run the nuisance model under the ported name.
+    ap.add_argument("--bilagrid-dims", type=int, nargs=3, default=[16, 16, 8],
+                    metavar=("X", "Y", "GUIDANCE"))
+    ap.add_argument("--bilagrid-tv-weight", type=float, default=10.0)
+    ap.add_argument("--bilagrid-lr", type=float, default=2e-3)
     ap.add_argument("--lr-means-end", type=float, default=2e-6)
     ap.add_argument("--lr-scene-scaled", action="store_true", default=True)
     ap.add_argument("--lr-opac", type=float, default=1e-2)

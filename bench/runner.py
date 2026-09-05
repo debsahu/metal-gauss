@@ -167,8 +167,87 @@ def run(spec: dict, *, report: Path | None = None, cwd: Path = ROOT,
     return rep
 
 
+# Argv markers that identify a metal-gauss GPU process. Deliberately narrow: a
+# machine runs many pythons, and firing on all of them would recreate the
+# always-nonzero guard this function was rewritten to fix, just by another route.
+_ARGV_MARKERS = ("metal_gauss", "bench/", "bench.", "-m pytest", "pytest ")
+_COMPETITOR_NAMES = ("spirula", "brush_app", "brush", "msplat-train")
+
+
+def _parse_competitors(ps_text: str, self_pid: int, self_pgid: int) -> list[str]:
+    """Pure half of `gpu_competitors`, so the discriminating cases are testable.
+
+    A test cannot spawn a process outside its own tree, which is exactly the
+    distinction that matters here, so the parsing takes `ps` output as text.
+
+    Two rules, and both are needed:
+      * a NON-python executable whose basename is a known competitor trainer --
+        the original rule, kept unchanged;
+      * a PYTHON process whose argv carries a metal-gauss marker. This is the half
+        that was missing: every metal-gauss process is `python`, so matching the
+        executable name alone made our own trainer and our own test suite
+        invisible, and `require_gpu_exclusive()` returned clean while another
+        agent's GPU suite saturated the machine.
+
+    Our own process TREE is excluded -- self, ancestors, descendants and anything
+    sharing our process group. That is what keeps the old false positive dead: a
+    wrapper shell whose command line merely CONTAINS "brush" is not python and
+    does not match a competitor NAME, and our own children are in our tree.
+    """
+    rows = []
+    for line in ps_text.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+        comm = parts[3]
+        args = parts[4] if len(parts) > 4 else ""
+        rows.append((pid, ppid, pgid, comm, args))
+    by_pid = {r[0]: r for r in rows}
+
+    # DESCENDANTS ARE EXPANDED FROM SELF ONLY, NEVER FROM THE ANCESTOR SET. The
+    # first version of this seeded the descendant walk with self AND its
+    # ancestors, which pulls in every SIBLING of this process and everything they
+    # spawned -- so a competing run launched from a neighbouring shell under the
+    # same parent was silently excluded. That is the very case the guard exists
+    # for, and a live out-of-tree decoy went undetected until it was fixed.
+    kin = {self_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, ppid, _, _, _ in rows:
+            if ppid in kin and pid not in kin:
+                kin.add(pid); changed = True
+    # Ancestors are excluded too, but they contribute no descendants: a login
+    # shell or an agent harness is not a GPU competitor, and its OTHER children
+    # may well be.
+    mine = set(kin)
+    cur, seen = by_pid.get(self_pid), 0
+    while cur and cur[1] and cur[1] in by_pid and seen < 64:
+        mine.add(cur[1]); cur = by_pid[cur[1]]; seen += 1
+
+    hits = []
+    for pid, _ppid, pgid, comm, args in rows:
+        if pid in mine or pgid == self_pgid:
+            continue
+        # `comm` IS TRUNCATED TO 16 CHARACTERS BY macOS ps, so every venv python
+        # reads as something like "/private/tmp/cla" and no basename test on it can
+        # recognise an interpreter. The executable is therefore taken from the FIRST
+        # TOKEN OF argv, which is not truncated. This cost a full round of green
+        # tests: the synthetic fixtures were hand-written with untruncated paths, so
+        # they could not reproduce the failure, and a live out-of-tree decoy went
+        # undetected while the suite passed.
+        exe = (args.split(" ", 1)[0] if args else comm).rsplit("/", 1)[-1]
+        base = comm.rsplit("/", 1)[-1]
+        if base in _COMPETITOR_NAMES or exe in _COMPETITOR_NAMES:
+            hits.append(f"{exe or base} (pid {pid})")
+        elif exe.startswith("python") and any(m in args for m in _ARGV_MARKERS):
+            hits.append(f"python (pid {pid}): {args[:110]}")
+    return hits
+
+
 def gpu_competitors(exclude_pids=()) -> list[str]:
-    """Other trainer processes currently running, for timing hygiene.
+    """Other GPU processes currently running, for timing hygiene.
 
     Written after a naive guard reported "4 competing GPU procs" during a run
     that had exactly one: `pgrep -f "spirula|msplat|brush"` also matched the
@@ -176,22 +255,18 @@ def gpu_competitors(exclude_pids=()) -> list[str]:
     process running the benchmark. A guard that can never read zero is worse
     than no guard, because it trains you to ignore it.
 
-    So: match the executable name only (ps `comm`), never the full argv, and
-    drop our own process tree.
+    That fix over-corrected to matching the executable name only, which made
+    every metal-gauss process invisible -- see `_parse_competitors`. Both
+    failures are now covered, and both have regression tests.
     """
     import os
     import subprocess as sp
-    names = ("spirula", "brush_app", "brush", "msplat-train")
-    skip = set(exclude_pids) | {os.getpid(), os.getppid()}
-    out = sp.run(["ps", "-eo", "pid=,comm="], capture_output=True, text=True).stdout
-    hits = []
-    for line in out.splitlines():
-        pid, _, comm = line.strip().partition(" ")
-        if not pid.isdigit() or int(pid) in skip:
-            continue
-        base = comm.strip().rsplit("/", 1)[-1]
-        if base in names:
-            hits.append(f"{base} (pid {pid})")
+    out = sp.run(["ps", "-eo", "pid=,ppid=,pgid=,comm=,args="],
+                 capture_output=True, text=True).stdout
+    hits = _parse_competitors(out, os.getpid(), os.getpgrp())
+    if exclude_pids:
+        drop = {str(p) for p in exclude_pids}
+        hits = [h for h in hits if not any(f"pid {p})" in h or f"pid {p}):" in h for p in drop)]
     return hits
 
 

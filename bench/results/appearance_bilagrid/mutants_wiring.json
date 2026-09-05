@@ -1,0 +1,68 @@
+[
+ {
+  "mutant": "loss_uses_raw_render",
+  "failed_tests": [
+   "test_bilagrid_reaches_the_photometric_loss_and_NOT_the_aux_maps",
+   "test_heldout_eval_never_applies_the_appearance_model",
+   "test_report_records_what_the_grid_actually_did"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "aux_sees_the_corrected_render",
+  "failed_tests": [
+   "test_bilagrid_reaches_the_photometric_loss_and_NOT_the_aux_maps"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "appearance_applied_at_eval",
+  "failed_tests": [
+   "test_heldout_eval_never_applies_the_appearance_model"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "tv_at_appearance_reg",
+  "failed_tests": [
+   "test_bilagrid_is_regularised_by_the_TV_WEIGHT_and_not_by_appearance_reg"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "lr_schedule_dropped",
+  "failed_tests": [
+   "test_the_appearance_group_gets_the_brush_lr_schedule_and_nothing_else_does"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "lr_schedule_hits_every_group",
+  "failed_tests": [
+   "test_the_appearance_group_gets_the_brush_lr_schedule_and_nothing_else_does"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "report_state_is_static",
+  "failed_tests": [
+   "test_report_records_what_the_grid_actually_did"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ },
+ {
+  "mutant": "dims_order_reversed",
+  "failed_tests": [
+   "test_report_records_what_the_grid_actually_did"
+  ],
+  "resolved": true,
+  "expected_kill": true
+ }
+]
