@@ -143,7 +143,12 @@ def main():
         rows[k] = row
 
     b1 = band1(t_vals, base_vals)      # per-arm only; see tier3_bands.band1
-    b2 = band2(verdict)
+    # AMENDMENT 1 (operator, 2026-09-04, pre-registered in 99b0c92 before any arm
+    # existed): a bilateral grid is a PHOTOMETRIC lever, so Band 2 is the
+    # do-no-harm form. The geometry form is computed too and BOTH are reported --
+    # where they disagree, that disagreement is a finding about the rules.
+    b2 = band2(verdict, lever="photometric")
+    b2_geometry_form = band2(verdict)
     b3 = band3(t_vals["run.psnr_masked"], base_vals["run.psnr_masked"])
     # Beyond floor, below Band 1, and WORSE -- reported, never a DROP.
     drift = sorted(k for k, v in rows.items()
@@ -175,7 +180,17 @@ def main():
            "rows": rows,
            "three_band": {"rule": "tier3-three-band-2026-09-04 (imported from "
                                   "scripts/dn_gate_arms.py, not retyped)",
-                          "band1": b1, "band2": b2, "band3": b3,
+                          "band1": b1, "band2": b2,
+                          "band2_lever": "photometric",
+                          "band2_geometry_form": b2_geometry_form,
+                          "band2_forms_disagree": b2 != b2_geometry_form,
+                          "band2_amendment":
+                              "AMENDMENT 1, operator 2026-09-04, commit 99b0c92, "
+                              "pre-registered before any Task 22 arm existed: for a "
+                              "PHOTOMETRIC lever Band 2 inverts from 'on-seed@1cm must "
+                              "IMPROVE beyond floor' to 'must NOT WORSEN beyond floor'. "
+                              "Bands 1 and 3 stand as written.",
+                          "band3": b3,
                           "drift_worsened_below_band1": drift, "drop": three_band_drop,
                           "verdict": "KEEP" if not three_band_drop and b2 == "PASS"
                                      else "DROP",
@@ -185,7 +200,9 @@ def main():
                               "with no mechanism by which on-seed should rise, so a "
                               "geometry-neutral result reads WITHIN FLOOR -> not adopted "
                               "whatever LPIPS does. Flagged, not resolved here."},
+           "rules_disagree": None,
            "plan_rule": plan}
+    doc["rules_disagree"] = doc["three_band"]["verdict"] != plan["verdict"]
     Path(a.json).parent.mkdir(parents=True, exist_ok=True)
     Path(a.json).write_text(json.dumps(doc, indent=2))
 
@@ -199,10 +216,17 @@ def main():
         print(f"  {k:28s} {base_vals[k]:.5f} -> {t_vals[k]:.5f}  {verdict.get(k)}")
     print(f"  ms/step       {base_vals['run.ms_per_step']:.2f} -> "
           f"{t_vals['run.ms_per_step']:.2f}")
-    print(f"  BAND1 fired {b1['fired']}  BAND2 {b2}  BAND3 fired {b3['fired']} "
+    print(f"  BAND1 fired {b1['fired']}  BAND2 {b2} (photometric form; geometry form "
+          f"would read {b2_geometry_form})  BAND3 fired {b3['fired']} "
           f"(loss {b3['loss_db']:+.4f} dB)")
     print(f"  three-band verdict: {doc['three_band']['verdict']}")
     print(f"  plan rule verdict : {plan['verdict']}")
+    if doc["three_band"]["verdict"] != plan["verdict"]:
+        print("  *** THE TWO RULES DISAGREE. That is a finding about the rules and is "
+              "recorded as one, not resolved here. ***")
+    if doc["three_band"]["band2_forms_disagree"]:
+        print(f"  *** Band 2's two forms disagree ({b2_geometry_form} -> {b2}): the "
+              f"amendment is load-bearing on this result. ***")
 
 
 if __name__ == "__main__":

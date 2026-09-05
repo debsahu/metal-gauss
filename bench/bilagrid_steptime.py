@@ -35,6 +35,27 @@ def one(argv, tag, tmp):
     from metal_gauss.train import build_parser, train
     rep = str(tmp / f"{tag}.json")
     a = build_parser().parse_args(argv + ["--report", rep])
+    # `train()` IS NOT THE CLI. `main()` resolves several defaults after parsing,
+    # and a harness that calls `train()` on a bare parser namespace inherits None
+    # for every one of them. This block crashed exactly there --
+    #   TypeError: '>' not supported between instances of 'NoneType' and 'int'
+    # at train.py:612 -- but ONLY on the --num-downscales 2 arms, because the
+    # dereference sits inside `if args.num_downscales > 0`. The four
+    # --num-downscales 0 arms had already written clean reports, so the block was
+    # half-done and looked healthy until it wasn't.
+    #
+    # This DUPLICATES train.py:1182-1192 rather than refactoring it, deliberately:
+    # the Task 22 training arms are in flight from a frozen snapshot of train.py,
+    # and editing it now would mean the branch's final train.py is not the one
+    # that produced the arms. tests/test_train_recipe.py and
+    # tests/test_geometry_loss.py hand-set the same field, so this is the third
+    # place that works around it -- extracting a `resolve_defaults(args)` used by
+    # main() and by every harness is the real fix and is left for after the arms.
+    if a.resolution_schedule is None:
+        a.resolution_schedule = max(1, a.steps // 3)
+    for k in ("resolution_schedule", "budget", "steps"):
+        if getattr(a, k) is None:
+            raise SystemExit(f"{k} is None after parsing; train() will crash on it")
     t0 = time.perf_counter()
     out = train(a)
     return {"tag": tag, "ms_per_step": out["metrics"]["ms_per_step"],

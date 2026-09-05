@@ -145,3 +145,53 @@ def test_every_gated_column_has_a_direction():
         assert DIRECTION.get(k) is not None, k
         if k in COLLAPSE:
             assert DIRECTION[k] != 0, f"{k} is a collapse column and cannot be two-sided"
+
+
+# ------------------------- AMENDMENT 1 (operator, 2026-09-04, commit 99b0c92)
+
+@pytest.mark.parametrize("on_seed,thin,geom,photo", [
+    ("IMPROVED",     "WITHIN FLOOR", "PASS",         "PASS"),
+    ("IMPROVED",     "IMPROVED",     "PASS",         "PASS"),
+    ("WITHIN FLOOR", "WITHIN FLOOR", "WITHIN FLOOR", "PASS"),      # the ONLY change
+    ("WITHIN FLOOR", "IMPROVED",     "WITHIN FLOOR", "PASS"),      # the ONLY change
+    ("WITHIN FLOOR", "WORSENED",     "FAIL",         "FAIL"),
+    ("WORSENED",     "IMPROVED",     "FAIL",         "FAIL"),
+    ("WORSENED",     "WORSENED",     "FAIL",         "FAIL"),
+])
+def test_the_photometric_form_changes_EXACTLY_the_did_not_rise_cells(
+        on_seed, thin, geom, photo):
+    """AMENDMENT 1 inverts Band 2 for a photometric lever from "on-seed must
+    IMPROVE" to "on-seed must NOT WORSEN". This enumerates the whole truth table
+    under BOTH forms, so the amendment's blast radius is asserted rather than
+    described: the only cells that move are the two where on-seed did not rise and
+    nothing worsened.
+
+    Fails if the amendment is implemented as "photometric always passes Band 2",
+    which would delete the do-no-harm property that is the entire reason the
+    inverted form is acceptable."""
+    v = {"stats.on_seed_frac_1cm": on_seed, "stats.thin_axis_angle_p50": thin}
+    assert band2(v) == geom
+    assert band2(v, lever="photometric") == photo
+
+
+def test_the_photometric_form_still_FAILS_on_damage_which_is_the_whole_point():
+    """The failure mode the inverted band must still catch: a grid that buys its
+    LPIPS by absorbing error the geometry should have fixed, which shows as
+    on-seed FALLING. If this ever passes, the amendment has become "photometric
+    levers skip Band 2" and the band is decorative."""
+    damaged = {"stats.on_seed_frac_1cm": "WORSENED",
+               "stats.thin_axis_angle_p50": "IMPROVED"}
+    assert band2(damaged, lever="photometric") == "FAIL"
+    # ...and the control: an undamaged geometry-neutral result must PASS, or the
+    # assertion above would be satisfiable by a form that fails everything.
+    neutral = {"stats.on_seed_frac_1cm": "WITHIN FLOOR",
+               "stats.thin_axis_angle_p50": "WITHIN FLOOR"}
+    assert band2(neutral, lever="photometric") == "PASS"
+
+
+def test_an_unknown_lever_is_rejected_rather_than_defaulted():
+    """A typo'd lever must not silently fall through to the geometry form, which
+    would return DROP for a photometric arm and look like a real verdict."""
+    v = {"stats.on_seed_frac_1cm": "IMPROVED", "stats.thin_axis_angle_p50": "IMPROVED"}
+    with pytest.raises(ValueError, match="lever must be"):
+        band2(v, lever="photometrics")

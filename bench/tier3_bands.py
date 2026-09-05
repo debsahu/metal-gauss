@@ -120,13 +120,36 @@ def band1(t_values: dict, base_values: dict) -> dict:
                 "Absent, not passed."}
 
 
-def band2(verdicts: dict) -> str:
-    """PASS if on-seed@1cm IMPROVED beyond floor and thin-axis did not worsen;
-    FAIL if either worsened; WITHIN FLOOR otherwise.
+def band2(verdicts: dict, *, lever: str = "geometry") -> str:
+    """Band 2 -- GEOMETRY GATE, in one of two forms.
+
+    lever="geometry" (the original, `3cfd8f3`)
+        PASS          on-seed@1cm IMPROVED beyond floor, thin-axis not WORSENED
+        FAIL          either column WORSENED beyond floor
+        WITHIN FLOOR  neither worsened, but on-seed did not rise either
+
+    lever="photometric" (AMENDMENT 1, operator, 2026-09-04, pre-registered in
+    commit 99b0c92 BEFORE any Task 22 arm existed)
+        PASS          neither column WORSENED beyond floor
+        FAIL          either column WORSENED beyond floor
+
+    WHY THE FORM INVERTS FOR A PHOTOMETRIC LEVER. Band 2 exists to confirm that a
+    GEOMETRY lever actually helps geometry; it was derived on plane-aux and
+    metric-space, both of which move splat positions. An appearance model has no
+    mechanism by which on-seed should RISE, so requiring it to rise is a CATEGORY
+    ERROR rather than a bar -- it returns DROP for every possible photometric
+    result, including a perfect one. The do-no-harm form preserves what the band
+    is FOR: catching a lever that buys its headline metric by damaging the
+    reconstruction. That failure mode is entirely live for a bilateral grid -- one
+    that absorbs error the geometry should have fixed shows up as on-seed FALLING
+    while LPIPS improves, and the inverted form still catches it. The amendment
+    NARROWS the band's scope; it does not weaken its purpose.
 
     Aspect and needles are deliberately NOT read here -- moving them to Band 1,
-    where a 2.5% move and a 78% collapse get different answers, IS the amendment.
+    where a 2.5% move and a 78% collapse get different answers, IS `3cfd8f3`.
     """
+    if lever not in ("geometry", "photometric"):
+        raise ValueError(f"lever must be 'geometry' or 'photometric', got {lever!r}")
     missing = [k for k in BAND2_GATE if verdicts.get(k) is None]
     if missing:
         raise ValueError(f"Band 2 columns missing: {missing}. An absent gate column "
@@ -134,6 +157,8 @@ def band2(verdicts: dict) -> str:
     on_seed, thin = (verdicts[k] for k in BAND2_GATE)
     if on_seed == "WORSENED" or thin == "WORSENED":
         return "FAIL"
+    if lever == "photometric":
+        return "PASS"
     return "PASS" if on_seed == "IMPROVED" else "WITHIN FLOOR"
 
 
