@@ -200,3 +200,68 @@ def test_fused_path_supports_masks_and_matches_the_torch_path():
                         GRAZING, keep.cpu().double()) * w.cpu().double()).sum().backward()
     _bars(zf.grad.cpu().double(), zc.grad, "masked dL/dz vs f64")
     _bars(nf.grad.cpu().double(), nc.grad, "masked dL/dn_sum vs f64")
+
+
+@mps
+@pytest.mark.parametrize("K", [GRAZING, PROD])
+def test_normalise_jacobian_is_present_in_the_nsum_gradient(K):
+    """M9 of plan Task 16's ten named mutants. ADDED 2026-09-04, after Checkpoint F was
+    performed for the first time and M9 was the one mutant that SURVIVED the whole suite.
+
+    The mutant drops the projection in `geom_loss_backward`'s n_r chain --
+    `gx = (gnr - nr*dot(nr,gnr)) / xl` becomes `gx = gnr`, i.e. n_r is treated as though
+    it were not normalised. Measured, that is wrong on 4,891 of 6,240 elements of
+    d(n_sum) with a median per-element error of 19% and a maximum of 416%.
+
+    WHY `_bars` CANNOT SEE IT, which is the transferable part. `_bars` computes
+    `rel = max|got-ref| / max|ref|`, and on the exposing fixture `max|ref|` is 3.6e11 --
+    it comes from the deliberately-injected zero-alpha pixels, where alpha clamps to
+    1e-10 and the gradient explodes. The median |ref| is 5.4e-5, a dynamic range of
+    6.7e15. So the bar `rel <= 1e-5` is really `max|Delta| <= 3.6e6`, which no error can
+    violate, and the cosine is pinned to 1.0 by the same few huge components. The mutant
+    reads 2.7e-15 against a 1e-5 bar and passes with ten orders of magnitude to spare.
+
+    The fix is to score on the LIVE population at ITS OWN scale. Both halves below are
+    load-bearing: the first says the kernel is right, the second proves the statistic
+    could have said otherwise.
+    """
+    from metal_gauss.geometry_loss import (fused_geometry_losses, depth_loss,
+                                           depth_normal_loss, normal_loss,
+                                           normals_from_depth)
+    w = torch.tensor([1.0, 0.2, 0.05])
+    n_sum, z, a, gt_d, gt_n = exposing()
+
+    ns_k = n_sum.clone().requires_grad_(True)
+    Lk = fused_geometry_losses(z.clone().requires_grad_(True), ns_k, a, gt_d, gt_n, K)
+    (Lk * w.to(Lk.device)).sum().backward()
+
+    # torch chain, retaining BOTH the pre-normalise and post-normalise gradients, so the
+    # M9 form is available without hand-writing an adjoint.
+    ns_t = n_sum.clone().requires_grad_(True)
+    ad = a.detach().clamp_min(1e-10)
+    x = ns_t / ad[..., None]
+    ni = x / x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    ni.retain_grad()
+    di = z.clone()[..., 0] / ad
+    Lt = torch.stack([depth_loss(di, gt_d, "disparity"), normal_loss(ni, gt_n),
+                      depth_normal_loss(normals_from_depth(di, *K), ni, a.detach())])
+    (Lt * w.to(Lt.device)).sum().backward()
+
+    ref = ns_t.grad.detach()
+    m9 = (ni.grad / ad[..., None]).detach()      # what dropping the projection produces
+
+    live = (a > 1e-3)[..., None].expand_as(ref)  # real coverage; not the 1e-10 clamp lane
+    scale = ref[live].abs().quantile(0.99)
+    assert scale > 1e-6, f"fixture is degenerate: p99|ref| on live pixels = {scale:.3e}"
+
+    def err(t):
+        return ((t - ref)[live].abs().max() / scale).item()
+
+    # 1. THE NULL. Measured 3.01 (GRAZING) / 4.52 (PROD) -- if this ever falls quiet the
+    #    fixture has stopped separating the two rules and the assertion below is vacuous.
+    assert err(m9) > 0.5, \
+        f"fixture does NOT discriminate: the un-projected form scores {err(m9):.3e}"
+
+    # 2. THE KERNEL. Measured 8.9e-7 / 5.2e-7, i.e. f32 noise, against a null of ~3-4.
+    assert err(ns_k.grad.detach()) <= 1e-4, \
+        f"normalise Jacobian missing from d(n_sum): {err(ns_k.grad.detach()):.3e}"

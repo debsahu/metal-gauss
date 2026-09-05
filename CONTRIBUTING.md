@@ -32,6 +32,84 @@ Re-run it after **any** dependency change. `uv run --frozen` reconciles the venv
 against the lockfile and restores the vendored copy over the symlink, so an
 out-of-lock install (including the one above) leaves the next run broken.
 
+`scripts/fix_openmp.py` defaults to `.venv`. A second environment needs `--venv <dir>`
+explicitly — without it the script happily reports "already deduplicated — nothing to
+do" about the *wrong* venv and the next run aborts with `OMP: Error #15` (exit 134).
+
+### That `uv pip install` line installs an OUT-OF-LOCK torch, and it flips a test
+
+`pyproject.toml` asks only for `torch>=2.5`, so the line above resolves to the newest
+wheel (**2.14.0** as of 2026-09-04) while `uv.lock` pins **2.13.0**. Measured on `main`
+`86a9e03` in a clean worktree with everything else held fixed:
+
+    tests/test_geometry_loss.py::test_flatten_flag_actually_reaches_the_training_loss
+        torch 2.13.0 (lockfile)   PASS
+        torch 2.14.0 (line above) FAIL
+
+Nothing is wrong with the flatten flag. The term reaches the loss exactly — at step 1,
+where the splat state is still the seed in both arms, `Δloss = w × flatten` to machine
+precision at w = 10 and w = 50. The test asserts a **≥ 10%** drop in the median smallest
+axis over 40 steps and measures **10.51–10.67%** on the pinned torch against
+**9.38–9.48%** on 2.14.0. The bar has about 0.5 pp of margin and the wheel bump spends
+it.
+
+The assertion is also weaker than it looks: the effect **saturates**. At w = 1, 50 and
+200 the reduction is the same to within 0.1 pp, because Adam's update is scale-invariant
+and 40 steps at the scales group's `lr = 5e-3` caps how far `log_scales` can travel. So
+raising the weight cannot restore the margin — only more steps, a larger scale lr, or a
+bar set from a measured floor rather than a round number.
+
+**Neither documented route gives a green suite.** All four rows measured on `main`
+`86a9e03` on 2026-09-04, full `pytest -q`, one machine, private `TORCH_EXTENSIONS_DIR`:
+
+| environment | torch | result |
+|---|---|---|
+| `uv pip install` line above | 2.14.0 | **361 passed, 1 failed** — `test_flatten_flag_actually_reaches_the_training_loss` |
+| `uv sync --frozen --extra bench --extra train` | 2.13.0 | **361 passed, 1 failed** — `test_ssim_matches_skimage` (`ModuleNotFoundError`) |
+| ... `--extra test` as well | 2.13.0 | **361 passed, 1 failed** — same; `scikit-image` is in no extra |
+| **lockfile + `scikit-image` installed explicitly** | 2.13.0 | **362 passed** ✅ |
+
+So the green recipe is the lockfile sync **plus** `scikit-image`, which the extras do not
+carry:
+
+```bash
+uv venv --python 3.12 .venv
+uv sync --frozen --extra bench --extra train
+uv pip install --python .venv/bin/python scikit-image pytest plyfile
+.venv/bin/python scripts/fix_openmp.py --venv .venv    # AFTER the out-of-lock install
+.venv/bin/python -m pytest -q
+```
+
+`fix_openmp.py` must come last: the `uv pip install` restores torch's vendored `libomp`
+over the symlink, exactly as the paragraph above warns.
+
+### The Metal extension cache is SHARED across every checkout — set `TORCH_EXTENSIONS_DIR`
+
+`torch.utils.cpp_extension.load` keys its build directory on the extension **name**, not
+on the source path, so every checkout on the machine compiles into the same
+`~/Library/Caches/torch_extensions/py312_cpu/metal_gauss_metal/`. Two `git worktree`s —
+or one worktree and the primary checkout — share one `.so` and one `FileBaton` lock.
+
+Both consequences have been observed:
+
+- A build in your worktree **replaces the `.so` another checkout is currently
+  executing**. When the two venvs are on different torch versions the replacement is
+  ABI-mismatched, and the other run fails somewhere with no visible relation to what it
+  was testing.
+- A killed build leaves the shared `lock` behind and hangs *every* checkout, which is
+  the hang documented below.
+
+**Set a private cache for any work outside the primary checkout**, for the whole
+session rather than for the one command you expect to rebuild:
+
+```bash
+export TORCH_EXTENSIONS_DIR="$PWD/.torch_ext"
+```
+
+The `.metal` sources are compiled at runtime by `newLibraryWithSource`
+(`metal_gauss/metal_backend.py`), so editing a shader needs no C++ rebuild — but the
+Objective-C++ bridge does, and the bridge is what this cache holds.
+
 ### If a run hangs at 0% CPU with an empty log
 
 Delete `~/Library/Caches/torch_extensions/py312_cpu/metal_gauss_metal/lock`
