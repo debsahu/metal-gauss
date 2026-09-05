@@ -203,7 +203,19 @@ def failing_test_names(node_ids) -> set:
 
 
 def sub(text, old, new, count=1):
-    assert text.count(old) >= 1, f"mutation anchor not found:\n{old}"
+    """Replace, and REFUSE AN AMBIGUOUS ANCHOR.
+
+    `>= 1` was not enough. `"    if missing:\n"` occurs in four functions here, so a
+    mutant aimed at `collect_scenes` silently rewrote `check_loss_path` instead: the probe
+    saw a real behaviour change, the named test went on passing, and the battery reported
+    a SURVIVOR that was actually a defective mutant. Requiring the anchor to be unique
+    makes that a hard error at the mutation site rather than a puzzle at the result.
+    """
+    n = text.count(old)
+    assert n >= 1, f"mutation anchor not found:\n{old}"
+    assert n == count, (f"mutation anchor is AMBIGUOUS ({n} occurrences, expected "
+                        f"{count}) -- it would mutate a site other than the intended "
+                        f"one:\n{old}")
     return text.replace(old, new, count)
 
 
