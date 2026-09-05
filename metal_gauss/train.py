@@ -387,6 +387,46 @@ def _gate_dn_neighbours() -> bool:
     return os.environ.get("MG_DN_GATE_NEIGHBOURS", "0") not in ("0", "", "false", "False")
 
 
+#: What the loss chain ACTUALLY DID, counted at the branch that did it.
+#:
+#: `_run_report` records `vars(args)` and `_env_snapshot()`, and NEITHER carries an
+#: environment variable -- so before this, a run whose `MG_TORCH_LOSS=1` was lost across a
+#: `nohup`, a typo or a non-inheriting shell was graded as a torch run on the strength of
+#: nothing at all. That is the failure `_run_report`'s docstring already records twice.
+#:
+#: Reading `os.environ` when the report is WRITTEN would not fix it: that answers "what was
+#: requested", which is the question that was already answerable and already wrong.
+#: `_use_fused_loss()` is not sufficient either -- the fused branch below also requires all
+#: three weights positive, an MPS alpha and float32 aux, so `MG_TORCH_LOSS=0` does not imply
+#: the fused kernel ran. These are bumped inside the branches, by the branches.
+#:
+#: COUNTS, NOT FLAGS: a boolean cannot distinguish "every view took the torch path" from
+#: "one view did". Every key is always present as an int, so a report of all zeros -- no
+#: geometry term ran at all, a failed arm on any geometry recipe -- can never be misread as
+#: "ran ungated". Invariant a harness can check without knowing the schedule:
+#: `fused_calls + torch_calls == dn_gated_calls + dn_ungated_calls + dn_skipped_calls`.
+LOSS_PATH_KEYS = ("fused_calls", "torch_calls",
+                  "dn_gated_calls", "dn_ungated_calls", "dn_skipped_calls")
+_loss_path_counts = dict.fromkeys(LOSS_PATH_KEYS, 0)
+
+
+def reset_loss_path_counters() -> None:
+    """Zero the observed-path counters. `train` calls this BEFORE any work, so a harness
+    that sweeps arms in one process cannot read the previous arm's chain as this one's."""
+    for k in LOSS_PATH_KEYS:
+        _loss_path_counts[k] = 0
+
+
+def loss_path_counters() -> dict:
+    """A snapshot copy, so a caller holding it cannot be mutated under by a later step."""
+    return dict(_loss_path_counts)
+
+
+def _observe(*keys: str) -> None:
+    for k in keys:
+        _loss_path_counts[k] += 1
+
+
 def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep=None):
     """The depth / normal / depth-normal terms over one view's aux maps.
 
@@ -416,6 +456,9 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
                 "MG_DN_GATE_NEIGHBOURS is set but the fused geometry-loss kernel does not "
                 "implement the neighbour gate. Set MG_TORCH_LOSS=1 to take the torch "
                 "reference path, or unset MG_DN_GATE_NEIGHBOURS.")
+        # AFTER the refusal above: a counted call must be a call that ran. The fused
+        # kernel gates the base pixel only, which IS the ungated semantic.
+        _observe("fused_calls", "dn_ungated_calls")
         n_img, z_img = aux_maps
         vals = fused_geometry_losses(
             z_img, n_img, alpha, gt_depth, gt_normal,
@@ -423,6 +466,7 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
             keep=keep, space=args.depth_loss_space)
         return {"depth": vals[0], "normal": vals[1], "depth_normal": vals[2]}
 
+    _observe("torch_calls")
     alpha_d = alpha.detach()
     n_img, z_img = aux_maps
     n_img = n_img / alpha_d.clamp_min(1e-10)[..., None]
@@ -438,9 +482,17 @@ def geometry_terms(args, aux_maps, alpha, K, gt_depth=None, gt_normal=None, keep
     if args.depth_normal_weight > 0:
         n_d = normals_from_depth(depth_img, K[0, 0].item(), K[1, 1].item(),
                                  K[0, 2].item(), K[1, 2].item())
+        # Bound ONCE and counted from the bound value, not re-read from the environment
+        # at report time: what is counted is the argument `depth_normal_loss` received.
+        gate = _gate_dn_neighbours()
         terms["depth_normal"] = depth_normal_loss(
             n_d, n_img, alpha_d if keep is None else alpha_d * keep,
-            gate_neighbours=_gate_dn_neighbours())
+            gate_neighbours=gate)
+        _observe("dn_gated_calls" if gate else "dn_ungated_calls")
+    else:
+        # NOT the same report as "ran ungated". A geometry arm that computed no
+        # depth-normal term at all is a failed arm, and must be legible as one.
+        _observe("dn_skipped_calls")
     return terms
 
 
@@ -478,6 +530,7 @@ def render_view(p: dict, v, active: int, sh_deg: int = 3,
 
 def train(args, scene: Scene | None = None) -> dict:
     env = _env_snapshot()          # BEFORE any work: this is the provenance of the run
+    reset_loss_path_counters()     # likewise: this run's loss chain, not the last one's
     device = "mps"
     # Seed every torch RNG the run touches: the init jitter, relocate/grow's
     # multinomial, and add_noise's randn. The numpy streams (point subsample,
@@ -811,7 +864,8 @@ def train(args, scene: Scene | None = None) -> dict:
                         "wall_s": round(dt, 1), "active": active, "terms": term_vals,
                         "shape": shape})
 
-    out = _run_report(args, log, time.perf_counter() - t0, active, env=env)
+    out = _run_report(args, log, time.perf_counter() - t0, active, env=env,
+                      loss_path=loss_path_counters())
     out["metrics"]["term_view_coverage"] = {k: [a, b] for k, (a, b) in term_cov.items()}
     out["metrics"]["term_coverage_warning"] = geometry_coverage_warning(term_cov)
     for dest in (args.out, getattr(args, "report", None)):
@@ -949,8 +1003,16 @@ def _env_snapshot() -> dict:
     }
 
 
-def _run_report(args, log, wall_s, active, env=None):
+def _run_report(args, log, wall_s, active, env=None, loss_path=None):
     """Everything needed to reproduce this run, recorded by the process that ran it.
+
+    Three blocks, and the distinction between them is the point. `resolved` is what was
+    ASKED FOR; `env` is where and when; `observed` is WHAT ACTUALLY HAPPENED, counted by
+    the code that did it. An environment variable belongs to none of the first two -- it
+    is not an argparse knob and it is not provenance -- which is how `MG_TORCH_LOSS` and
+    `MG_DN_GATE_NEIGHBOURS` came to be unrecorded on a protocol whose treatment variable
+    one of them IS. They are still not recorded, deliberately: `observed.loss_path` says
+    which branch ran, which is strictly stronger than which branch was requested.
 
     Records ALL of vars(args), not a curated subset. Curation is how knobs go
     unrecorded, and an unrecorded knob is how this project twice published a
@@ -967,10 +1029,13 @@ def _run_report(args, log, wall_s, active, env=None):
     env["finished_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     resolved = {k: v for k, v in sorted(vars(args).items())}
     ms = (1000.0 * wall_s / args.steps) if args.steps else None
+    lp = dict(loss_path) if loss_path is not None else loss_path_counters()
     return {
         "schema": 1,
         "resolved": resolved,
         "env": env,
+        "observed": {"schema": 1,
+                     "loss_path": {k: int(lp.get(k, 0)) for k in LOSS_PATH_KEYS}},
         "metrics": {
             # `psnr` stays the UNMASKED number: readers of --out predate masks.
             "psnr": log[-1]["psnr"] if log else None,
