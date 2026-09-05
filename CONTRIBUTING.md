@@ -36,35 +36,60 @@ out-of-lock install (including the one above) leaves the next run broken.
 explicitly — without it the script happily reports "already deduplicated — nothing to
 do" about the *wrong* venv and the next run aborts with `OMP: Error #15` (exit 134).
 
-### That `uv pip install` line installs an OUT-OF-LOCK torch, and it flips a test
+### That `uv pip install` line installs an OUT-OF-LOCK torch (the test it flipped is fixed)
 
 `pyproject.toml` asks only for `torch>=2.5`, so the line above resolves to the newest
-wheel (**2.14.0** as of 2026-09-04) while `uv.lock` pins **2.13.0**. Measured on `main`
-`86a9e03` in a clean worktree with everything else held fixed:
+wheel (**2.14.0** as of 2026-09-04) while `uv.lock` pins **2.13.0**. Prefer the lockfile:
+the two are not interchangeable for benchmarking, and only one of them is what CI-equivalent
+numbers were measured on.
 
-    tests/test_geometry_loss.py::test_flatten_flag_actually_reaches_the_training_loss
-        torch 2.13.0 (lockfile)   PASS
-        torch 2.14.0 (line above) FAIL
+**The test this used to flip has been replaced, and both torches are green as of
+2026-09-04** — `366 passed` on 2.13.0 (plus the allocator-dependent skip below) and
+`366 passed` on 2.14.0, full `pytest -q`, one machine, private `TORCH_EXTENSIONS_DIR`.
 
-Nothing is wrong with the flatten flag. The term reaches the loss exactly — at step 1,
-where the splat state is still the seed in both arms, `Δloss = w × flatten` to machine
-precision at w = 10 and w = 50. The test asserts a **≥ 10%** drop in the median smallest
-axis over 40 steps and measures **10.51–10.67%** on the pinned torch against
-**9.38–9.48%** on 2.14.0. The bar has about 0.5 pp of margin and the wheel bump spends
-it.
+What it used to be, kept because the failure shape is worth knowing.
+`test_flatten_flag_actually_reaches_the_training_loss` asserted a **≥ 10%** drop in the
+median smallest axis over two 40-step training arms, and measured **10.51–10.67%** on the
+pinned torch against **9.38–9.48%** on 2.14.0 — about 0.5 pp of margin, which the wheel
+bump spent. Nothing was ever wrong with the flatten flag.
 
-The assertion is also weaker than it looks: the effect **saturates**. At w = 1, 50 and
-200 the reduction is the same to within 0.1 pp, because Adam's update is scale-invariant
-and 40 steps at the scales group's `lr = 5e-3` caps how far `log_scales` can travel. So
-raising the weight cannot restore the margin — only more steps, a larger scale lr, or a
-bar set from a measured floor rather than a round number.
+**The bar was measuring the optimiser's step budget, not flatten's strength, and the
+mechanism is now measured.** Adam's first update is exactly `-lr·sign(g)`, so *any* weight
+large enough to flip the min-axis gradient sign produces the identical step. Measured at
+step 1: `w = 50` and `w = 100` export min-axis p50 **0.278286368** and **0.278286368**,
+bit-identical, and the log-space shift against `w = 0` is exactly `2·lr = 1.0e-2` on the
+median splat. That is why raising the weight could never restore the margin.
+
+The replacement asserts the mechanism the name claims, at three named tests off one
+module-scoped fixture of three **one-step** arms (`w = 0, W, 2W`), where the splat state is
+still the seed so the only admissible difference between arms is `w × flatten`:
+
+- `test_flatten_flag_actually_reaches_the_training_loss` — the total loss is linear in `w`.
+  Measured rel residual **1.9e-8 / 6.4e-8 / 1.9e-8**, i.e. f32 rounding of a single
+  addition. **NOT** the `4.4e-16 / 1.8e-15` recorded here previously: the loss is f32, so
+  `fl32(loss + w·flatten) − loss` cannot agree with `w·flatten` to f64 roundoff. That
+  earlier figure does not reproduce.
+- `test_flatten_gradient_reaches_log_scales` — `d(loss)/d(log_scales)` is linear in `w`,
+  scored **per element** on the argmin lanes (max **9.9e-8–1.5e-7**) with leakage onto the
+  other lanes ≤ **1.2e-8** of the on-lane magnitude.
+- `test_flatten_moves_the_min_axis_through_the_optimiser` — direction only, no magnitude
+  bar, so it cannot saturate.
+
+Seven mutants were run against them, each kill recorded by test **name**: inert term,
+detached `log_scales`, half weight, sign flip, double add, `min`→`max`, `min`→`mean`.
+Two are worth knowing. A **detached** term and a term spread over **all three axes** both
+leave the loss value exactly right, so the loss probe is blind to both and only the
+gradient probe kills them. And `min`→`max` is **behaviourally identical** at step 1,
+because the seed is exactly isotropic (per-splat log-scale spread max `0.000e+00` on 400
+of 400) — lane *selection* is owned by the two hand-built unit tests above it, which do
+kill it.
 
 **Neither documented route gives a green suite.** All four rows measured on `main`
 `86a9e03` on 2026-09-04, full `pytest -q`, one machine, private `TORCH_EXTENSIONS_DIR`:
 
 | environment | torch | result |
 |---|---|---|
-| `uv pip install` line above | 2.14.0 | **361 passed, 1 failed** — `test_flatten_flag_actually_reaches_the_training_loss` |
+| `uv pip install` line above | 2.14.0 | **361 passed, 1 failed** — `test_flatten_flag_actually_reaches_the_training_loss`. **Green as of 2026-09-04**: that test is replaced, and this route now measures `366 passed`. |
 | `uv sync --frozen --extra bench --extra train` | 2.13.0 | **361 passed, 1 failed** — `test_ssim_matches_skimage` (`ModuleNotFoundError`) |
 | ... `--extra test` as well | 2.13.0 | **361 passed, 1 failed** — same; `scikit-image` is in no extra |
 | **lockfile + `scikit-image` installed explicitly** | 2.13.0 | **362 passed** ✅ |
@@ -82,6 +107,50 @@ uv pip install --python .venv/bin/python scikit-image pytest plyfile
 
 `fix_openmp.py` must come last: the `uv pip install` restores torch's vendored `libomp`
 over the symlink, exactly as the paragraph above warns.
+
+### `max|Δ| / max|ref|` goes BLIND on a fixture with a degenerate lane
+
+Audited 2026-09-04 across the whole suite, by hooking `Tensor.__sub__` so the form is
+caught however it is spelled. Read this before adding a gradient comparison.
+
+`tests/test_fused_geom_loss.py::_bars` asserts `rel = max|got − ref| / max|ref| ≤ 1e-5`.
+On the `exposing()` fixture `max|ref|` for `d(n_sum)` is **3.63e11** — contributed
+entirely by the 15% of pixels the fixture sets to `alpha = 0`, where `alpha` clamps to
+`1e-10` and the gradient explodes — while the median `|ref|` is **5.4e-5**. A dynamic
+range of **6.7e15** turns the stated bar into `max|Δ| ≤ 3.6e6` in absolute terms, and
+**85.7% of the nonzero reference sits below that**. Cosine is pinned to 1.0 by the same
+few components.
+
+The symptom is unmistakable once you look for it. Across clean code and three different
+kernel mutants, that assertion returns
+
+    2.2241192858826983e-08
+
+**bit-identical to 17 significant figures** — the max is attained at the same degenerate
+element every time, so the statistic is a constant of the fixture and not a function of
+the kernel at all. `test_metric_space_also_matches` is blind on both of its assertions the
+same way (`metric dL/dz` has an effective tolerance of ±54.8).
+
+This is how mutant **M9** (dropping the normalise Jacobian) survived the full suite while
+being wrong on 4,891 of 6,240 elements at a median 19% error. **It is a property of the
+statistic's FORM, not of its threshold — do not respond by tightening 1e-5.**
+
+What to do instead, as `test_normalise_jacobian_is_present_in_the_nsum_gradient` does:
+**mask out the degenerate support first, then score.** A high-quantile denominator alone
+does **not** rescue it — measured, `p99|ref|` over the unmasked tensor is 3.63e11,
+identical to the max, because the degenerate population is far larger than 1%. The mask is
+what makes the scale mean anything.
+
+Scope, so this is not read as wider than it is. Every other comparison in the suite was
+measured and is fine: the next-worst dynamic range is **1.2e4**
+(`test_sh_split_layout.py`, which asserts against an absolute floor anyway), the Tier 2
+aux equivalence gate sits at **1.8e2** with 0.25% blind, and the `normals_from_depth`
+kernel tests at **≤ 4.0e2** with ≤ 0.41% blind. The two adjoint derivation scripts behind
+`research/normals-from-depth-adjoint.md` (31/31) and `research/depth-normal-loss-adjoint.md`
+(44/44) were re-run instrumented and are sound: max dynamic range **89** for the former,
+and for the latter 40 of 42 checks under 2.7e3 — the two `normalise VJP` checks do carry
+the structure (97.4% blind) but their per-element errors are **1.7e-16** (f64) and
+**1.2e-7** (f32), so those claims survive a sound statistic.
 
 ### The Metal extension cache is SHARED across every checkout — set `TORCH_EXTENSIONS_DIR`
 
