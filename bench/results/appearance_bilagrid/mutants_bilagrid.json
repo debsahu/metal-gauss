@@ -1,0 +1,131 @@
+[
+ {
+  "mutant": "identity_column_major",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_guidance_is_clamped_and_the_clamp_kills_the_gradient",
+   "test_identity_grid_reproduces_the_render"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "align_corners_false",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_slice_matches_the_independent_eight_corner_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "padding_zeros__EXPECTED_NULL",
+  "behaviour_changed": false,
+  "failed_tests": [],
+  "killed": true
+ },
+ {
+  "mutant": "xy_swapped_in_sampler",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_slice_matches_the_independent_eight_corner_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "guidance_clamp_removed__EXPECTED_NULL",
+  "behaviour_changed": false,
+  "failed_tests": [],
+  "killed": true
+ },
+ {
+  "mutant": "guidance_unclamped_and_padding_zeros",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_guidance_is_clamped_and_the_clamp_kills_the_gradient",
+   "test_slice_matches_the_independent_eight_corner_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "luma_r_and_b_swapped",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_grid_that_varies_only_in_guidance_is_not_a_global_affine",
+   "test_slice_matches_the_independent_eight_corner_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "tv_sum_of_sums",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_tv_defaults_to_the_active_view_only",
+   "test_tv_is_a_sum_of_three_means_not_a_mean_of_the_concatenation"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "tv_dy_on_wrong_axis",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_tv_is_a_sum_of_three_means_not_a_mean_of_the_concatenation"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "regulariser_always_global",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_tv_defaults_to_the_active_view_only",
+   "test_tv_gradient_reaches_only_the_active_view"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "forward_ignores_index",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_forward_uses_the_indexed_view_and_no_other",
+   "test_photometric_gradient_lands_only_in_the_drawn_view"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "render_detached_in_affine",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_gradient_reaches_the_render_through_the_AFFINE_and_not_only_the_guidance",
+   "test_guidance_is_clamped_and_the_clamp_kills_the_gradient"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "einsum_transposed",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_a_constant_grid_reduces_to_one_global_affine",
+   "test_forward_uses_the_indexed_view_and_no_other",
+   "test_gradient_reaches_the_render_through_the_AFFINE_and_not_only_the_guidance",
+   "test_grid_that_varies_only_in_guidance_is_not_a_global_affine",
+   "test_guidance_is_clamped_and_the_clamp_kills_the_gradient",
+   "test_identity_grid_reproduces_the_render",
+   "test_slice_matches_the_independent_eight_corner_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "warmup_off_by_one",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_warmup_exp_lr_matches_an_independent_transcription"
+  ],
+  "killed": true
+ },
+ {
+  "mutant": "dims_guard_removed",
+  "behaviour_changed": true,
+  "failed_tests": [
+   "test_dims_below_two_are_rejected"
+  ],
+  "killed": true
+ }
+]
