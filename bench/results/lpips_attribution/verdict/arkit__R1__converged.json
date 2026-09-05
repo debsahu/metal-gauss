@@ -1,0 +1,55 @@
+{
+  "kind": "lpips_attribution",
+  "schema": 1,
+  "stage": "step5_verdict",
+  "scene": "arkit",
+  "arm": "R1",
+  "tag": "converged",
+  "n_views": 25,
+  "baseline_lpips": 0.37796619057655334,
+  "baseline_psnr": 24.94558639526367,
+  "build_threshold": 0.015,
+  "rows": {
+    "affine": {
+      "delta_lpips": 0.0017951369285583497,
+      "delta_psnr": 0.706727523803711,
+      "n_params_per_view": 12,
+      "usable": true,
+      "c1": "C1 passed (0.978)"
+    },
+    "bilagrid_tv0": {
+      "delta_lpips": 0.021728230714797972,
+      "delta_psnr": 4.319465408325195,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 passed (0.984)"
+    },
+    "bilagrid_tv10": {
+      "delta_lpips": 0.008884400129318237,
+      "delta_psnr": 1.941381378173828,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 0.887 is below the floor, but its unregularised twin bilagrid_tv0 passed at 0.984 -- the MACHINERY is proven and the shortfall is the regulariser's own cost (0.113)"
+    },
+    "ppisp": {
+      "delta_lpips": -0.0011377036571502686,
+      "delta_psnr": 0.04320953369140625,
+      "n_params_per_view": 27,
+      "usable": true,
+      "c1": "C1 passed (0.934)"
+    }
+  },
+  "per_view_coupling": {
+    "n_views": 25,
+    "pearson_psnr_lpips": -0.7255412770472612,
+    "lpips_min": 0.285069078207016,
+    "lpips_max": 0.6098954677581787,
+    "psnr_min": 18.631620407104492,
+    "psnr_max": 31.310726165771484
+  },
+  "ceiling_fitter": "bilagrid_tv10",
+  "ceiling": 0.008884400129318237,
+  "excluded": [],
+  "verdict": "CUT",
+  "why": "the best usable fitter (bilagrid_tv10) recovers 0.00888, under the pre-registered 0.015. A free post-hoc per-view fit cannot recover the LPIPS, so nothing constrained and indirect can."
+}

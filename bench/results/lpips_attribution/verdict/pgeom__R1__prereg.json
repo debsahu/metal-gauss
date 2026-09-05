@@ -1,0 +1,58 @@
+{
+  "kind": "lpips_attribution",
+  "schema": 1,
+  "stage": "step5_verdict",
+  "scene": "pgeom",
+  "arm": "R1",
+  "tag": "prereg",
+  "n_views": 25,
+  "baseline_lpips": 0.3967623746395111,
+  "baseline_psnr": 22.602415084838867,
+  "build_threshold": 0.015,
+  "rows": {
+    "affine": {
+      "delta_lpips": 0.004639879465103149,
+      "delta_psnr": 0.9022066497802734,
+      "n_params_per_view": 12,
+      "usable": true,
+      "c1": "C1 passed (0.969)"
+    },
+    "bilagrid_tv0": {
+      "delta_lpips": 0.041391223669052124,
+      "delta_psnr": 4.9611135101318355,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 passed (0.970)"
+    },
+    "bilagrid_tv10": {
+      "delta_lpips": 0.025178894996643067,
+      "delta_psnr": 2.794538879394531,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 0.888 is below the floor, but its unregularised twin bilagrid_tv0 passed at 0.970 -- the MACHINERY is proven and the shortfall is the regulariser's own cost (0.112)"
+    },
+    "ppisp": {
+      "delta_lpips": -0.0007489216327667236,
+      "delta_psnr": 0.0271734619140625,
+      "n_params_per_view": 27,
+      "usable": false,
+      "c1": "C1 FAILED: recovered 0.643 of its own injected distortion, floor 0.9"
+    }
+  },
+  "per_view_coupling": {
+    "n_views": 25,
+    "pearson_psnr_lpips": -0.7262203183431959,
+    "lpips_min": 0.2740839123725891,
+    "lpips_max": 0.6399500966072083,
+    "psnr_min": 13.455974578857422,
+    "psnr_max": 27.247678756713867
+  },
+  "ceiling_fitter": "bilagrid_tv10",
+  "ceiling": 0.025178894996643067,
+  "excluded": [
+    "ppisp"
+  ],
+  "verdict": "BUILD",
+  "shape": "bilagrid",
+  "why": "the best usable fitter (bilagrid_tv10) recovers 0.02518 >= 0.015. Shape from (c)/(b) = n/a."
+}
