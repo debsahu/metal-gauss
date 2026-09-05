@@ -445,6 +445,58 @@ def test_shape_metrics_measure_the_IN_PLANE_aspect_not_the_thinness():
     assert shape_metrics(mixed)["needle_frac"] == pytest.approx(0.5)
 
 
+def test_shape_metrics_report_the_HARD_needle_fraction_separately():
+    """`needle_frac` (aspect < 0.1) and `hard_needle_frac` (aspect < 0.01) must be two
+    different populations, and the fixture must PROVE it separates them -- a splat between
+    the two thresholds is the only thing that can, so one is included deliberately.
+
+    0.01 is not a round number, it is the DELIVERY FORMAT's limit. The SOG/ply smallest-
+    three quaternion is 8-bit: three components over [-1/sqrt2, 1/sqrt2] at 256 levels give
+    a step of sqrt(2)/255 = 5.55e-3, a worst-case component error of half that, and a
+    worst-case quaternion-norm error of sqrt(3)/2 * 5.55e-3 = 4.80e-3, which is a rotation
+    of about 2 * 4.80e-3 = 9.6e-3 rad. Rotating a splat by theta displaces its rim, at
+    radius smax, by about smax * theta. So when smid/smax < 9.6e-3 the minor in-plane
+    half-axis is SMALLER than the rim displacement the splat's own quantised orientation
+    produces: its orientation is undeliverable, whatever the trainer computed. Rounded to
+    0.01. (Derivation re-checked here rather than taken on trust.)
+    """
+    from metal_gauss.train import shape_metrics
+    # smin must be SMALLER than the intended smid on every row, or `sort` reassigns which
+    # axis is "smid" and the fixture silently stops testing what it names. The first draft
+    # of this fixture did exactly that: rows 3 and 4 both came out at aspect 0.05 because
+    # their smin (0.001) outranked the tiny axis meant to be smid.
+    ls = torch.log(torch.tensor([
+        [0.0005000, 0.0200, 0.020],   # aspect 1.000  -- healthy disc
+        [0.0005000, 0.0050, 0.020],   # aspect 0.250  -- healthy
+        [0.0000100, 0.0009, 0.020],   # aspect 0.045  -- NEEDLE, still deliverable
+        [0.0000010, 0.0001, 0.020],   # aspect 0.005  -- HARD needle, undeliverable
+    ]))
+    m = shape_metrics(ls)
+    assert m["needle_frac"] == pytest.approx(0.5)
+    assert m["hard_needle_frac"] == pytest.approx(0.25)
+    assert m["hard_needle_frac"] != m["needle_frac"], (
+        "fixture has no splat between the two thresholds: it cannot separate them")
+    # smid / smax are reported columns, and they are the MEDIANS of the sorted middle and
+    # largest axes -- not the collapse test (dlog(aspect) = dlog(smid) - dlog(smax), so
+    # aspect already IS that differential).
+    # 0.9, not the 2.95 an averaging median would give: `torch.median` returns the LOWER
+    # of the two middle values on an even-length input. Every p50 in this battery is that
+    # median, so the convention is pinned here rather than assumed at reading time.
+    assert m["smid_p50_mm"] == pytest.approx(0.9, abs=1e-4)
+    assert m["smax_p50_mm"] == pytest.approx(20.0, abs=1e-4)
+
+
+def test_hard_needle_fraction_is_a_subset_of_the_needle_fraction():
+    """CATCHES a threshold swapped between the two columns, or an inverted comparison:
+    every hard needle is a needle, so the hard fraction can never exceed it, and on a
+    population with a splat in between it must be strictly smaller."""
+    from metal_gauss.train import shape_metrics
+    g = torch.Generator().manual_seed(4)
+    ls = torch.log(torch.rand(500, 3, generator=g) * 0.05 + 1e-4)
+    m = shape_metrics(ls)
+    assert m["hard_needle_frac"] <= m["needle_frac"]
+
+
 def test_shape_metrics_are_invariant_to_axis_order():
     """The scales are unordered per splat; the metric must sort."""
     from metal_gauss.train import shape_metrics

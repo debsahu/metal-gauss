@@ -196,6 +196,20 @@ kernel void geom_loss_forward(
         }
 
         // ---- depth-normal consistency: gate on alpha AND both magnitudes ----
+        //
+        // THE GATE IS ON THE BASE PIXEL ONLY, AND THAT IS INTENDED, NOT AN OVERSIGHT.
+        // `nd` here is n_d(v,u), which nfd_forward differentiated from the depth at
+        // {(v,u), (v,u+1), (v+1,u)}, and NOTHING gates those two NEIGHBOURS: a pixel's
+        // normal can be built from a dropped (keep == 0) or uncovered (alpha <= 0.5)
+        // neighbour's depth. The torch path does exactly the same, Brush does exactly the
+        // same (normals_from_depth is stencil-only; the mask enters at the base pixel),
+        // and so no equivalence test in this repo can see it -- all three share it.
+        // research/depth-normal-loss-adjoint.md 2.5 raised it; Task 20 measured it on real
+        // maps and research/metal-gauss.md 13 records the numbers and the verdict. DO NOT
+        // "fix" this by adding a neighbour predicate here without reading that section:
+        // the alternative rule exists on the torch path behind MG_DN_GATE_NEIGHBOURS, and
+        // geometry_terms REFUSES this kernel while that flag is set precisely so a gated
+        // number can never be reported by an ungated implementation.
         const float3 nd = float3(n_d[o3], n_d[o3+1], n_d[o3+2]);
         if (alpha[gidx] * k > 0.5f && length(nd) > 0.5f && length(nr) > 0.5f) {
             dn_num = 1.0f - dot(nd, nr); dn_cnt = 1u;   // branch, never `* m`

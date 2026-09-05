@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "rule": "tier3-three-band-2026-09-04",
+  "what": "The FROZEN cumulative anchor for Band 1 on the Task 20 escalation arm. Per scene, the MEAN of that scene's Tier 3 floor arms on the four Band 1 columns -- copied out of floors.json so that a LATER arm's re-measured floors cannot move the reference the cumulative check reads. Without it the rule ratchets: four accepted 8 pp needle drifts are a collapse no single arm ever fired on.",
+  "re_measure_when": "the scene, budget, resolution, step count or downscale schedule changes -- and NOT when the base depth source changes, which is the drift this anchor exists to see.",
+  "machine_change_is_NOT_a_re_measure_trigger": "Pre-registration e94ee45 section 5. The pgeom entry was measured on the M5 Pro and these arms run on the M4 Max, and a change of MACHINE is not in the clause above. It also differs from these arms in three ways that are NOT the gate: dn 0.0 -> 0.05, fused -> torch loss chain, and --export-every 500. THE DATASET IS NOT ONE OF THEM -- all 593 files roll up to the same per-directory md5 on both machines. So the cumulative delta is reported DECOMPOSED: (F-mean - anchor) is everything-but-the-gate and (G0 - F-mean) is the gate. If the cumulative check fires while the per-arm check does not, what is in question is the anchor's applicability across a machine change, not the treatment.",
+  "pmask_has_no_frozen_anchor": "No Tier 3 arm has ever run on work/osmo_playroom/ds. One is written from that arm's OWN F0/F1/F2 means, at the same moment floors.json is written and before G0 is scored, into <out>/anchor.json marked self_anchored. CONSEQUENCE, STATED RATHER THAN DISCOVERED LATER: for the first arm the cumulative check is VACUOUS BY CONSTRUCTION, because the anchor IS the floor mean and the cumulative delta equals the per-arm delta exactly. It becomes a real check for the SECOND Tier 3 arm on that scene and not before. The harness MEASURES that vacuity rather than trusting the flag, and says so in the grade.",
+  "scenes": {
+    "pgeom": {
+      "source": {
+        "arms": [
+          "F0",
+          "F1",
+          "F2"
+        ],
+        "from": "bench/results/plane_aux/pgeom/floors.json",
+        "statistic": "mean of the three floor arms",
+        "git": [
+          "0273e93",
+          "8954ad1",
+          "bcbad54"
+        ],
+        "depth_source": "center",
+        "depth_normal_weight": 0.0,
+        "depth_loss_space": "disparity",
+        "copied_from": "feat/plane-aux:bench/results/plane_aux/tier3_anchor.json, scenes.pgeom, VERBATIM (values, config and source unchanged). Copied rather than merged or cherry-picked: that branch carries --depth-source and kernel changes that do not exist here, and an artifact is data, not code."
+      },
+      "config": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 0
+      },
+      "values": {
+        "run.needle_frac": 0.15156066914399466,
+        "run.aspect_p50": 0.31256911158561707,
+        "stats.on_seed_frac_1cm": 0.07190933333333334,
+        "run.lpips": 0.4012339810530345
+      },
+      "self_anchored": false
+    }
+  }
+}

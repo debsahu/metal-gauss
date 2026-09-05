@@ -196,14 +196,48 @@ def normals_from_depth(depth: torch.Tensor, fx, fy, cx, cy) -> torch.Tensor:
     return _normals_from_depth_torch(depth, fx, fy, cx, cy)
 
 
+def dn_neighbours_covered(covered: torch.Tensor) -> torch.Tensor:
+    """(H,W) bool: both of `(v,u)`'s `normals_from_depth` NEIGHBOURS are themselves covered.
+
+    The stencil is `{(v,u), (v,u+1), (v+1,u)}` -- forward differences, see
+    `_normals_from_depth_torch` -- so the two neighbours are the pixel to the RIGHT and the
+    pixel BELOW. The last row and the last column are False: they have no such neighbours,
+    and `normals_from_depth` emits exactly zero there in any case.
+
+    Used only by `depth_normal_loss(..., gate_neighbours=True)`, which is NOT the shipped
+    semantic. See that function's docstring for what is and is not measured about it.
+    """
+    out = torch.zeros_like(covered)
+    out[:-1, :-1] = covered[:-1, 1:] & covered[1:, :-1]
+    return out
+
+
 def depth_normal_loss(n_from_depth: torch.Tensor, n_rendered: torch.Tensor,
-                      alpha: torch.Tensor) -> torch.Tensor:
+                      alpha: torch.Tensor,
+                      gate_neighbours: bool = False) -> torch.Tensor:
     """PlanarGS depth-normal consistency: mean `1 - dot(n_d, n_r)` over covered, valid
     pixels. 0 when they agree, 1 at 90 degrees, 2 when anti-aligned -- so a sign-flipped
     prior blows this term up rather than hiding in it. Needs no prior data at all, which
-    makes it the cheapest of the three to switch on."""
+    makes it the cheapest of the three to switch on.
+
+    THE COVERAGE GATE IS ON THE BASE PIXEL ONLY, AND THAT IS DELIBERATE. `covered` here is
+    `alpha * keep > 0.5` at `(v,u)`; `n_d(v,u)` is differentiated from the depth at
+    `(v,u), (v,u+1), (v+1,u)`, and nothing stops either NEIGHBOUR being a dropped
+    (`keep == 0`) or uncovered (`alpha <= 0.5`) pixel with positive depth. Brush computes
+    the same thing -- `normals_from_depth` is stencil-only and the mask enters at the base
+    pixel -- and the fused Metal kernel reproduces it, so no equivalence test in this repo
+    can see it. See research/depth-normal-loss-adjoint.md section 2.5.
+
+    `gate_neighbours=True` is the candidate alternative, and it exists for MEASUREMENT, not
+    for use: the fused kernel does not implement it, so `geometry_terms` REFUSES the fused
+    path while it is set rather than silently reporting an ungated number. Task 20's bound
+    is in research/metal-gauss.md section 13; do not switch this default on the strength of
+    a fixture.
+    """
     covered = alpha > 0.5
     valid = covered & (n_from_depth.norm(dim=-1) > 0.5) & (n_rendered.norm(dim=-1) > 0.5)
+    if gate_neighbours:
+        valid = valid & dn_neighbours_covered(covered)
     v3 = valid[..., None]
     nd = torch.where(v3, n_from_depth, torch.zeros_like(n_from_depth))
     nr = torch.where(v3, n_rendered, torch.zeros_like(n_rendered))
