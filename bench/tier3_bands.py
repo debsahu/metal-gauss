@@ -317,7 +317,8 @@ def band2(verdicts: dict, *, lever: str = "geometry", gate: tuple = BAND2_GATE) 
     return "PASS" if on_seed == "IMPROVED" else "WITHIN FLOOR"
 
 
-def band3(psnr_treatment: float, psnr_baseline: float) -> dict:
+def band3(psnr_treatment: float, psnr_baseline: float,
+          scene_psnr_floor: float | None = None) -> dict:
     """Hard DROP on a PSNR LOSS greater than 0.25 dB, or on falling below the
     24 dB Stage 4 gate from at or above it.
 
@@ -325,14 +326,58 @@ def band3(psnr_treatment: float, psnr_baseline: float) -> dict:
     regression, and the older two-sided "must be WITHIN floor" reading is what
     made every Tier 3 arm unable to PASS whatever its geometry did. Both
     comparisons are strict.
+
+    AMENDMENT 2 (`7c738b8`, recorded 2026-09-05 before the arm it affects existed).
+    `scene_psnr_floor` is the scene's OWN n>=3 masked-PSNR floor. When it is at or above
+    the 0.25 dB threshold, this band returns **INDETERMINATE** -- neither FIRED nor PASS:
+
+        Band 3 returns INDETERMINATE on any scene whose own n>=3 masked-PSNR floor is
+        >= the 0.25 dB threshold. On such a scene Band 3 contributes nothing to the
+        verdict, and the outcome is decided by Band 1, Band 2 and the task's primary
+        evidence alone. The verdict must state INDETERMINATE explicitly, with the
+        scene's floor beside the threshold, and must not be reported as a pass.
+
+    WHY. 3cfd8f3 derived 0.25 dB as a PRODUCT-VISIBILITY bar standing ABOVE the noise --
+    "a loss smaller than the pipeline's own reproduction spread cannot be a product-
+    visible regression". Where the scene's reproduction spread IS the bar, that premise
+    fails and the conclusion does not follow: the band would hard-DROP a treatment for a
+    movement two identical runs also produce. Measured on P-MASK, whose same-seed repeat
+    pair F0/F1 differ by 0.2475 dB on masked PSNR.
+
+    IT INTRODUCES NO NEW CONSTANT. The trigger compares two quantities the protocol
+    already measures. `max(0.25, k x floor)` was considered and REJECTED: `k` would be a
+    number chosen after seeing 0.2475.
+
+    `scene_psnr_floor=None` means the floor was not supplied, and the band is live -- the
+    pre-amendment behaviour, which is what Task 22's already-scored P-GEOM arm was graded
+    under and what this deliberately does not disturb. `status` is always one of
+    FIRED / PASS / INDETERMINATE, so no reader has to infer the third state from `fired`
+    being False.
     """
     loss = psnr_baseline - psnr_treatment
     crossed = psnr_baseline >= STAGE4_PSNR_DB > psnr_treatment
-    return {"baseline": psnr_baseline, "treatment": psnr_treatment, "loss_db": loss,
-            "allowance_db": PSNR_DROP_DB, "exceeds_allowance": loss > PSNR_DROP_DB,
-            "crossed_stage4_gate": crossed,
-            "baseline_above_stage4": psnr_baseline >= STAGE4_PSNR_DB,
-            "fired": bool(loss > PSNR_DROP_DB or crossed)}
+    indeterminate = (scene_psnr_floor is not None
+                     and scene_psnr_floor >= PSNR_DROP_DB)
+    fired = bool(loss > PSNR_DROP_DB or crossed)
+    out = {"baseline": psnr_baseline, "treatment": psnr_treatment, "loss_db": loss,
+           "allowance_db": PSNR_DROP_DB, "exceeds_allowance": loss > PSNR_DROP_DB,
+           "crossed_stage4_gate": crossed,
+           "baseline_above_stage4": psnr_baseline >= STAGE4_PSNR_DB,
+           "scene_psnr_floor_n3": scene_psnr_floor,
+           "indeterminate": indeterminate,
+           "fired": False if indeterminate else fired}
+    out["status"] = ("INDETERMINATE" if indeterminate
+                     else ("FIRED" if fired else "PASS"))
+    if indeterminate:
+        out["indeterminate_note"] = (
+            f"AMENDMENT 2 (7c738b8): this scene's own n>=3 masked-PSNR floor is "
+            f"{scene_psnr_floor:.6g} dB, at or above the {PSNR_DROP_DB} dB threshold, so "
+            f"the threshold sits inside the scene's own reproduction noise and has no "
+            f"discriminating power. Band 3 contributes NOTHING to this scene's verdict. "
+            f"This is NOT a pass: it would have {'FIRED' if fired else 'passed'} had it "
+            f"been evaluated, and that is recorded rather than acted on.")
+        out["would_have_fired"] = fired
+    return out
 
 
 def drift_columns(rows: dict, verdicts: dict, band1_detail: dict,

@@ -942,13 +942,22 @@ def grade(scene: str, dn: float, t: dict, fl: dict, anchor_entry: dict) -> dict:
     b1 = band1(t["values"], base_vals, anchor_values,
                bool(anchor_entry.get("self_anchored")))
     b2 = band2(verdict)
-    b3 = band3(t["values"]["run.psnr_masked"], fl["run.psnr_masked"]["mean"])
+    # AMENDMENT 2 (`7c738b8`): the scene's OWN n>=3 masked-PSNR floor goes in, so Band 3
+    # can tell whether its 0.25 dB threshold still stands ABOVE this scene's reproduction
+    # noise. Passing a constant here is how the amendment gets implemented in the band and
+    # never reaches a verdict.
+    b3 = band3(t["values"]["run.psnr_masked"], fl["run.psnr_masked"]["mean"],
+               fl["run.psnr_masked"]["spread_n3"])
     drift = drift_columns(rows, verdict, b1, b2, b3["fired"])
     drop = bool(b1["fired"] or b2 == "FAIL" or b3["fired"])
     return {"schema": 2, "rule": "tier3-three-band-2026-09-04", "scene": scene, "dn": dn,
             "arm": t["tag"], "treatment": {k: v for k, v in t.items() if k != "values"},
             "band1": b1, "band1_fired": b1["fired"],
             "band2": b2, "band3": b3, "band3_fired": b3["fired"],
+            # FIRED / PASS / INDETERMINATE. `band3_fired` alone cannot distinguish a pass
+            # from a band that could not judge, and AMENDMENT 2 says in terms that an
+            # INDETERMINATE "must not be reported as a pass".
+            "band3_status": b3["status"],
             "drift": drift, "scene_drop": drop,
             "scene_pass": (b2 == "PASS" and not drop),
             "falsifier_triggered_on_this_scene":
@@ -1065,6 +1074,11 @@ def combined_verdict(per_scene: dict) -> dict:
     drifting = {s: per_scene[s].get("drift") or [] for s in scenes}
     any_drift = any(drifting[s] for s in scenes)
     fals = [s for s in scenes if per_scene[s].get("falsifier_triggered_on_this_scene")]
+    # AMENDMENT 2 (`7c738b8`): a scene whose own n>=3 masked-PSNR floor swallows Band 3's
+    # 0.25 dB threshold. Carried forward as its OWN state -- a scene where the photometric
+    # band could not judge is not a scene where it passed, and the cross-scene line is
+    # where that distinction would otherwise be lost.
+    indet = [s for s in scenes if per_scene[s].get("band3_status") == "INDETERMINATE"]
 
     if drops:
         decision = "DROP"
@@ -1087,13 +1101,23 @@ def combined_verdict(per_scene: dict) -> dict:
                 "reported as 'detectable early, immaterial at 30k' and is STILL NOT "
                 "ADOPTED.",
             "passed_on": passes, "within_floor_on": within, "regressed_on": drops,
+            "band3_indeterminate_on": indet,
+            "band3_indeterminate_note":
+                ("Band 3 returned INDETERMINATE on " + ", ".join(indet) + ": each of "
+                 "those scenes' own n>=3 masked-PSNR floor is at or above the "
+                 f"{PSNR_DROP_DB} dB threshold, so the threshold sits inside the scene's "
+                 "own reproduction noise and has no discriminating power. Band 3 "
+                 "contributed NOTHING to those scenes' verdicts, which rest on Band 1, "
+                 "Band 2 and the task's primary evidence alone. This is NOT a pass "
+                 "(AMENDMENT 2, 7c738b8)." if indet else None),
             "drift_on": {s: [d["metric"] for d in drifting[s]] for s in scenes
                          if drifting[s]},
             "dn_settings_measured": sorted({per_scene[s].get("dn") for s in scenes}),
             "falsifier_scenes": fals,
             "per_scene": {s: {k: per_scene[s].get(k) for k in
-                              ("band1_fired", "band2", "band3_fired", "scene_pass",
-                               "scene_drop", "geometry_gate", "psnr_verdict", "dn")}
+                              ("band1_fired", "band2", "band3_fired", "band3_status",
+                               "scene_pass", "scene_drop", "geometry_gate",
+                               "psnr_verdict", "dn")}
                           | {"drift": [d["metric"] for d in drifting[s]]}
                           for s in scenes}}
 
@@ -1321,6 +1345,9 @@ def _score_and_grade(a, out: Path) -> dict:
 
 
 GRADE_HEADLINE = ("scene", "arm", "rule", "band1_fired", "band2", "band3_fired",
+                  # AMENDMENT 2: the operator must SEE an INDETERMINATE on the one line
+                  # they read, not have to open the JSON to find that Band 3 abstained.
+                  "band3_status",
                   "scene_pass", "scene_drop", "falsifier_triggered_on_this_scene",
                   "geometry_gate", "psnr_verdict")
 

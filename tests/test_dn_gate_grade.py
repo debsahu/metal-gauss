@@ -678,3 +678,60 @@ def test_regrade_reproduces_the_grade_from_the_ARTIFACTS_ALONE(tmp_path):
     H.write_grade(out, "G0", first)
     again = H.grade_scene(out, "pgeom", 0.05, "G0", H.ANCHOR_PATH)
     assert json.dumps(again, sort_keys=True) == json.dumps(first, sort_keys=True)
+
+
+# ------------------- AMENDMENT 2 (Task 20, commit 7c738b8), wired into the grade
+
+def _indeterminate_scene(tmp_path, treat_psnr=24.5):
+    """A scene whose own n=3 masked-PSNR floor is 0.30 dB -- above Band 3's 0.25 -- and a
+    treatment that loses 0.63 dB, i.e. one that WOULD fire."""
+    return graded(tmp_path,
+                  floors=({"run.psnr_masked": 25.0}, {"run.psnr_masked": 25.0},
+                          {"run.psnr_masked": 25.3}),
+                  treatment={"run.psnr_masked": treat_psnr})
+
+
+def test_band3_is_INDETERMINATE_in_the_GRADE_when_the_scenes_own_floor_swallows_it(
+        tmp_path):
+    """AMENDMENT 2 was pre-registered in `7c738b8` -- an EMPTY commit whose message is the
+    whole record -- and was implemented nowhere. This is the wiring: the grade must pass
+    the scene's OWN n=3 masked-PSNR floor to Band 3, not grade every scene against a
+    constant.
+
+    CATCHES the amendment being implemented in the band and never reaching the grade,
+    which is the state this branch was actually in: `band3` could return INDETERMINATE all
+    day while `grade()` called it with two arguments and got a DROP."""
+    g = _indeterminate_scene(tmp_path)
+    assert g["band3"]["scene_psnr_floor_n3"] == pytest.approx(0.30)
+    assert g["band3"]["status"] == "INDETERMINATE"
+    assert g["band3"]["would_have_fired"] is True
+    assert g["band3_fired"] is False
+    assert g["band3_status"] == "INDETERMINATE"
+    # "must not be reported as a pass" -- the rule's own words. A reader who only has
+    # `band3_fired` cannot tell this from a pass, so the grade carries the status too.
+    assert g["scene_drop"] is False, "an INDETERMINATE band contributes nothing, incl. a DROP"
+
+
+def test_a_scene_whose_floor_is_BELOW_the_threshold_keeps_a_LIVE_Band_3(tmp_path):
+    """The control, and the amendment's own Scope section: P-GEOM's floor is 0.142204, so
+    Band 3 stays live there and its already-scored verdict stands exactly as measured. If
+    this ever reads INDETERMINATE the amendment has silently retired Band 3 everywhere,
+    which is the opposite of what it says."""
+    g = graded(tmp_path,
+               floors=({"run.psnr_masked": 25.0}, {"run.psnr_masked": 25.0},
+                       {"run.psnr_masked": 25.1}),          # floor 0.10 < 0.25
+               treatment={"run.psnr_masked": 24.5})
+    assert g["band3"]["scene_psnr_floor_n3"] == pytest.approx(0.10)
+    assert g["band3_status"] == "FIRED" and g["band3_fired"] is True
+    assert g["scene_drop"] is True
+
+
+def test_the_cross_scene_verdict_never_turns_an_INDETERMINATE_into_a_silent_pass(tmp_path):
+    """`combined_verdict` recomputes the drop set from the bands rather than trusting each
+    scene's `scene_drop`. It must carry the INDETERMINATE forward as its own state: a
+    scene where the photometric band could not judge is not a scene where it passed."""
+    g = _indeterminate_scene(tmp_path)
+    c = H.combined_verdict({"pgeom": g})
+    assert c["per_scene"]["pgeom"]["band3_status"] == "INDETERMINATE"
+    assert c["band3_indeterminate_on"] == ["pgeom"]
+    assert "INDETERMINATE" in (c["band3_indeterminate_note"] or "")
