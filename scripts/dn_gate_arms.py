@@ -79,6 +79,23 @@ if not (ROOT / "metal_gauss" / "train.py").exists():
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# THE THREE-BAND RULE LIVES IN ONE PLACE, and it is not this file. It was defined here
+# and, independently, in `bench/tier3_bands.py` (Task 22) while this branch was open. The
+# two were DIFFERENTIALLY AUDITED -- 4,079 checks, including at each threshold and
+# +/-1e-12 either side, zero disagreements -- and unified on the audit's own
+# recommendation: threshold PROVENANCE from Task 22's copy, the CUMULATIVE half from this
+# one. Shipping two graders on main is how two numbers with the same name come to mean
+# different things, which is the failure `bench/ply_shape.py` was written to avoid one
+# layer down. Every band constant and function below is re-exported, so `H.COLLAPSE` and
+# `H.band2` still resolve for the tests and the mutation battery -- what changed is where
+# they are DEFINED.
+from bench.tier3_bands import (                                        # noqa: E402
+    ANCHOR_CONFIG_KEYS, BAND2_GATE, COLLAPSE, DIRECTION, DRIFT_SCOPE, GEOMETRY_GATE,
+    ON_SEED_1CM, PSNR_DROP_DB, STAGE4_PSNR_DB, THIN_AXIS_GATED,
+    _collapse_side, band1, band2, band3, collapse_delta, drift_columns,
+    threshold_relative, transfers_between_scenes, verdict_for,
+)
+
 # Monkeypatchable so the guards can be exercised against a stand-in child in the tests.
 # A mocked subprocess would test the mock; a real child tests the watchdog, the liveness
 # poll, the log capture, the environment overlay and the exit status.
@@ -833,247 +850,20 @@ def write_self_anchor(out: Path, scene: str, fl: dict, resolved: dict) -> Path:
 
 # ============================================================ the three bands
 #
-# THE TIER 3 KEEP/DROP RULE, `3cfd8f3`, which replaced "WORSENED anywhere = DROP".
+# DEFINED IN `bench/tier3_bands.py` AND IMPORTED AT THE TOP OF THIS FILE. What used to sit
+# here -- DIRECTION, GEOMETRY_GATE, COLLAPSE, BAND2_GATE, PSNR_DROP_DB, STAGE4_PSNR_DB,
+# DRIFT_SCOPE, ANCHOR_CONFIG_KEYS, transfers_between_scenes, threshold_relative,
+# collapse_delta, _collapse_side, band1, band2, band3, drift_columns and verdict_for --
+# moved there verbatim except for the two changes recorded in that module's docstring:
+# refusals are `ValueError` rather than `SystemExit` (converted back at this file's CLI
+# boundary, see `main`), and `band1`'s anchor is optional so a first-arm caller with no
+# frozen predecessor gets `cumulative: None` instead of a tautology.
 #
-# The old rule was magnitude-blind: it returned the same one-word verdict for Task 19's
-# 4.5x-floor drift (needles +0.6 pp, aspect -2.5%, on-seed UP 36% relative) and for the
-# Tier 2 VOID row's collapse (needles +40 pp, aspect -78%, on-seed HALVED) -- ~35x apart.
+# THE THREE BANDS, for a reader who is here rather than there:
 #
 #   Band 1  COLLAPSE     hard DROP, any one column, per-arm AND cumulative
 #   Band 2  GEOMETRY     on-seed@1cm must RISE; thin-axis must not worsen
 #   Band 3  PHOTOMETRIC  hard DROP on a >0.25 dB PSNR loss, or crossing the 24 dB gate
-#
-# Every Band 1 threshold is `sqrt(healthy x collapse)` in the column's natural space, with
-# the adopted arm chosen PER COLUMN (aspect on R1, the rest on R1p -- a uniform anchor is
-# UNDEFINED for on-seed, which R1 improved). research/metal-gauss.md 13.6 re-derives all
-# four from the plys. They are conventions with a stated derivation, not measurements.
-
-DIRECTION = {
-    "stats.on_seed_frac_1cm": +1,
-    "stats.on_seed_frac_2cm": +1,
-    "stats.thin_axis_angle_p50": -1,
-    "run.aspect_p50": +1,
-    "run.needle_frac": -1,
-    "run.lpips": -1,
-    "run.psnr_masked": 0,
-}
-GEOMETRY_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50",
-                 "run.aspect_p50", "run.needle_frac")
-
-COLLAPSE = {
-    "run.needle_frac":        {"space": "abs", "worse": +1, "threshold": 0.108},
-    "run.aspect_p50":         {"space": "log", "worse": -1, "threshold": 0.346},
-    "stats.on_seed_frac_1cm": {"space": "log", "worse": -1, "threshold": 0.185},
-    "run.lpips":              {"space": "abs", "worse": +1, "threshold": 0.017},
-}
-BAND2_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50")
-
-PSNR_DROP_DB = 0.25
-STAGE4_PSNR_DB = 24.0
-
-DRIFT_SCOPE = tuple(dict.fromkeys(tuple(COLLAPSE) + BAND2_GATE + ("run.psnr_masked",)))
-
-ANCHOR_CONFIG_KEYS = ("budget", "steps", "max_resolution", "num_downscales")
-
-
-def transfers_between_scenes(spec: dict) -> bool:
-    """A LOG threshold is a ratio and means the same relative change on any baseline; an
-    ABSOLUTE one does not. DERIVED from the space rather than declared, so the two cannot
-    drift apart -- and so the grade can say which of the four transfer.
-
-    This is the machine-readable form of pre-registration section 5: `needle_frac +10.8
-    pp` is 71% relative on P-GEOM's 0.1516 baseline and ~46% on P-MASK's 0.2348, so
-    quoting it as a constant across scenes is quoting two different rules.
-    """
-    return spec["space"] == "log"
-
-
-def threshold_relative(spec: dict, reference: float):
-    """The threshold as a FRACTION OF THE BASELINE, in one comparable form for both
-    spaces, so a reader never has to convert between pp and dlog to see how big it is."""
-    if spec["space"] == "abs":
-        return (spec["threshold"] / reference) if reference else None
-    t = spec["threshold"]
-    return (1.0 - math.exp(-t)) if spec["worse"] < 0 else (math.exp(t) - 1.0)
-
-
-def collapse_delta(metric: str, value: float, reference: float) -> float:
-    """How far `value` sits from `reference` TOWARD WORSE, in the column's natural space.
-
-    POSITIVE = WORSE, always, whichever direction the column runs. A sign error inverts
-    every Band 1 test -- an arm that HALVED on-seed would read as a large improvement and
-    no collapse could ever fire -- so the sign is a test of its own.
-    """
-    spec = COLLAPSE[metric]
-    if spec["space"] == "log":
-        if value <= 0.0 or reference <= 0.0:
-            raise SystemExit(f"{metric}: log-space column needs positive values, got "
-                             f"value={value!r} reference={reference!r}")
-        d = math.log(value) - math.log(reference)
-    else:
-        d = value - reference
-    return spec["worse"] * d
-
-
-def _collapse_side(values: dict, reference: dict, what: str) -> dict:
-    row = {}
-    for col, spec in COLLAPSE.items():
-        if col not in values:
-            raise SystemExit(f"Band 1 column {col} is missing from the treatment "
-                             f"battery. A collapse column that was never measured must "
-                             f"never read as 'did not collapse'.")
-        if col not in reference:
-            raise SystemExit(f"Band 1 column {col} is missing from the {what}. An anchor "
-                             f"or baseline that predates a column cannot testify about "
-                             f"that column.")
-        d = collapse_delta(col, values[col], reference[col])
-        thr = spec["threshold"]
-        row[col] = {"value": values[col], "reference": reference[col], "delta": d,
-                    "threshold": thr, "x_threshold": d / thr, "space": spec["space"],
-                    # Pre-registration section 5: state the scene's own baseline beside
-                    # the threshold rather than applying a constant from another scene.
-                    "scene_baseline": reference[col],
-                    "threshold_relative_to_baseline": threshold_relative(spec,
-                                                                         reference[col]),
-                    "threshold_transfers_between_scenes": transfers_between_scenes(spec),
-                    "fired": d > thr}
-    return row
-
-
-def band1(t_values: dict, base_values: dict, anchor_values: dict,
-          self_anchored: bool) -> dict:
-    """Band 1 -- COLLAPSE. Hard DROP; any ONE column; per-arm AND cumulative.
-
-    Per-arm is against this arm's own re-measured base. Cumulative is against the scene's
-    FROZEN anchor, and it is the half that stops the rule ratcheting: four accepted 8 pp
-    needle drifts are a 32 pp collapse that no single arm ever fired on.
-
-    Comparison is STRICT: a delta exactly equal to the threshold has not fired.
-
-    VACUITY IS MEASURED, NOT READ OFF A FLAG. On a self-anchored scene's FIRST arm the
-    anchor IS the floor mean and the cumulative delta equals the per-arm delta exactly, so
-    the check decides nothing -- but on the second arm the floors have moved and it starts
-    deciding. A harness that reported vacuity from `self_anchored` would go on saying so
-    forever, exactly when the check begins to matter.
-    """
-    per = _collapse_side(t_values, base_values, "baseline")
-    cum = _collapse_side(t_values, anchor_values, "anchor")
-    vacuous = all(abs(anchor_values[c] - base_values[c])
-                  <= 1e-12 * max(1.0, abs(base_values[c])) for c in COLLAPSE)
-    note = ("VACUOUS BY CONSTRUCTION on this arm: the anchor IS this arm's own floor mean, "
-            "so the cumulative delta equals the per-arm delta exactly and the cumulative "
-            "half decides nothing. This is NOT a cumulative check that was made and "
-            "passed. It becomes a real check for the SECOND Tier 3 arm on this scene."
-            if vacuous else
-            "The anchor differs from this arm's floor mean, so the cumulative half is a "
-            "real check.")
-    decomposition = {
-        c: {"everything_but_the_gate": collapse_delta(c, base_values[c],
-                                                      anchor_values[c]),
-            "the_gate": collapse_delta(c, t_values[c], base_values[c])}
-        for c in COLLAPSE}
-    pf = [k for k, v in per.items() if v["fired"]]
-    cf = [k for k, v in cum.items() if v["fired"]]
-    return {"per_arm": per, "cumulative": cum, "per_arm_fired": pf,
-            "cumulative_fired": cf, "fired": bool(pf or cf),
-            "anchor_is_self_anchored": self_anchored,
-            "cumulative_check_vacuous": vacuous, "cumulative_note": note,
-            # Pre-registration section 5: the frozen P-GEOM anchor differs from these arms
-            # in four ways that are NOT the gate (dn, loss chain, --export-every, and the
-            # MACHINE), so a cumulative firing must never be read as a treatment effect.
-            "decomposition": decomposition,
-            "decomposition_note":
-                "(F-mean - anchor) is everything-but-the-gate; (G0 - F-mean) is the gate. "
-                "They sum to the cumulative delta in the column's own space. If the "
-                "cumulative check fires while the per-arm one does not, what is in "
-                "question is the anchor's applicability, not the treatment."}
-
-
-def band2(verdicts: dict) -> str:
-    """Band 2 -- GEOMETRY GATE.
-
-        PASS          on-seed@1cm IMPROVED beyond floor, thin-axis p50 not WORSENED
-        FAIL          either column WORSENED beyond floor
-        WITHIN FLOOR  neither worsened, but on-seed did not rise either
-
-    Aspect and needles are deliberately NOT read here. Moving them to Band 1, where a 2.5%
-    move and a 78% collapse get different answers, IS the amendment.
-    """
-    missing = [k for k in BAND2_GATE if verdicts.get(k) is None]
-    if missing:
-        raise SystemExit(f"Band 2 columns missing from the battery: {missing}. An absent "
-                         f"gate column must never read as a pass.")
-    on_seed, thin = (verdicts[k] for k in BAND2_GATE)
-    if on_seed == "WORSENED" or thin == "WORSENED":
-        return "FAIL"
-    if on_seed == "IMPROVED":
-        return "PASS"
-    return "WITHIN FLOOR"
-
-
-def band3(psnr_treatment: float, psnr_baseline: float) -> dict:
-    """Band 3 -- PHOTOMETRIC. Hard DROP on a PSNR LOSS greater than 0.25 dB, or on falling
-    below the 24 dB Stage 4 gate from at or above it.
-
-    ONE-SIDED by construction: the rule says "falls by", and the old two-sided "must be
-    WITHIN floor" is what made every Tier 3 arm unable to PASS whatever its geometry did.
-    A gain is not a regression. Both comparisons are strict.
-    """
-    loss = psnr_baseline - psnr_treatment
-    crossed = psnr_baseline >= STAGE4_PSNR_DB > psnr_treatment
-    return {"baseline": psnr_baseline, "treatment": psnr_treatment, "loss_db": loss,
-            "allowance_db": PSNR_DROP_DB, "exceeds_allowance": loss > PSNR_DROP_DB,
-            "crossed_stage4_gate": crossed,
-            "baseline_above_stage4": psnr_baseline >= STAGE4_PSNR_DB,
-            "fired": bool(loss > PSNR_DROP_DB or crossed)}
-
-
-def drift_columns(rows: dict, verdicts: dict, band1_detail: dict,
-                  band2_verdict=None, band3_fired: bool = False) -> list:
-    """Beyond floor, below Band 1, and WORSE. Reported with sign and x floor; never a DROP.
-
-    Two exclusions carry the definition:
-      * IMPROVEMENTS are not drift. Band 2 REQUIRES on-seed to improve beyond its floor,
-        so counting any beyond-floor move would make KEEP AS DEFAULT unreachable by
-        construction -- and a rule with an unreachable branch is a broken rule.
-      * A column that FIRED Band 1 is a COLLAPSE, not a drift. Reporting it as drift would
-        make a hard DROP read as adoptable-with-caveats.
-    """
-    fired = set(band1_detail["per_arm_fired"]) | set(band1_detail["cumulative_fired"])
-    out = []
-    for k in DRIFT_SCOPE:
-        if k in fired or k not in rows or k not in verdicts:
-            continue
-        d = rows[k]["delta"]
-        if DIRECTION.get(k, 0) == 0:
-            worse = verdicts[k] == "MOVED" and d < 0      # two-sided: only a FALL is bad
-        else:
-            worse = verdicts[k] == "WORSENED"
-        if not worse:
-            continue
-        fl = rows[k]["floor_spread_n3"]
-        # A Band 2 column that WORSENED is why the scene failed, not a harmless drift; it
-        # satisfies the literal definition, so it is reported rather than hidden -- but
-        # flagged, because a list whose entries mean "adoptable with caveats" and "this is
-        # the DROP" at once is precisely the check-shape CLAUDE.md warns about.
-        caused_fail = bool(band2_verdict == "FAIL" and k in BAND2_GATE
-                           and verdicts.get(k) == "WORSENED")
-        caused_b3 = bool(band3_fired and k == "run.psnr_masked")
-        out.append({"metric": k, "delta": d, "floor_spread_n3": fl,
-                    "x_floor": abs(d) / fl if fl else None, "sign": "worse",
-                    "caused_band2_fail": caused_fail, "caused_band3_fire": caused_b3})
-    return out
-
-
-def verdict_for(metric: str, delta: float, floor: float) -> str:
-    """IMPROVED / WORSENED / WITHIN FLOOR for one metric. `abs(delta) > floor` is STRICT:
-    a delta exactly equal to the floor has not cleared it."""
-    sign = DIRECTION[metric]
-    if abs(delta) <= floor:
-        return "WITHIN FLOOR"
-    if sign == 0:
-        return "MOVED"
-    return "IMPROVED" if sign * delta > 0 else "WORSENED"
 
 
 def load_anchor(path, scene: str, out: Path) -> dict:
@@ -1536,6 +1326,23 @@ GRADE_HEADLINE = ("scene", "arm", "rule", "band1_fired", "band2", "band3_fired",
 
 
 def main(argv=None) -> None:
+    """THE CLI BOUNDARY, and the only place a `ValueError` becomes an exit.
+
+    `bench/tier3_bands.py` raises `ValueError` because it is a library: catchable by
+    `except Exception`, assertable in a unit test without importing a CLI's conventions.
+    An operator running this script should still see one line and a non-zero exit rather
+    than a traceback, and that is what this wrapper preserves -- so the change of
+    exception type is invisible from the command line, which is what makes it safe. The
+    guards in THIS file keep raising `SystemExit` directly; they are already at the
+    boundary.
+    """
+    try:
+        return _main(argv)
+    except ValueError as e:                       # from bench.tier3_bands, never swallowed
+        raise SystemExit(str(e)) from e
+
+
+def _main(argv=None) -> None:
     a = build_parser().parse_args(argv)
     out = Path(a.out)
 

@@ -19,7 +19,15 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TARGET = ROOT / "scripts" / "dn_gate_arms.py"
+#: The two files the rule now lives in. THE RULE ITSELF is in `bench/tier3_bands.py`
+#: (unified there from this branch's copy and Task 22's); the HARNESS around it -- the
+#: battery, the floors, the anchors, the cross-scene verdict and the probe -- is in
+#: `scripts/dn_gate_arms.py`. Every mutant below names which file it edits, so the move
+#: could not leave a mutant pointing at a file that no longer contains its anchor. It
+#: could not do so SILENTLY in any case: `sub` asserts the anchor is present exactly once,
+#: so a stale anchor is a hard error at the mutation site rather than a false SURVIVED.
+HARNESS = ROOT / "scripts" / "dn_gate_arms.py"
+BANDS = ROOT / "bench" / "tier3_bands.py"
 ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 PROBE = r'''
@@ -238,90 +246,90 @@ def sub(text, old, new, count=1):
 
 
 MUTANTS = [
-    ("band1_ignores_the_CUMULATIVE_half",
+    ("band1_ignores_the_CUMULATIVE_half", BANDS,
      lambda s: sub(s, '    cf = [k for k, v in cum.items() if v["fired"]]', "    cf = []"),
      "test_band1_fires_CUMULATIVELY_even_when_the_per_arm_check_does_not"),
 
-    ("collapse_delta_sign_inverted",
+    ("collapse_delta_sign_inverted", BANDS,
      lambda s: sub(s, '    return spec["worse"] * d', '    return -spec["worse"] * d'),
      "test_collapse_delta_is_POSITIVE_TOWARD_WORSE_in_both_spaces"),
 
-    ("a_missing_Band1_column_reads_as_no_collapse",
+    ("a_missing_Band1_column_reads_as_no_collapse", BANDS,
      lambda s: sub(s, "        if col not in values:\n", "        if False:\n"),
      "test_a_MISSING_Band1_column_is_refused_rather_than_reading_as_no_collapse"),
 
-    ("band2_treats_an_absent_gate_column_as_a_pass",
-     lambda s: sub(s, "    missing = [k for k in BAND2_GATE if verdicts.get(k) is None]",
+    ("band2_treats_an_absent_gate_column_as_a_pass", BANDS,
+     lambda s: sub(s, "    missing = [k for k in gate if verdicts.get(k) is None]",
                    "    missing = []"),
      "test_band2_FAILS_on_a_worsened_column_and_an_ABSENT_column_is_refused"),
 
-    ("band2_still_reads_aspect_and_needles",
-     lambda s: sub(s, 'BAND2_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50")',
-                   'BAND2_GATE = ("stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50",\n'
+    ("band2_still_reads_aspect_and_needles", BANDS,
+     lambda s: sub(s, "BAND2_GATE = (ON_SEED_1CM, THIN_AXIS_GATED)",
+                   'BAND2_GATE = (ON_SEED_1CM, THIN_AXIS_GATED,\n'
                    '              "run.aspect_p50", "run.needle_frac")'),
      "test_band2_FAILS_on_a_worsened_column_and_an_ABSENT_column_is_refused"),
 
-    ("band3_is_TWO_SIDED_again",
+    ("band3_is_TWO_SIDED_again", BANDS,
      lambda s: sub(s, '"exceeds_allowance": loss > PSNR_DROP_DB',
                    '"exceeds_allowance": abs(loss) > PSNR_DROP_DB')
                  .replace('"fired": bool(loss > PSNR_DROP_DB or crossed)',
                           '"fired": bool(abs(loss) > PSNR_DROP_DB or crossed)'),
      "test_band3_is_ONE_SIDED_a_PSNR_GAIN_is_not_a_regression"),
 
-    ("band3_comparison_is_not_strict",
+    ("band3_comparison_is_not_strict", BANDS,
      lambda s: sub(s, '"fired": bool(loss > PSNR_DROP_DB or crossed)',
                    '"fired": bool(loss >= PSNR_DROP_DB or crossed)'),
      "test_band3_is_ONE_SIDED_a_PSNR_GAIN_is_not_a_regression"),
 
-    ("band3_drops_the_Stage4_gate_clause",
+    ("band3_drops_the_Stage4_gate_clause", BANDS,
      lambda s: sub(s, "    crossed = psnr_baseline >= STAGE4_PSNR_DB > psnr_treatment",
                    "    crossed = False"),
      "test_band3_fires_on_CROSSING_the_24dB_Stage4_gate_from_above"),
 
-    ("drift_counts_IMPROVEMENTS",
+    ("drift_counts_IMPROVEMENTS", BANDS,
      lambda s: sub(s, '            worse = verdicts[k] == "WORSENED"',
                    '            worse = verdicts[k] != "WITHIN FLOOR"'),
      "test_DRIFT_excludes_improvements_and_excludes_a_Band1_firing"),
 
-    ("drift_includes_a_Band1_firing",
+    ("drift_includes_a_Band1_firing", BANDS,
      lambda s: sub(s, '    fired = set(band1_detail["per_arm_fired"]) | '
                       'set(band1_detail["cumulative_fired"])',
                    "    fired = set()"),
      "test_DRIFT_excludes_improvements_and_excludes_a_Band1_firing"),
 
-    ("drift_does_not_flag_the_column_that_CAUSED_the_fire",
+    ("drift_does_not_flag_the_column_that_CAUSED_the_fire", BANDS,
      lambda s: sub(s, '        caused_b3 = bool(band3_fired and k == "run.psnr_masked")',
                    "        caused_b3 = False"),
      "test_a_drift_column_that_CAUSED_the_scene_to_fail_is_flagged_as_such"),
 
-    ("threshold_relative_ignores_the_scene_baseline",
+    ("threshold_relative_ignores_the_scene_baseline", BANDS,
      lambda s: sub(s, '        return (spec["threshold"] / reference) if reference else None',
                    '        return spec["threshold"]'),
      "test_the_ABSOLUTE_Band1_thresholds_are_reported_relative_to_the_SCENES_OWN_baseline"),
 
-    ("transfers_between_scenes_hardcoded_true",
+    ("transfers_between_scenes_hardcoded_true", BANDS,
      lambda s: sub(s, '    return spec["space"] == "log"\n\n\ndef threshold_relative',
                    "    return True\n\n\ndef threshold_relative"),
      "test_the_LOG_thresholds_transfer_between_scenes_and_the_ABSOLUTE_ones_do_not"),
 
-    ("the_grade_omits_the_scenes_own_baseline",
+    ("the_grade_omits_the_scenes_own_baseline", BANDS,
      lambda s: sub(s, '                    "scene_baseline": reference[col],\n', ""),
      "test_the_grade_carries_the_scene_baseline_and_the_relative_size_beside_every_verdict"),
 
-    ("vacuity_is_READ_OFF_the_self_anchored_flag",
+    ("vacuity_is_READ_OFF_the_self_anchored_flag", BANDS,
      lambda s: sub(s, "    vacuous = all(abs(anchor_values[c] - base_values[c])\n"
                       "                  <= 1e-12 * max(1.0, abs(base_values[c])) "
                       "for c in COLLAPSE)",
                    "    vacuous = self_anchored"),
      "test_vacuity_is_MEASURED_not_read_off_the_self_anchored_flag"),
 
-    ("the_self_anchor_is_REWRITTEN_every_time_the_floors_are",
+    ("the_self_anchor_is_REWRITTEN_every_time_the_floors_are", HARNESS,
      lambda s: sub(s, "    if p.exists():\n"
                       '        print(f"  self-anchor already frozen at {p}, keeping it", '
                       "flush=True)\n        return p\n", "    if False:\n        pass\n"),
      "test_vacuity_is_MEASURED_not_read_off_the_self_anchored_flag"),
 
-    ("a_missing_anchor_becomes_an_EMPTY_one",
+    ("a_missing_anchor_becomes_an_EMPTY_one", HARNESS,
      lambda s: sub(s, "    raise SystemExit(\n"
                       '        f"no frozen Tier 3 anchor for scene {scene!r} in {path}, '
                       'and no self-anchor at "',
@@ -331,13 +339,13 @@ MUTANTS = [
                    'and no self-anchor at "'),
      "test_a_scene_with_NO_anchor_is_an_error_not_a_vacuous_cumulative_check"),
 
-    ("the_anchor_config_check_skips_steps_and_downscales",
+    ("the_anchor_config_check_skips_steps_and_downscales", BANDS,
      lambda s: sub(s, 'ANCHOR_CONFIG_KEYS = ("budget", "steps", "max_resolution", '
                       '"num_downscales")',
                    'ANCHOR_CONFIG_KEYS = ("budget", "max_resolution")'),
      "test_an_anchor_measured_at_ANOTHER_configuration_is_refused"),
 
-    ("the_cumulative_delta_is_not_DECOMPOSED",
+    ("the_cumulative_delta_is_not_DECOMPOSED", BANDS,
      lambda s: sub(s, '        c: {"everything_but_the_gate": collapse_delta(c, '
                       "base_values[c],\n                                                    "
                       "  anchor_values[c]),\n"
@@ -346,94 +354,94 @@ MUTANTS = [
                    '        c: {"everything_but_the_gate": 0.0, "the_gate": 0.0}'),
      "test_the_cumulative_delta_is_reported_DECOMPOSED_into_gate_and_everything_else"),
 
-    ("DROP_is_not_checked_FIRST",
+    ("DROP_is_not_checked_FIRST", HARNESS,
      lambda s: sub(s, "    if drops:\n        decision = \"DROP\"\n"
                       "    elif len(passes) == len(scenes):",
                    "    if len(passes) == len(scenes):"),
      "test_DROP_is_checked_FIRST_and_is_not_overridable"),
 
-    ("KEEP_AS_DEFAULT_ignores_drift",
+    ("KEEP_AS_DEFAULT_ignores_drift", HARNESS,
      lambda s: sub(s, '        decision = "KEEP AS DEFAULT" if not any_drift else '
                       '"OPT-IN, DEFAULT-CANDIDATE"',
                    '        decision = "KEEP AS DEFAULT"'),
      "test_the_grader_can_reach_EVERY_ONE_of_its_verdicts"),
 
-    ("collect_scenes_GLOBS_the_tree",
+    ("collect_scenes_GLOBS_the_tree", HARNESS,
      lambda s: sub(s, "    if extra:\n", "    if False:\n"),
      "test_summary_refuses_an_UNNAMED_grade_in_the_tree"),
 
-    ("collect_scenes_does_not_notice_a_missing_named_scene",
+    ("collect_scenes_does_not_notice_a_missing_named_scene", HARNESS,
      lambda s: sub(s, '    if missing:\n        raise SystemExit(f"--scenes named '
                       '{missing} but there is no {fname} for them "',
                    '    if False:\n        raise SystemExit(f"--scenes named '
                       '{missing} but there is no {fname} for them "'),
      "test_summary_refuses_a_NAMED_scene_that_has_no_grade"),
 
-    ("collect_scenes_TRUSTS_the_directory_name",
+    ("collect_scenes_TRUSTS_the_directory_name", HARNESS,
      lambda s: sub(s, '        if g.get("scene") != n:\n', "        if False:\n"),
      "test_a_grade_whose_scene_field_disagrees_with_its_directory_is_refused"),
 
-    ("a_SECOND_arms_grade_overwrites_the_primary_verdict",
+    ("a_SECOND_arms_grade_overwrites_the_primary_verdict", HARNESS,
      lambda s: sub(s, "    if tag == PRIMARY_TAG:\n"
                       '        (out / "grade.json").write_text',
                    "    if True:\n"
                    '        (out / "grade.json").write_text'),
      "test_a_SECOND_arms_grade_never_overwrites_the_primary_scene_verdict"),
 
-    ("grading_does_not_require_the_floors_FIRST",
+    ("grading_does_not_require_the_floors_FIRST", HARNESS,
      lambda s: sub(s, '    if not (out / "FLOORS_DONE").exists() or not '
                       '(out / "floors.json").exists():\n', "    if False:\n"),
      "test_grading_REFUSES_until_the_floors_have_been_written"),
 
-    ("the_floor_is_the_PAIR_difference_not_the_n3_spread",
+    ("the_floor_is_the_PAIR_difference_not_the_n3_spread", HARNESS,
      lambda s: sub(s, '"spread_n3": max(v) - min(v),', '"spread_n3": abs(v[0] - v[1]),'),
      "test_the_floor_is_the_n3_SPREAD_and_the_pair_difference_is_reported_only"),
 
-    ("floor_arms_may_differ_in_configuration",
+    ("floor_arms_may_differ_in_configuration", HARNESS,
      lambda s: sub(s, "        if diff:\n", "        if False:\n"),
      "test_floor_arms_that_differ_in_a_CONFIGURATION_FLAG_are_not_a_floor"),
 
-    ("floor_arms_may_use_different_reference_clouds",
+    ("floor_arms_may_use_different_reference_clouds", HARNESS,
      lambda s: sub(s, "    if len(refs) > 1:\n", "    if False:\n"),
      "test_the_floor_arms_must_share_ONE_reference_cloud"),
 
-    ("the_floor_rebuild_cross_check_is_a_no_op",
+    ("the_floor_rebuild_cross_check_is_a_no_op", HARNESS,
      lambda s: sub(s, "            if a is None or b is None or abs(a - b) > 1e-12 * "
                       "max(1.0, abs(a)):\n", "            if False:\n"),
      "test_a_floor_REBUILD_that_disagrees_with_the_written_floors_is_refused"),
 
-    ("the_battery_skips_the_role_assertion",
+    ("the_battery_skips_the_role_assertion", HARNESS,
      lambda s: sub(s, "    check_loss_path(tag, role_of(tag), rep)\n", ""),
      "test_the_battery_re_asserts_every_arms_OBSERVED_LOSS_PATH"),
 
-    ("the_battery_skips_the_seed_cloud_check",
+    ("the_battery_skips_the_seed_cloud_check", HARNESS,
      lambda s: sub(s, '    check_seed_cloud(ref, resolved.get("colmap"), '
                       'resolved.get("init_ply"))\n', ""),
      "test_the_battery_refuses_a_reference_cloud_THE_ARM_ITSELF_seeded_from"),
 
-    ("the_probe_reports_an_INFINITE_ratio_on_zero_noise",
+    ("the_probe_reports_an_INFINITE_ratio_on_zero_noise", HARNESS,
      lambda s: sub(s, '"effect_over_noise": (effect / noise) if noise != 0 else None,',
                    '"effect_over_noise": (effect / noise) if noise != 0 '
                    'else float("inf"),'),
      "test_ZERO_NOISE_is_never_reported_as_an_infinite_ratio"),
 
-    ("the_probe_EMITS_A_VERDICT",
+    ("the_probe_EMITS_A_VERDICT", HARNESS,
      lambda s: sub(s, '    return {"schema": 1, "scene": scene, "arms": list(PROBE_ARMS),',
                    '    return {"schema": 1, "scene": scene, "arms": list(PROBE_ARMS),\n'
                    '            "decision": "KEEP",'),
      "test_the_probe_EMITS_NO_VERDICT_ANYWHERE_IN_ITS_OUTPUT"),
 
-    ("the_probe_reads_steps_other_than_the_pre_registered_ones",
+    ("the_probe_reads_steps_other_than_the_pre_registered_ones", HARNESS,
      lambda s: sub(s, "GRADED_EARLY_STEPS = (500, 2000)",
                    "GRADED_EARLY_STEPS = (500, 1000)"),
      "test_the_probe_reads_EXACTLY_the_pre_registered_steps_and_records_which"),
 
-    ("the_probe_drops_the_Band2_pair",
+    ("the_probe_drops_the_Band2_pair", HARNESS,
      lambda s: sub(s, '    "on_seed_frac_1cm": "stats.on_seed_frac_1cm",\n'
                       '    "thin_axis_angle_p50": "stats.thin_axis_angle_p50",\n', ""),
      "test_the_probe_covers_the_five_shape_columns_the_splat_count_and_the_Band2_pair"),
 
-    ("the_probe_SKIPS_a_missing_checkpoint",
+    ("the_probe_SKIPS_a_missing_checkpoint", HARNESS,
      lambda s: sub(s, "        arms = {t: checkpoint_columns(out, t, step, seed_cloud) "
                       "for t in PROBE_ARMS}\n",
                    "        arms = {}\n"
@@ -445,7 +453,7 @@ MUTANTS = [
                    "                continue\n"),
      "test_a_MISSING_checkpoint_is_refused_rather_than_dropping_the_column"),
 
-    ("the_probe_swaps_EFFECT_and_NOISE",
+    ("the_probe_swaps_EFFECT_and_NOISE", HARNESS,
      lambda s: sub(s, "            effect, noise = g0 - f0, f1 - f0",
                    "            effect, noise = f1 - f0, g0 - f0"),
      "test_the_probe_reports_EFFECT_NOISE_and_their_ratio_per_column"),
@@ -455,7 +463,7 @@ NODES = ["tests/test_dn_gate_grade.py"]
 
 
 def main() -> int:
-    src = TARGET.read_text()
+    src = {HARNESS: HARNESS.read_text(), BANDS: BANDS.read_text()}
     base_sig = probe()
     assert not base_sig.startswith("PROBE-CRASH"), base_sig
     base_fail = failing_test_names(NODES)
@@ -463,11 +471,13 @@ def main() -> int:
     print(f"baseline green, probe signature {len(base_sig)} chars\n")
 
     results = []
-    backup = Path(tempfile.mkdtemp()) / "dn_gate_arms.py"
-    shutil.copy2(TARGET, backup)
+    tmp = Path(tempfile.mkdtemp())
+    backups = {t: tmp / t.name for t in src}
+    for t, b in backups.items():
+        shutil.copy2(t, b)
     try:
-        for name, mutate, must_fail in MUTANTS:
-            TARGET.write_text(mutate(src))
+        for name, target, mutate, must_fail in MUTANTS:
+            target.write_text(mutate(src[target]))
             sig = probe()
             changed = sig != base_sig
             fails = failing_test_names(NODES) if changed else set()
@@ -475,15 +485,18 @@ def main() -> int:
             results.append((name, changed, killed))
             mark = "KILLED" if (changed and killed) else (
                 "SURVIVED" if changed else "NO-BEHAVIOUR-CHANGE (not a mutant)")
-            print(f"{mark:34s} {name}")
+            print(f"{mark:34s} {target.name:20s} {name}")
             if changed and not killed:
                 print(f"    expected {must_fail} to fail; got {sorted(fails)}")
             if sig.startswith("PROBE-CRASH"):
                 print("    probe crashed (still a behaviour change): " + sig[:240])
+            target.write_text(src[target])          # restore before the next mutant
     finally:
-        shutil.copy2(backup, TARGET)
+        for t, b in backups.items():
+            shutil.copy2(b, t)
 
-    assert TARGET.read_text() == src, "restore failed -- the target is NOT the original"
+    for t, original in src.items():
+        assert t.read_text() == original, f"restore failed -- {t} is NOT the original"
     after = failing_test_names(NODES)
     assert not after, f"suite not green after restore: {after}"
     n_ok = sum(1 for _, c, k in results if c and k)

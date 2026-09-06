@@ -280,7 +280,11 @@ def test_a_MISSING_Band1_column_is_refused_rather_than_reading_as_no_collapse(tm
     rep = json.loads((out / "G0.json").read_text())
     del rep["metrics"]["lpips"]
     (out / "G0.json").write_text(json.dumps(rep))
-    with pytest.raises(SystemExit, match="run.lpips"):
+    # ValueError, not SystemExit: the bands moved to `bench/tier3_bands.py`, which is a
+    # library. The CLI still exits cleanly on it -- see
+    # test_the_CLI_converts_a_band_ValueError_into_a_clean_SystemExit, which is what makes
+    # the change of type equivalent where an operator can see it.
+    with pytest.raises(ValueError, match="run.lpips"):
         H.grade_scene(out, "pgeom", 0.05, "G0", H.ANCHOR_PATH)
 
 
@@ -294,9 +298,34 @@ def test_band2_FAILS_on_a_worsened_column_and_an_ABSENT_column_is_refused():
                     "stats.thin_axis_angle_p50": "WORSENED"}) == "FAIL"
     assert H.band2({"stats.on_seed_frac_1cm": "WITHIN FLOOR",
                     "stats.thin_axis_angle_p50": "WITHIN FLOOR"}) == "WITHIN FLOOR"
-    with pytest.raises(SystemExit, match="thin_axis"):
+    with pytest.raises(ValueError, match="thin_axis"):
         H.band2({"stats.on_seed_frac_1cm": "IMPROVED"})
     assert set(H.BAND2_GATE) == {"stats.on_seed_frac_1cm", "stats.thin_axis_angle_p50"}
+
+
+def test_the_CLI_converts_a_band_ValueError_into_a_clean_SystemExit(tmp_path, capsys):
+    """CATCHES the half of the SystemExit -> ValueError move that could regress an
+    operator: a library exception escaping `main` as a traceback instead of one line and a
+    non-zero exit. The bands are catchable and testable now; the command line must be
+    exactly as it was, and this is the assertion that makes those two claims compatible
+    rather than a trade.
+
+    The mutant this kills is deleting the `except ValueError` in `main` -- with it gone
+    the call raises ValueError, not SystemExit, and this fails."""
+    out = make_scene(tmp_path)
+    H.write_floors(out, "pgeom", 0.05, "disparity")
+    rep = json.loads((out / "G0.json").read_text())
+    del rep["metrics"]["lpips"]                       # a Band 1 column, never measured
+    (out / "G0.json").write_text(json.dumps(rep))
+    with pytest.raises(SystemExit) as ei:
+        H.main(["--regrade", "--scene", "pgeom", "--out", str(out),
+                "--colmap", str(tmp_path / "ds" / "sparse" / "0"),
+                "--images", str(tmp_path / "ds"),
+                "--seed-cloud", str(tmp_path / "ds" / "sparse" / "0" /
+                                    "points3D.tsdf.txt")])
+    # The MESSAGE survives the conversion -- an exit that lost the reason would pass a
+    # `raises(SystemExit)` assertion while telling the operator nothing.
+    assert "run.lpips" in str(ei.value)
 
 
 def test_band3_is_ONE_SIDED_a_PSNR_GAIN_is_not_a_regression():
