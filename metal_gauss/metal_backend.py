@@ -319,6 +319,31 @@ class _RasterizeMetal(torch.autograd.Function):
                 None, None, None, None, None, None, None)
 
 
+# Floor on the determinant ratio before its square root. `sqrt` has an UNBOUNDED
+# derivative at 0, so a splat whose undilated projected covariance is degenerate -- one
+# thinner than `blur`, i.e. a needle -- produced an infinite gradient, and the upstream
+# `clamp_min(0.0)` contributed a zero one, giving `0 * inf = NaN`. Measured 2026-09-06:
+# the --antialias arm of the needle batch exported 31,158 non-finite `scale_*` values over
+# 10,386 of 500,000 splats. 1e-12 caps |d sqrt| at 5e5, far inside f32, and changes the
+# returned value by at most 1e-6 -- on an OPACITY MULTIPLIER, for splats already being
+# dimmed a millionfold.
+_AA_RATIO_FLOOR = 1e-12
+
+
+def _safe_sqrt_ratio(ratio: torch.Tensor) -> torch.Tensor:
+    """`sqrt(clamp(ratio, 0, 1))`, with the value kept and the gradient made finite.
+
+    `torch.where` routes NO gradient to the branch it did not select, so a degenerate
+    splat contributes zero rather than NaN. The floor is applied to the sqrt's ARGUMENT
+    rather than to the result, so nothing is smuggled in above it: a degenerate splat
+    still gets a compensation of exactly 0.0, as before.
+    """
+    r = ratio.clamp(0.0, 1.0)
+    good = r > _AA_RATIO_FLOOR
+    safe = torch.where(good, r, torch.full_like(r, _AA_RATIO_FLOOR))
+    return torch.where(good, safe.sqrt(), torch.zeros_like(r))
+
+
 def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
     """Mip-Splatting / gsplat "antialiased" opacity compensation.
 
@@ -345,7 +370,7 @@ def antialias_scale(conic: torch.Tensor, blur: float) -> torch.Tensor:
     b = -cxy * det_after
     c = cxx * det_after
     det_before = (a - blur) * (c - blur) - b * b
-    return (det_before.clamp_min(0.0) / det_after).clamp(0.0, 1.0).sqrt()
+    return _safe_sqrt_ratio(det_before / det_after)
 
 
 # Accepted-and-ignored: parameters of torch_ref.render that the fused Metal path has no

@@ -347,13 +347,41 @@ def shape_metrics(log_scales: torch.Tensor) -> dict:
     read healthier than baseline on all of them while smid fell 6.62 -> 1.35 mm at smax
     ~23 mm and the needle fraction went 16.6% -> 56.8%. This is that missing row.
     """
-    s = torch.exp(log_scales.detach()).sort(dim=-1).values
+    ls = log_scales.detach()
+    n_total = ls.shape[0]
+    # NON-FINITE ROWS ARE EXCLUDED, AND REPORTED. Two independent reasons, both measured
+    # on 2026-09-06 when the --antialias arm exported 31,158 non-finite scale_* values
+    # across 10,386 of 500,000 splats:
+    #
+    #   1. torch.sort ORDERS NON-FINITE VALUES DIFFERENTLY ON MPS AND CPU, so `median`
+    #      picked a finite element on MPS and returned nan on CPU for the SAME tensor
+    #      (aspect_p50 0.24 vs nan on a 100-row fixture with two bad entries). Training
+    #      always computes this on MPS, so every `shape` line in every log was blind to
+    #      exactly the contamination CLAUDE.md Stage 5 says poisons a SOG codebook.
+    #   2. `(aspect < 0.1)` is False for NaN on BOTH devices, so a contaminated splat was
+    #      counted in the denominator of `needle_frac` and never in the numerator -- it
+    #      made the trainer look BETTER at the metric this investigation turns on.
+    #
+    # Reporting the fraction is not optional: silently dropping the rows would be the same
+    # defect in a new place, a clean-looking number over a contaminated population.
+    finite = torch.isfinite(ls).all(dim=-1)
+    n_bad = int(n_total - int(finite.sum()))
+    nonfinite_frac = (n_bad / n_total) if n_total else 0.0
+    if n_bad:
+        ls = ls[finite]
+    if ls.shape[0] == 0:
+        nan = float("nan")
+        return {"aspect_p50": nan, "needle_frac": nan, "hard_needle_frac": nan,
+                "smid_p50_mm": nan, "smax_p50_mm": nan,
+                "nonfinite_frac": 1.0 if n_total else 0.0}
+    s = torch.exp(ls).sort(dim=-1).values
     aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
     return {"aspect_p50": float(aspect.median()),
             "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
             "hard_needle_frac": float((aspect < HARD_NEEDLE_ASPECT).to(aspect.dtype).mean()),
             "smid_p50_mm": float(s[:, 1].median() * 1000.0),
-            "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
+            "smax_p50_mm": float(s[:, 2].median() * 1000.0),
+            "nonfinite_frac": nonfinite_frac}
 
 
 @torch.no_grad()
@@ -940,9 +968,15 @@ def train(args, scene: Scene | None = None) -> dict:
             print("  terms  " + "  ".join(f"{k} {t:.5f}" for k, t in term_vals.items()),
                   flush=True)
             shape = shape_metrics(p["log_scales"][:active])
+            bad = shape.get("nonfinite_frac", 0.0)
             print(f"  shape  aspect_p50 {shape['aspect_p50']:.4f}  "
                   f"needle_frac {shape['needle_frac']:.4f}  "
-                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm",
+                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm"
+                  # silent at 0, as the mask and prior warnings are: a line that always
+                  # fires is one operators learn to skip
+                  + (f"  [NON-FINITE {100 * bad:.3f}% OF SPLATS -- the shape columns are "
+                     f"over the remainder, and this ply would poison a Stage 7 SOG "
+                     f"codebook]" if bad else ""),
                   flush=True)
             log.append({"step": step, "psnr": ev["psnr"],
                         "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],

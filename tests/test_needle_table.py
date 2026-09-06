@@ -241,3 +241,37 @@ def test_collateral_columns_are_reported_in_units_of_the_FLOOR_and_not_folded_in
     # x_floor: -20 deg against a 0.0548 deg floor is -365x, not "-20".
     assert g["thin_axis_p50"]["x_floor"] == pytest.approx(-20.0 / 0.0548, rel=1e-9)
     assert g["thin_axis_p50"]["strict"] == "outside"
+
+
+def test_a_NONFINITE_arm_is_flagged_and_does_NOT_silently_pass(tmp_path):
+    """CATCHES the 2026-09-06 --antialias case. That arm exported 31,158 non-finite
+    scale_* values across 2.08% of its splats, and its needle fraction READ AS AN
+    IMPROVEMENT -- because `(aspect < 0.1)` is False for NaN, so every contaminated splat
+    was counted as a healthy one.
+
+    Integrity is deliberately NOT the bar verdict: 'the flag did not fix needles' and
+    'the flag emits NaN scales' are two findings, and one FAIL cannot carry both."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0)
+    _write_ply_shape(tmp_path, "B0a", nonfinite_frac=0.0)
+    _write(tmp_path, "N2", ungated=50.0)
+    _write_ply_shape(tmp_path, "N2", nonfinite_frac=0.020772)
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a", "N2"])}
+    assert rows["B0a"]["integrity"] == "clean"
+    assert rows["N2"]["integrity"].startswith("NON-FINITE"), rows["N2"]["integrity"]
+    assert "2.077%" in rows["N2"]["integrity"], rows["N2"]["integrity"]
+    assert any("filter-nan" in n for n in rows["N2"]["notes"]), rows["N2"]["notes"]
+    # the bars still graded on their own merits -- the arm is clean on those
+    assert rows["N2"]["verdict"] == "PASS", rows["N2"]["fails"]
+    assert "NON-FINITE" in NT.render(list(rows.values()), "B0a")
+
+
+def test_an_arm_scored_by_a_binary_with_NO_integrity_check_says_UNKNOWN(tmp_path):
+    """Absence of the field must not read as 'clean'. Every report written before
+    2026-09-06 lacks it, and those shape columns really may be over a contaminated
+    population -- the MPS `median` would not have said so."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0)      # report-only shape, no nonfinite_frac
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a"])}
+    assert rows["B0a"]["integrity"] == "UNKNOWN"
+    assert any("predating the check" in n for n in rows["B0a"]["notes"])

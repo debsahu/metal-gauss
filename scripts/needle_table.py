@@ -81,6 +81,7 @@ def read_arm(out: Path, arm: str, ungated_suffix: str = ".ungated.json") -> dict
         "coverage": m.get("coverage"),
         "ms_per_step": m.get("ms_per_step"),
         "n_splats": m.get("n_splats"),
+        "nonfinite_frac": shape.get("nonfinite_frac"),
         "aspect_p50": shape.get("aspect_p50"),
         "needle_frac": shape.get("needle_frac"),
         "hard_needle_frac": shape.get("hard_needle_frac"),
@@ -180,6 +181,25 @@ def grade(rows: list[dict], baseline: str, floors: dict | None) -> list[dict]:
                 notes.append(f"gated thin-axis population differs {100*(ratio-1):+.1f}% "
                              f"from the baseline's: the gated delta is a COMPOSITION "
                              f"statistic here, read the ungated column")
+        # INTEGRITY, kept out of the bar verdict on purpose: "the flag did not fix
+        # needles" and "the flag emits NaN scales" are two different findings and
+        # collapsing them into one FAIL loses the second. On 2026-09-06 --antialias
+        # produced 2.08% non-finite splats while its needle fraction looked like an
+        # improvement -- and the non-finite splats had been counted as HEALTHY ones.
+        nf = r.get("nonfinite_frac")
+        if nf is None:
+            r["integrity"] = "UNKNOWN"
+            notes.append("no nonfinite_frac in the shape block -- this arm was scored by "
+                         "a binary predating the check, so its shape columns may be over "
+                         "a contaminated population")
+        elif nf > 0:
+            r["integrity"] = f"NON-FINITE {100 * nf:.3f}%"
+            notes.append(f"{100 * nf:.3f}% of splats carry a non-finite scale. The shape "
+                         f"columns are over the remainder; this ply needs Stage 5 "
+                         f"--filter-nan before any SOG build (CLAUDE.md Stage 5: one "
+                         f"non-finite value poisons a whole 256-entry codebook).")
+        else:
+            r["integrity"] = "clean"
         if r["shape_source"] is None:
             notes.append("no shape measured from either the report or the ply")
         elif r["shape_source"] == "report":
@@ -202,7 +222,8 @@ def grade(rows: list[dict], baseline: str, floors: dict | None) -> list[dict]:
 
 def render(rows: list[dict], baseline: str) -> str:
     hdr = ("arm", "needle%", "hard%", "aspect", "PSNR", "dPSNR", "LPIPS",
-           "thin gated", "n", "thin ungated", "n", "on-seed1cm", "ms/step", "verdict")
+           "thin gated", "n", "thin ungated", "n", "on-seed1cm", "ms/step",
+           "integrity", "verdict")
     out = ["| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
     for r in rows:
         f = lambda v, s="{:.4f}": "--" if v is None else s.format(v)  # noqa: E731
@@ -218,6 +239,7 @@ def render(rows: list[dict], baseline: str) -> str:
             f(r["thin_ungated_p50"], "{:.3f}"), f(r["thin_ungated_n"], "{:,.0f}"),
             f(r["on_seed_1cm"], "{:.5f}"),
             (f(r["ms_per_step"], "{:.2f}") + ("!" if r["schedule_arm"] else "")),
+            str(r.get("integrity", "--")),
             r["verdict"]]) + " |")
     out.append("")
     out.append("Collateral (reported, NOT folded into the verdict -- see grade()):")
