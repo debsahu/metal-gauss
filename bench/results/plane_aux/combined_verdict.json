@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "rule": "tier3-three-band-2026-09-04",
+  "scenes": [
+    "arkit",
+    "pgeom"
+  ],
+  "decision": "OPT-IN, DEFAULT-CANDIDATE",
+  "promotion_requires": "a blind visual A/B on a rendered view; this grader cannot promote a default-candidate, because nothing it measures looks at the render",
+  "passed_on": [
+    "arkit",
+    "pgeom"
+  ],
+  "within_floor_on": [],
+  "regressed_on": [],
+  "drift_on": {
+    "arkit": [
+      "run.lpips",
+      "run.psnr_masked"
+    ],
+    "pgeom": [
+      "run.needle_frac",
+      "run.aspect_p50",
+      "run.psnr_masked"
+    ]
+  },
+  "dn_settings_measured": [
+    0.0
+  ],
+  "falsifier_at_measured_dn": false,
+  "falsifier_scenes": [],
+  "falsifier_complete": false,
+  "per_scene": {
+    "arkit": {
+      "band1_fired": false,
+      "band2": "PASS",
+      "band3_fired": false,
+      "scene_pass": true,
+      "scene_drop": false,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "IMPROVED",
+        "stats.thin_axis_angle_p50": "IMPROVED",
+        "run.aspect_p50": "WITHIN FLOOR",
+        "run.needle_frac": "WITHIN FLOOR"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0,
+      "drift": [
+        "run.lpips",
+        "run.psnr_masked"
+      ]
+    },
+    "pgeom": {
+      "band1_fired": false,
+      "band2": "PASS",
+      "band3_fired": false,
+      "scene_pass": true,
+      "scene_drop": false,
+      "geometry_gate": {
+        "stats.on_seed_frac_1cm": "IMPROVED",
+        "stats.thin_axis_angle_p50": "IMPROVED",
+        "run.aspect_p50": "WORSENED",
+        "run.needle_frac": "WORSENED"
+      },
+      "psnr_verdict": "MOVED",
+      "dn": 0.0,
+      "drift": [
+        "run.needle_frac",
+        "run.aspect_p50",
+        "run.psnr_masked"
+      ]
+    }
+  },
+  "arm": "P0"
+}

@@ -394,11 +394,30 @@ class _RasterizeMetalAux(torch.autograd.Function):
 def _use_fused_aux(detach_weights, n_aux) -> bool:
     """Can this aux request be served by the fused kernel?
 
-    Only the Tier 1 two-map packing ([normals, z] -> 4 channels) with BOTH maps on the
-    detached-weight contract. A live-weight request -- which Brush's PGSR plane channels
-    need, since it folds alpha in for them deliberately -- falls back to the multi-pass
-    path rather than being served the wrong contract silently. `MG_AUX_MULTIPASS=1` forces
-    the old path for the equivalence gate.
+    Only the two-map packing ([normals, scalar] -> 4 channels) with BOTH maps on the
+    detached-weight contract. That covers the centre-depth layout ([n, z]) AND the PGSR
+    plane layout ([n, d]) -- the kernel does not know or care what channel 0 means.
+
+    CORRECTED 2026-09-03 (Tier 3 entry condition (ii)). This said Brush's PGSR plane
+    channels "need" a live weight path "since it folds alpha in for them deliberately".
+    That conflated the two PGSR modes and would have sent an implementer to build a
+    multipass or per-channel-contract path that plane-aux does not need:
+
+      * `plane-aux` is approach A -- `render_splat_features` (brush-train/src/train.rs:1810),
+        whose contract at brush-render/src/bwd/features_bwd.rs:399-403 is "Only `features`
+        is on the autodiff graph; `transforms` and `raw_opacities` are detached
+        internally." That is EXACTLY this kernel's contract, so plane-aux takes the fused
+        path unchanged.
+      * `plane-fused` is approach B (train.rs:1785-1787), where the main rasterizer
+        composites the plane lanes with the blending-weight gradient path LIVE. That is
+        the mode CLAUDE.md bans -- opacity p50 collapses ~30% on both test scenes -- and
+        it is also the shape of this repo's own needle collapse (research/metal-gauss.md
+        §8.1, the VOID row: a live weight path on a depth channel).
+
+    So the live-weight refusal below is still correct and still load-bearing: nothing may
+    be served the detached kernel when it asked for live weights. What is not true is that
+    plane-aux is such a request. `MG_AUX_MULTIPASS=1` forces the old path for the
+    equivalence gate.
     """
     if os.environ.get("MG_AUX_MULTIPASS", "0") not in ("0", "", "false", "False"):
         return False
@@ -587,16 +606,20 @@ def render(means, quats, scales, opacities, sh, K, viewmat, W, H,
     aux_maps = []
     aux_path = "none"
     if aux_colors:
-        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth channel
-        # and deliberately FOLDS IT IN for the PGSR plane channels, so there is no correct
-        # blanket answer -- and an unstated inherited default is exactly how the original
-        # needle-collapse defect happened. The caller states it or gets an error.
+        # PER CHANNEL, AND NEVER IMPLICIT. Brush drops the alpha VJP for the depth and
+        # PGSR plane-AUX channels alike (both go through `render_splat_features`, which
+        # detaches transforms and raw_opacities) and folds it in only for plane-FUSED,
+        # the mode our recipe bans. Corrected 2026-09-03: this read "folds it in for the
+        # PGSR plane channels", which is true of exactly one of the two plane modes. There
+        # is still no correct blanket answer -- an unstated inherited default is how the
+        # needle-collapse defect happened -- so the caller states it or gets an error.
         if aux_detach_weights is None:
             raise ValueError(
                 "aux_colors requires aux_detach_weights (a bool per aux channel). "
                 "Detached = the geometry loss cannot move opacity or footprint (the depth "
-                "and normal contract, Brush ae2ec651); live = it can (the PGSR plane "
-                "contract). There is no safe default; say which.")
+                "and normal contract, Brush ae2ec651, and the PGSR plane-AUX contract "
+                "too); live = it can (Brush's plane-FUSED, which our recipe bans). "
+                "There is no safe default; say which.")
         if isinstance(aux_detach_weights, bool):
             aux_detach_weights = [aux_detach_weights] * len(aux_colors)
         if len(aux_detach_weights) != len(aux_colors):

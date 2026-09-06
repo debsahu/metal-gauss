@@ -293,17 +293,28 @@ class _FusedGeometryLosses(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, keep, K, space):
+    def forward(ctx, z_img, n_sum, alpha, gt_depth, gt_normal, keep, K, space, depth_mode):
         from metal_gauss.metal_backend import _load
         ext = _load()
         a = alpha.detach().contiguous()
-        di = (z_img[..., 0] / a.clamp_min(1e-10)).contiguous()
+        # depth_mode 0 (centre): z_img is (H,W,3) carrying an alpha-WEIGHTED z; the depth
+        # is z/alpha. depth_mode 1 (given): z_img IS the (H,W) depth map -- PGSR's
+        # ray-plane intersection, where alpha cancels between numerator and denominator
+        # (plane_depth_from_features). Dividing there would be wrong by exactly 1/alpha.
+        if depth_mode == 0:
+            di = (z_img[..., 0] / a.clamp_min(1e-10)).contiguous()
+        else:
+            if z_img.shape != a.shape:
+                raise ValueError(
+                    f"depth_mode='given' takes a finished (H,W) depth map, got "
+                    f"{tuple(z_img.shape)} against alpha {tuple(a.shape)}")
+            di = z_img.contiguous()
         n_d = ext.nfd_forward(di, *K)[0]
         k = (keep.to(a.dtype).contiguous() if keep is not None
              else torch.empty(0, device=a.device, dtype=a.dtype))
         num, cnt, depth_o, nr_o = ext.geom_loss_forward(
             z_img.contiguous(), n_sum.contiguous(), a, n_d,
-            gt_depth.contiguous(), gt_normal.contiguous(), k, int(space))
+            gt_depth.contiguous(), gt_normal.contiguous(), k, int(space), int(depth_mode))
         # Fixed-order host reduce of the per-threadgroup partials. The count is integer:
         # an f32 sum of ones is exact only to 2^24, which is exactly one 4096^2 face.
         tot = num.sum(0)
@@ -313,7 +324,7 @@ class _FusedGeometryLosses(torch.autograd.Function):
         # `abs_err.sum() / (valid.sum() * 3.0).clamp_min(1.0)`.
         N = torch.stack([N[0], N[1] * 3, N[2]]).clamp_min(1)
         ctx.save_for_backward(depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k)
-        ctx.meta = (K, int(space), tuple(N.tolist()))
+        ctx.meta = (K, int(space), tuple(N.tolist()), int(depth_mode))
         return tot / N.to(tot.dtype)
 
     @staticmethod
@@ -321,7 +332,7 @@ class _FusedGeometryLosses(torch.autograd.Function):
         from metal_gauss.metal_backend import _load
         ext = _load()
         depth_o, nr_o, n_sum, a, n_d, gt_depth, gt_normal, k = ctx.saved_tensors
-        K, space, N = ctx.meta
+        K, space, N, depth_mode = ctx.meta
         # The UPSTREAM COTANGENT already carries the caller's per-term weight -- the
         # forward returns the three losses UNWEIGHTED. Multiplying by `weights` here too
         # applied them twice; the error was exactly the weight (0.2 -> rel 0.8,
@@ -333,18 +344,40 @@ class _FusedGeometryLosses(torch.autograd.Function):
             gt_depth.contiguous(), gt_normal.contiguous(), k, space, w, inv)
         # depth_img feeds BOTH the depth loss and normals_from_depth, so the two paths sum.
         g_depth = g_depth + ext.nfd_backward(depth_o, g_nd, *K)[0]
-        g_z = torch.zeros_like(n_sum)
-        g_z[..., 0] = g_depth / a.clamp_min(1e-10)      # channels 1-2 are exactly zero
-        return g_z, g_nsum, None, None, None, None, None, None
+        if depth_mode == 0:
+            # d(depth_img)/d(z_img[...,0]) = 1/a. This factor lives HERE and not in the
+            # kernel: section 11.4's deferred optimisation writes g_nd to a buffer and
+            # reuses nfd_backward instead of forming the gather in-kernel, so the gather's
+            # final 1/a multiply never moved into MSL. A kernel-only mode switch would
+            # therefore leave the plane path dividing by alpha in the BACKWARD only --
+            # silently, since the forward would look right.
+            g_z = torch.zeros_like(n_sum)
+            g_z[..., 0] = g_depth / a.clamp_min(1e-10)  # channels 1-2 are exactly zero
+        else:
+            g_z = g_depth                               # the depth map IS the leaf
+        return g_z, g_nsum, None, None, None, None, None, None, None
+
+
+DEPTH_MODES = {"alpha": 0, "given": 1}
 
 
 def fused_geometry_losses(z_img, n_sum, alpha, gt_depth, gt_normal, K,
-                          keep=None, space="disparity"):
+                          keep=None, space="disparity", depth_mode="alpha"):
     """(depth, normal, depth_normal) losses, UNWEIGHTED, as a length-3 tensor.
 
     The caller applies its own per-term weights to the returned tensor; they must not also
     be passed in here, or they are applied twice (once by the caller, once by the
-    backward's use of the upstream cotangent)."""
+    backward's use of the upstream cotangent).
+
+    `depth_mode="alpha"` (the default, and the pre-Task-19 behaviour): `z_img` is (H,W,3)
+    whose channel 0 is an alpha-weighted z, and the depth is z/alpha.
+    `depth_mode="given"`: `z_img` is a finished (H,W) depth map that is already the depth
+    -- PGSR's plane depth, where alpha cancels exactly. Feeding a plane depth in "alpha"
+    mode divides by alpha twice and is wrong by 1/alpha, which is tens of percent at
+    alpha 0.7; tests/test_plane_aux.py asserts that loudness rather than assuming it.
+    """
+    if depth_mode not in DEPTH_MODES:
+        raise ValueError(f"depth_mode must be one of {sorted(DEPTH_MODES)}, got {depth_mode!r}")
     return _FusedGeometryLosses.apply(
         z_img, n_sum, alpha, gt_depth, gt_normal, keep, tuple(float(x) for x in K),
-        0 if space == "disparity" else 1)
+        0 if space == "disparity" else 1, DEPTH_MODES[depth_mode])

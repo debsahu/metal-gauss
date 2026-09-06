@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "ply": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/F1.ply",
+  "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/pa-wt/bench/results/plane_aux/arkit/F1.report.json",
+  "hard_needle_aspect": 0.01,
+  "verified_against_report": true,
+  "reproduced": {
+    "aspect_p50": 0.3780335485935211,
+    "needle_frac": 0.07974199950695038,
+    "smid_p50_mm": 9.756046295166016,
+    "smax_p50_mm": 28.29448127746582
+  },
+  "n_splats": 500000,
+  "aspect_p50": 0.37803353897631714,
+  "needle_frac": 0.079742,
+  "hard_needle_frac": 0.000782,
+  "smid_p50_mm": 9.756046517502964,
+  "smax_p50_mm": 28.294481014314233
+}

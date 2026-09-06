@@ -1,0 +1,33 @@
+{
+  "center": {
+    "arm": "center",
+    "n": 3,
+    "runs": [
+      91.25,
+      91.5,
+      91.62
+    ],
+    "mean": 91.458,
+    "spread": 0.375,
+    "stdev": 0.191,
+    "unit": "ms"
+  },
+  "plane-aux": {
+    "arm": "plane-aux",
+    "n": 3,
+    "runs": [
+      110.5,
+      110.38,
+      110.38
+    ],
+    "mean": 110.417,
+    "spread": 0.125,
+    "stdev": 0.072,
+    "unit": "ms"
+  },
+  "ratio": 1.2073,
+  "marginal_ms": 18.959,
+  "marginal_frac_of_center": 0.2073,
+  "cost_ceiling_1.05x": "MISS",
+  "route_ii_trigger_5pct": "BUILD ROUTE (ii)"
+}

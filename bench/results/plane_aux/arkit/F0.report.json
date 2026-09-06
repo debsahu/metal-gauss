@@ -1,0 +1,100 @@
+{
+  "resolved": {
+    "antialias": false,
+    "appearance": "off",
+    "appearance_reg": 0.01,
+    "blender": null,
+    "budget": 500000,
+    "colmap": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/sparse_colmap_for_moge/0",
+    "densify_gate_frac": 0.3,
+    "densify_weight": "opacity_grad",
+    "depth_dir": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/depth_dense",
+    "depth_loss_space": "disparity",
+    "depth_loss_weight": 1.0,
+    "depth_normal_weight": 0.0,
+    "depth_source": "center",
+    "eval_dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/F0.dump",
+    "eval_every": 2500,
+    "eval_split_every": 8,
+    "export": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/F0.ply",
+    "export_every": 0,
+    "filter_3d": false,
+    "filter_3d_every": 0,
+    "flatten_loss_weight": 1.0,
+    "fused_adam": true,
+    "grow": true,
+    "grow_until_frac": 0.7,
+    "images": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/images",
+    "init_ply": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/seed.ply",
+    "lr_appearance": 0.001,
+    "lr_means": 0.0002,
+    "lr_means_end": 2e-06,
+    "lr_opac": 0.01,
+    "lr_scene_scaled": true,
+    "mask_polarity": "auto",
+    "masks": null,
+    "max_resolution": 1008,
+    "no_priors": false,
+    "noise_weight": 40000.0,
+    "normal_dir": "/Users/debsahu/Workspace/slam/work/arkitscenes_48018538/ds/normal",
+    "normal_loss_weight": 0.2,
+    "num_downscales": 0,
+    "opac_reg": 0.01,
+    "out": null,
+    "prior_resident": "quantized",
+    "relocate_every": 100,
+    "relocate_until_frac": 0.85,
+    "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t19/arkit/F0.json",
+    "resolution_schedule": 10000,
+    "scale_reg": 0.01,
+    "seed": 42,
+    "selective_adam": false,
+    "sh_lr_div": 20.0,
+    "sh_warmup": 1000,
+    "start_active": 150000,
+    "steps": 30000,
+    "steps_scaler": 1.0
+  },
+  "env": {
+    "git": "bcbad54",
+    "dirty": false,
+    "torch": "2.13.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "started_at": "2026-09-04T04:57:18.636265Z",
+    "finished_at": "2026-09-04T05:18:39.318900Z"
+  },
+  "metrics": {
+    "psnr": 24.752904031713754,
+    "psnr_masked": 24.752904031713754,
+    "coverage": 1.0,
+    "terms": {
+      "l1": 0.019449427723884583,
+      "ssim": 0.08837030827999115,
+      "flatten": 3.922438190784305e-05,
+      "depth": 0.028435103595256805,
+      "normal": 0.10139209777116776
+    },
+    "shape": {
+      "aspect_p50": 0.3776748478412628,
+      "needle_frac": 0.08103600144386292,
+      "smid_p50_mm": 9.690034866333008,
+      "smax_p50_mm": 28.175230026245117
+    },
+    "wall_s": 1262.9,
+    "n_splats": 500000,
+    "ms_per_step": 42.1,
+    "term_view_coverage": {
+      "depth": [
+        574,
+        574
+      ],
+      "normal": [
+        574,
+        574
+      ]
+    },
+    "term_coverage_warning": null,
+    "lpips": 0.3879820651760915
+  }
+}

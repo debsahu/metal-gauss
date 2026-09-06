@@ -1,0 +1,17 @@
+{
+  "height": 1440,
+  "width": 1920,
+  "megapixels": 2.765,
+  "warmup": 20,
+  "reps": 25,
+  "unit": "ms (median)",
+  "measured_marginal_ms_per_step": 18.959,
+  "note": "measured_marginal_ms_per_step is the interleaved n=3 figure from bench/results/plane_aux/throughput_pgeom.json, for comparison.",
+  "rows": {
+    "cat_to_HW5_forward": 7.779,
+    "joint_finite_sanitise": 3.417,
+    "plane_depth_forward": 8.529,
+    "unused_normal_output": 3.072,
+    "route_i_forward_plus_backward": 19.806
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "rule": "tier3-three-band-2026-09-04",
+  "what": "The FROZEN cumulative anchor for Band 1. Per scene, the MEAN of the Tier 3 floor arms F0/F1/F2 on the four Band 1 columns -- the same numbers floors.json records, copied here so that a LATER arm's re-measured floors cannot move the reference the cumulative check reads. Without it the rule ratchets: four accepted 8 pp needle drifts are a collapse no single arm ever fired on.",
+  "re_measure_when": "the scene, budget, resolution, step count or downscale schedule changes -- and NOT when the base depth source changes, which is the drift this anchor exists to see.",
+  "scenes": {
+    "pgeom": {
+      "source": {
+        "arms": [
+          "F0",
+          "F1",
+          "F2"
+        ],
+        "from": "bench/results/plane_aux/pgeom/floors.json",
+        "statistic": "mean of the three floor arms",
+        "git": [
+          "0273e93",
+          "8954ad1",
+          "bcbad54"
+        ],
+        "depth_source": "center",
+        "depth_normal_weight": 0.0,
+        "depth_loss_space": "disparity"
+      },
+      "config": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1920,
+        "num_downscales": 0
+      },
+      "values": {
+        "run.needle_frac": 0.15156066914399466,
+        "run.aspect_p50": 0.31256911158561707,
+        "stats.on_seed_frac_1cm": 0.07190933333333334,
+        "run.lpips": 0.4012339810530345
+      }
+    },
+    "arkit": {
+      "source": {
+        "arms": [
+          "F0",
+          "F1",
+          "F2"
+        ],
+        "from": "bench/results/plane_aux/arkit/floors.json",
+        "statistic": "mean of the three floor arms",
+        "git": [
+          "32459cb",
+          "bcbad54"
+        ],
+        "depth_source": "center",
+        "depth_normal_weight": 0.0,
+        "depth_loss_space": "disparity"
+      },
+      "config": {
+        "budget": 500000,
+        "steps": 30000,
+        "max_resolution": 1008,
+        "num_downscales": 0
+      },
+      "values": {
+        "run.needle_frac": 0.0803619995713234,
+        "run.aspect_p50": 0.3785106937090556,
+        "stats.on_seed_frac_1cm": 0.06284533333333334,
+        "run.lpips": 0.38833756859951873
+      }
+    }
+  }
+}
