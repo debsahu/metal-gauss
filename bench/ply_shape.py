@@ -8,6 +8,26 @@ This reads them back from the plys themselves, which is what makes the frozen Ba
 
 It calls `train.shape_metrics` rather than reimplementing it: a second implementation of a
 gate's own statistic is how two numbers with the same name come to mean different things.
+
+TWO TOOLS OF THIS NAME EXIST ON PURPOSE, AND THEY ARE NOT INTERCHANGEABLE.
+
+    bench/ply_shape.py   (this file)         CALLS the trainer's `shape_metrics`.
+    scripts/ply_shape.py (the cross-check)   RE-IMPLEMENTS it in numpy over a hand-parsed
+                                             ply, and refuses to write unless all four
+                                             shared columns reproduce a trainer report.
+
+The stated rationales are opposed and both are right, because the two are answering
+different questions. `scripts/ply_shape.py` asks *did the trainer's torch computation get
+the ply's field order and median convention right* -- a question only an INDEPENDENT
+implementation can answer, which is why it must not import this one. This file asks *what
+are the shape columns of these plys*, for the frozen Band-1 anchor, where a second
+implementation would be pure risk. So: an independent cross-check where independence is
+the evidence, a shared call where agreement is the requirement.
+
+`tests/test_bench_ply_shape.py::test_the_two_ply_shape_tools_agree_on_the_same_ply` pins
+the two against each other on a synthetic ply, and is what makes keeping both safe. Read it
+before changing either: it also records the ONE place they legitimately diverge, which is a
+ply carrying non-finite scales.
 """
 from __future__ import annotations
 
