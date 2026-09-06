@@ -66,12 +66,24 @@ def _args(**over):
 
 @mps
 def test_recipe_runs_and_logs_every_term():
+    """`--inplane-isotropy-ratio 1e-9` is not decoration and not a workaround.
+
+    That term is a HINGE, so 0.0 is its healthy value -- on this 40-step synthetic scene
+    the splats end at aspect_p50 0.9724, every one of them under the operational r0 = 2
+    knee, and the term reads exactly 0.0 as it should. But 0.0 is also what a term that
+    never reached the loss reads, so leaving it there would make this assertion pass for
+    the wrong reason on the one term whose branch it is meant to exercise. Pushing the
+    knee below every splat puts the term on its ACTIVE branch, which is what the loop
+    below is checking. The alternative -- exempting `inplane` from the `> 0` assertion --
+    would have weakened the invariant for every other term to accommodate this one."""
     from metal_gauss import train as T
-    out = T.train(_args(flatten_loss_weight=1.0, depth_loss_weight=1.0,
+    out = T.train(_args(flatten_loss_weight=1.0, inplane_isotropy_weight=1.0,
+                        inplane_isotropy_ratio=1e-9,
+                        depth_loss_weight=1.0,
                         normal_loss_weight=0.2, depth_normal_weight=0.05),
                   scene=_synthetic_scene())
     terms = out["log"][-1]["terms"]
-    for k in ("l1", "ssim", "flatten", "depth", "normal", "depth_normal"):
+    for k in ("l1", "ssim", "flatten", "inplane", "depth", "normal", "depth_normal"):
         assert k in terms, f"{k} not logged"
         assert math.isfinite(terms[k]) and terms[k] > 0, f"{k} = {terms.get(k)}"
     assert 0.9 < out["metrics"]["coverage"] < 0.95        # 4 of 64 columns dropped = 93.75%
@@ -351,8 +363,8 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step(monkeypatch):
     monkeypatch.setenv("MG_TORCH_LOSS", "1")
 
     steps = 6
-    watched = ["photometric_loss", "flatten_loss", "depth_loss", "normal_loss",
-               "depth_normal_loss"]
+    watched = ["photometric_loss", "flatten_loss", "inplane_isotropy_loss", "depth_loss",
+               "normal_loss", "depth_normal_loss"]
     calls = {k: 0 for k in watched}
     originals = {k: getattr(MT, k) for k in watched}
 
@@ -370,6 +382,7 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step(monkeypatch):
         setattr(MT, k, make(k))
     try:
         T.train(_args(steps=steps, eval_every=steps, flatten_loss_weight=1.0,
+                      inplane_isotropy_weight=1.0,
                       depth_loss_weight=1.0, normal_loss_weight=0.2,
                       depth_normal_weight=0.05),
                 scene=_synthetic_scene())
@@ -443,6 +456,58 @@ def test_shape_metrics_measure_the_IN_PLANE_aspect_not_the_thinness():
     assert n["needle_frac"] == 1.0
     mixed = torch.log(torch.tensor([[0.001, 0.020, 0.020], [0.001, 0.001, 0.020]]))
     assert shape_metrics(mixed)["needle_frac"] == pytest.approx(0.5)
+
+
+def test_shape_metrics_report_the_HARD_needle_fraction_separately():
+    """`needle_frac` (aspect < 0.1) and `hard_needle_frac` (aspect < 0.01) must be two
+    different populations, and the fixture must PROVE it separates them -- a splat between
+    the two thresholds is the only thing that can, so one is included deliberately.
+
+    0.01 is not a round number, it is the DELIVERY FORMAT's limit. The SOG/ply smallest-
+    three quaternion is 8-bit: three components over [-1/sqrt2, 1/sqrt2] at 256 levels give
+    a step of sqrt(2)/255 = 5.55e-3, a worst-case component error of half that, and a
+    worst-case quaternion-norm error of sqrt(3)/2 * 5.55e-3 = 4.80e-3, which is a rotation
+    of about 2 * 4.80e-3 = 9.6e-3 rad. Rotating a splat by theta displaces its rim, at
+    radius smax, by about smax * theta. So when smid/smax < 9.6e-3 the minor in-plane
+    half-axis is SMALLER than the rim displacement the splat's own quantised orientation
+    produces: its orientation is undeliverable, whatever the trainer computed. Rounded to
+    0.01. (Derivation re-checked here rather than taken on trust.)
+    """
+    from metal_gauss.train import shape_metrics
+    # smin must be SMALLER than the intended smid on every row, or `sort` reassigns which
+    # axis is "smid" and the fixture silently stops testing what it names. The first draft
+    # of this fixture did exactly that: rows 3 and 4 both came out at aspect 0.05 because
+    # their smin (0.001) outranked the tiny axis meant to be smid.
+    ls = torch.log(torch.tensor([
+        [0.0005000, 0.0200, 0.020],   # aspect 1.000  -- healthy disc
+        [0.0005000, 0.0050, 0.020],   # aspect 0.250  -- healthy
+        [0.0000100, 0.0009, 0.020],   # aspect 0.045  -- NEEDLE, still deliverable
+        [0.0000010, 0.0001, 0.020],   # aspect 0.005  -- HARD needle, undeliverable
+    ]))
+    m = shape_metrics(ls)
+    assert m["needle_frac"] == pytest.approx(0.5)
+    assert m["hard_needle_frac"] == pytest.approx(0.25)
+    assert m["hard_needle_frac"] != m["needle_frac"], (
+        "fixture has no splat between the two thresholds: it cannot separate them")
+    # smid / smax are reported columns, and they are the MEDIANS of the sorted middle and
+    # largest axes -- not the collapse test (dlog(aspect) = dlog(smid) - dlog(smax), so
+    # aspect already IS that differential).
+    # 0.9, not the 2.95 an averaging median would give: `torch.median` returns the LOWER
+    # of the two middle values on an even-length input. Every p50 in this battery is that
+    # median, so the convention is pinned here rather than assumed at reading time.
+    assert m["smid_p50_mm"] == pytest.approx(0.9, abs=1e-4)
+    assert m["smax_p50_mm"] == pytest.approx(20.0, abs=1e-4)
+
+
+def test_hard_needle_fraction_is_a_subset_of_the_needle_fraction():
+    """CATCHES a threshold swapped between the two columns, or an inverted comparison:
+    every hard needle is a needle, so the hard fraction can never exceed it, and on a
+    population with a splat in between it must be strictly smaller."""
+    from metal_gauss.train import shape_metrics
+    g = torch.Generator().manual_seed(4)
+    ls = torch.log(torch.rand(500, 3, generator=g) * 0.05 + 1e-4)
+    m = shape_metrics(ls)
+    assert m["hard_needle_frac"] <= m["needle_frac"]
 
 
 def test_shape_metrics_are_invariant_to_axis_order():

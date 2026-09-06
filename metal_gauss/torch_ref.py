@@ -120,8 +120,12 @@ def project(
     a, b, c = cov2d[:, 0, 0], cov2d[:, 0, 1], cov2d[:, 1, 1]
     det = a * c - b * b
     if antialias:
-        ratio = det_before.clamp_min(0.0) / det.clamp_min(1e-12)
-        opacity_scale = ratio.clamp(0.0, 1.0).sqrt()
+        # Same gradient defect and same fix as metal_backend.antialias_scale -- see the
+        # comment on _AA_RATIO_FLOOR there. This file is the ORACLE the Metal kernels are
+        # gradchecked against, so fixing one and not the other would leave the reference
+        # disagreeing with the implementation exactly where it matters.
+        from metal_gauss.metal_backend import _safe_sqrt_ratio
+        opacity_scale = _safe_sqrt_ratio(det_before / det.clamp_min(1e-12))
     else:
         opacity_scale = torch.ones_like(det)
     valid = valid & (det > 1e-12)

@@ -32,6 +32,20 @@ kind `plane_aux_arms.battery` will read.
 `torch.median` returns the LOWER of the two middle values on an even count; `np.median`
 averages them. At 500,000 splats that difference is real, and it is exactly the kind of
 silent disagreement the cross-check exists to catch.
+
+DO NOT COLLAPSE THIS INTO `bench/ply_shape.py`, WHICH SHARES THE NAME AND NOT THE JOB.
+That file CALLS `train.shape_metrics` -- correctly, because it computes the frozen Band-1
+anchor and a second implementation of a statistic you are anchoring on is pure risk. This
+file must NOT call it, because its whole value is being the second implementation: an
+agreement between two names for the same code is not evidence of anything. Rewriting either
+one into the other destroys exactly one of the two properties.
+
+`tests/test_bench_ply_shape.py::test_the_two_ply_shape_tools_agree_on_the_same_ply` holds
+them to identical numbers on a synthetic ply, and records the one legitimate divergence:
+this file is NaN-BLIND where `shape_metrics` is not (a non-finite scale sorts to the end
+and lands in `needle_frac`'s denominator, or with `+inf` in its NUMERATOR). That is not a
+defect to fix here -- `cross_check` catches it as a disagreement and REFUSES TO WRITE,
+which is the loud failure the blind statistic never gave.
 """
 from __future__ import annotations
 

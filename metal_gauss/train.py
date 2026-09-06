@@ -26,9 +26,10 @@ import torch
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
 from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
-                                      fused_geometry_losses, normal_loss,
-                                      normals_from_depth, plane_depth_from_features,
-                                      plane_features, splat_normals_cam)
+                                      fused_geometry_losses, inplane_isotropy_loss,
+                                      normal_loss, normals_from_depth,
+                                      plane_depth_from_features, plane_features,
+                                      splat_normals_cam)
 from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
@@ -328,6 +329,11 @@ def geometry_coverage_warning(cov: dict) -> str | None:
 # round-to-nearest error is step/2 per component over three components, a quaternion
 # perturbation of norm (step/2)*sqrt(3); and a perturbation of norm e is a rotation of 2e.
 # That is 0.0096058 rad. 0.01 is the next round number at or above it.
+#
+# It moves only if the delivery format's quaternion precision moves, and it is REPORTED,
+# NEVER GATED: no band may depend on it. Of the four shape columns it is the weakest
+# collapse discriminator (log-separation 5.0x against aspect's 18.8x), so it is a
+# DELIVERY statement about a trained model, not a test that decides one.
 HARD_NEEDLE_ASPECT = 0.01
 
 
@@ -341,13 +347,41 @@ def shape_metrics(log_scales: torch.Tensor) -> dict:
     read healthier than baseline on all of them while smid fell 6.62 -> 1.35 mm at smax
     ~23 mm and the needle fraction went 16.6% -> 56.8%. This is that missing row.
     """
-    s = torch.exp(log_scales.detach()).sort(dim=-1).values
+    ls = log_scales.detach()
+    n_total = ls.shape[0]
+    # NON-FINITE ROWS ARE EXCLUDED, AND REPORTED. Two independent reasons, both measured
+    # on 2026-09-06 when the --antialias arm exported 31,158 non-finite scale_* values
+    # across 10,386 of 500,000 splats:
+    #
+    #   1. torch.sort ORDERS NON-FINITE VALUES DIFFERENTLY ON MPS AND CPU, so `median`
+    #      picked a finite element on MPS and returned nan on CPU for the SAME tensor
+    #      (aspect_p50 0.24 vs nan on a 100-row fixture with two bad entries). Training
+    #      always computes this on MPS, so every `shape` line in every log was blind to
+    #      exactly the contamination CLAUDE.md Stage 5 says poisons a SOG codebook.
+    #   2. `(aspect < 0.1)` is False for NaN on BOTH devices, so a contaminated splat was
+    #      counted in the denominator of `needle_frac` and never in the numerator -- it
+    #      made the trainer look BETTER at the metric this investigation turns on.
+    #
+    # Reporting the fraction is not optional: silently dropping the rows would be the same
+    # defect in a new place, a clean-looking number over a contaminated population.
+    finite = torch.isfinite(ls).all(dim=-1)
+    n_bad = int(n_total - int(finite.sum()))
+    nonfinite_frac = (n_bad / n_total) if n_total else 0.0
+    if n_bad:
+        ls = ls[finite]
+    if ls.shape[0] == 0:
+        nan = float("nan")
+        return {"aspect_p50": nan, "needle_frac": nan, "hard_needle_frac": nan,
+                "smid_p50_mm": nan, "smax_p50_mm": nan,
+                "nonfinite_frac": 1.0 if n_total else 0.0}
+    s = torch.exp(ls).sort(dim=-1).values
     aspect = s[:, 1] / s[:, 2].clamp_min(1e-12)
     return {"aspect_p50": float(aspect.median()),
             "needle_frac": float((aspect < 0.1).to(aspect.dtype).mean()),
             "hard_needle_frac": float((aspect < HARD_NEEDLE_ASPECT).to(aspect.dtype).mean()),
             "smid_p50_mm": float(s[:, 1].median() * 1000.0),
-            "smax_p50_mm": float(s[:, 2].median() * 1000.0)}
+            "smax_p50_mm": float(s[:, 2].median() * 1000.0),
+            "nonfinite_frac": nonfinite_frac}
 
 
 @torch.no_grad()
@@ -770,6 +804,15 @@ def train(args, scene: Scene | None = None) -> dict:
         if args.flatten_loss_weight > 0.0:
             terms["flatten"] = flatten_loss(p["log_scales"][:active])
             loss = loss + args.flatten_loss_weight * terms["flatten"]
+        # In-plane isotropy barrier. Sits beside flatten deliberately: flatten owns the
+        # smin lane and this owns smid/smax, and the two do not share a degree of freedom
+        # (tests/test_inplane_isotropy.py pins the smin gradient at exactly zero). Like
+        # flatten it is NOT ramped down by `aux` -- it is a shape prior on the final
+        # model. Dimensionless, so no metric normalisation, ever. ADDED EXACTLY ONCE.
+        if args.inplane_isotropy_weight > 0.0:
+            terms["inplane"] = inplane_isotropy_loss(
+                p["log_scales"][:active], math.log(args.inplane_isotropy_ratio))
+            loss = loss + args.inplane_isotropy_weight * terms["inplane"]
         if want_geometry:
             keep = None if m01 is None else (m01 > 0.5)
             gt_d = decode_depth(v.depth.to(device)) if v.depth is not None else None
@@ -925,9 +968,15 @@ def train(args, scene: Scene | None = None) -> dict:
             print("  terms  " + "  ".join(f"{k} {t:.5f}" for k, t in term_vals.items()),
                   flush=True)
             shape = shape_metrics(p["log_scales"][:active])
+            bad = shape.get("nonfinite_frac", 0.0)
             print(f"  shape  aspect_p50 {shape['aspect_p50']:.4f}  "
                   f"needle_frac {shape['needle_frac']:.4f}  "
-                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm",
+                  f"smid {shape['smid_p50_mm']:.3f}mm  smax {shape['smax_p50_mm']:.3f}mm"
+                  # silent at 0, as the mask and prior warnings are: a line that always
+                  # fires is one operators learn to skip
+                  + (f"  [NON-FINITE {100 * bad:.3f}% OF SPLATS -- the shape columns are "
+                     f"over the remainder, and this ply would poison a Stage 7 SOG "
+                     f"codebook]" if bad else ""),
                   flush=True)
             log.append({"step": step, "psnr": ev["psnr"],
                         "psnr_masked": ev["psnr_masked"], "coverage": ev["coverage"],
@@ -1216,6 +1265,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "The earthbyte indoor recipe is 1.0, applied at constant weight "
                          "with no metric normalisation. Dominant measured geometry lever "
                          "in Brush (-14.3 deg thin-axis on playroom, -8.9 on ARKitScenes).")
+    ap.add_argument("--inplane-isotropy-weight", type=float, default=0.0,
+                    help="Hinge barrier on the IN-PLANE aspect ratio: weight on "
+                         "mean(relu(log(smax/smid) - log r0)). This trainer produces "
+                         "3-10x more needle-shaped splats than every other trainer on "
+                         "the same scenes (16.6%% of playroom_0821 at smid/smax < 0.1, "
+                         "against Brush 0.55-4.5%% and LFS 0.15%%) and nothing else in "
+                         "its objective mentions smid/smax. Orthogonal to "
+                         "--flatten-loss-weight, which acts on smin alone. The term is "
+                         "DIMENSIONLESS and is never divided by a scene scale.")
+    ap.add_argument("--inplane-isotropy-ratio", type=float, default=2.0,
+                    help="r0, the largest smax/smid a splat may have for free. Splats "
+                         "at or below it pay nothing, so discs are untouched. 2.0 is "
+                         "roughly the median of Brush's delivered plys (aspect_p50 "
+                         "0.451-0.487, i.e. smax/smid 2.05-2.22).")
     ap.add_argument("--appearance", choices=["off", "gain_bias", "affine", "bilagrid"],
                     default="off",
                     help="per-training-image photometric correction; held-out "

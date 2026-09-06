@@ -105,6 +105,24 @@ done
 [[ -n "$OUT" ]] || { echo "need --out" >&2; exit 2; }
 [[ -n "$DATASET" || -n "$BLENDER" ]] || { echo "need --dataset or --blender" >&2; exit 2; }
 [[ -z "$DATASET" || -z "$BLENDER" ]] || { echo "--dataset and --blender are exclusive" >&2; exit 2; }
+# SPLATSTATS MUST RESOLVE BEFORE ANY ARM TRAINS, when a reference cloud was given.
+# Its default is "$MG/../../analyze/splatstats", which assumes metal-gauss is checked out
+# at <repo>/compute/metal-gauss. On a STANDALONE CLONE that path does not exist, the
+# `|| echo ""` above leaves SPLATSTATS empty, `cd ""` silently stays in $MG, and the
+# scorer runs "$MG/scripts/splat_stats.py" -- which is not there. On 2026-09-06 that took
+# a batch down under `set -e` THIRTY-SEVEN MINUTES in, with all three floor arms trained
+# and not one of them scored. Nothing failed at launch. Pass --splatstats on a standalone
+# clone; this refuses at second zero rather than after the GPU time.
+if [[ -n "$SEED_CLOUD" ]]; then
+  if [[ -z "$SPLATSTATS" || ! -f "$SPLATSTATS/scripts/splat_stats.py" ]]; then
+    echo "--seed-cloud was given but splatstats does not resolve:" >&2
+    echo "    SPLATSTATS='${SPLATSTATS}'" >&2
+    echo "    expected '${SPLATSTATS:-<empty>}/scripts/splat_stats.py' to exist" >&2
+    echo "  Pass --splatstats /path/to/analyze/splatstats. The default assumes this" >&2
+    echo "  checkout sits at <repo>/compute/metal-gauss; a standalone clone does not." >&2
+    exit 2
+  fi
+fi
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 SEED2=$((SEED + 1))
 IFS=',' read -r -a ARM_LIST <<< "$ARMS"
@@ -146,6 +164,67 @@ arm_flags() {                    # extra flags per arm NAME
     # run with --depth-normal-weight > 0 in `center` mode is a known-broken configuration,
     # so this arm gives the first clean read on the depth and normal PRIORS in isolation.
     R1p)    echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2" ;;
+    # ---- NEEDLE arms (2026-09-05). metal-gauss produces 3-10x more needle-shaped
+    # splats than every other trainer on the same scenes: needle_frac = frac(smid/smax
+    # < 0.1) is 16.6% here against Brush 0.55-4.5% and LFS 0.15% on playroom_0821.
+    # Flatten is EXONERATED -- it collapses smin and leaves smid/smax at 0.839 -> 0.839
+    # -- so these arms probe the remaining flag-reachable candidates. Every one is
+    # FLAG-ONLY: no trainer code differs between them and the B0 floors, which is what
+    # makes them comparable at all (contrast the Tier 1 protocol deviation, where 18
+    # arms spanned 7 commits).
+    #
+    # N1/N2 are the sub-pixel-dilation hypothesis: a splat thinner than a pixel is
+    # widened by the 2D screen-space dilation, so the trainer never pays for a needle it
+    # cannot see. PRE-REGISTERED PREDICTION: both buy <= 2-3 pp, because only 14% of
+    # measured needles are below 1 px at the nearest training camera. --filter-3d is
+    # view-INDEPENDENT (it widens in world space and bakes into the export);
+    # --antialias is view-dependent and compensates opacity instead.
+    N1)     echo "--filter-3d" ;;
+    N2)     echo "--antialias" ;;
+    # N3: the MCMC scale regulariser is a mean over exp(log_scales) across ALL THREE
+    # axes, so it is dominated by smax and pushes the largest axis down hardest --
+    # which is a pressure on the aspect ratio nobody has measured. Direction UNKNOWN
+    # and deliberately not predicted.
+    N3)     echo "--scale-reg 0.0" ;;
+    # N4: the known-positive control. --num-downscales 2 costs +4.1 pp on this scene
+    # (n=3) and +3.9 pp on ARKitScenes, so 0 must IMPROVE the needle fraction or the
+    # whole battery is mis-wired. It is not a candidate fix -- at 0 metal-gauss is
+    # still 3-4x Brush -- it is the arm that proves the instrument responds.
+    # N2b: --antialias again, on a binary where it does not emit NaN gradients. N2 ran
+    # before that was fixed and exported 31,158 non-finite scale_* values over 2.08% of
+    # its splats, which `needle_frac` counted as HEALTHY splats -- so N2's shape columns
+    # are bounded, not measured, and the arm has to be repeated rather than reinterpreted.
+    # Same flag, different NAME, so N2's artifacts are not overwritten and the two remain
+    # comparable side by side.
+    N2b)    echo "--antialias" ;;
+    N4)     echo "--num-downscales 0" ;;
+    # ---- ISOTROPY arms. The in-plane isotropy barrier
+    # (--inplane-isotropy-weight, geometry_loss.inplane_isotropy_loss) is a hinge on
+    # log(smax/smid): mean(relu(log(smax/smid) - log r0)), r0 = 2 by default, so discs
+    # pay nothing. It is the first term in this trainer's objective that mentions the
+    # in-plane aspect ratio at all.
+    #
+    # WHY A DECADE SWEEP AND NOT ONE WEIGHT. The term is dimensionless and its gradient
+    # is exactly +-1/N per paying splat in LOG space, whereas flatten's is s_min/N -- a
+    # factor of ~1e-3 apart on millimetre splats. So the weight that means "as strong as
+    # flatten at 1.0" is not knowable from flatten's scale, and a single guessed weight
+    # that came out inert or catastrophic would say nothing about the term. Three decades
+    # bracket it.
+    I0)     echo "--inplane-isotropy-weight 0.01" ;;
+    I1)     echo "--inplane-isotropy-weight 0.1" ;;
+    I2)     echo "--inplane-isotropy-weight 1.0" ;;
+    I3)     echo "--inplane-isotropy-weight 10.0" ;;
+    # Im3: below the sweep. I0 at 0.01 already took needle_frac 16.80% -> 0.078%, so the
+    # sweep found the effect but not its MINIMUM DOSE, and the dose matters: at 0.01 smax
+    # also fell 25.7 -> 18.1 mm, a 30% change to the whole model that nothing asked for.
+    Im3)    echo "--inplane-isotropy-weight 0.001" ;;
+    # IR / IRb: THE ORTHOGONALITY CHECK, end to end. The barrier's whole design rests on
+    # flatten owning the smin lane and the barrier owning smid/smax, and that is proven so
+    # far only at the tensor (the sorted smin lane takes exactly zero gradient). These two
+    # arms are the same recipe with and without the barrier, so flatten's own measured
+    # effect -- the collapse of smin -- must survive unchanged in IRb, or the tensor-level
+    # proof does not transfer to a 30k run.
+    IRb)    echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2 --inplane-isotropy-weight 0.01" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
 }
