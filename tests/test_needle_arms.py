@@ -104,3 +104,99 @@ def test_the_isotropy_sweep_spans_decades():
     assert ws == sorted(ws), f"the sweep is not monotone: {ws}"
     for lo, hi in zip(ws, ws[1:]):
         assert hi / lo >= 9.9, f"{lo} -> {hi} is less than a decade"
+
+
+# ------------------------------------------------- the splatstats path (2026-09-06)
+
+def _run_runner(tmp_path, mg_root, *extra):
+    """Invoke the runner for real, with a MG_ROOT that has no sibling analyze/splatstats.
+
+    Runs the actual script rather than an extracted fragment, because the defect this
+    covers lives in the interaction between the derived SPLATSTATS default and `set -e`
+    thirty-seven minutes later -- not in any one line."""
+    ds = tmp_path / "ds"
+    (ds / "sparse" / "0").mkdir(parents=True)
+    (ds / "images").mkdir()
+    seed = tmp_path / "seed.txt"; seed.write_text("1 0 0 0 0 0 0 0\n")
+    out = tmp_path / "out"
+    return subprocess.run(
+        ["bash", str(RUNNER), "--dataset", str(ds), "--out", str(out),
+         "--seed-cloud", str(seed), "--arms", "B0a", "--floors", "B0a,B0b,B0c",
+         *extra],
+        capture_output=True, text=True, timeout=120,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(tmp_path),
+             "MG_ROOT": str(mg_root)})
+
+
+def test_an_unresolvable_splatstats_fails_BEFORE_any_arm_trains(tmp_path):
+    """THE DEFECT THIS COVERS, and it cost 37 minutes of GPU on 2026-09-06.
+
+    `SPLATSTATS` defaults to `$MG/../../analyze/splatstats`, i.e. it assumes metal-gauss
+    is checked out at <repo>/compute/metal-gauss. On a standalone clone that path does not
+    exist, `$(cd ... || echo "")` yields the EMPTY STRING, `cd ""` silently stays in the
+    current directory, and the scorer runs `$MG/scripts/splat_stats.py`, which is not
+    there. `set -e` then killed the driver -- AFTER all three floor arms had trained and
+    BEFORE anything was scored. Nothing failed at launch; the batch simply stopped
+    existing thirty-seven minutes later.
+
+    The guard must fire during argument handling, so this test asserts on the ABSENCE of
+    any PHASE line as well as on the exit status: a run that trains an arm and then
+    complains has not been fixed."""
+    mg = tmp_path / "not_a_repo"; (mg / "scripts").mkdir(parents=True)
+    r = _run_runner(tmp_path, mg)
+    assert r.returncode != 0, "an unresolvable splatstats was accepted"
+    assert "splatstats" in (r.stderr + r.stdout).lower(), (r.stdout, r.stderr)
+    assert "PHASE 1" not in r.stdout, (
+        "the guard fired too late -- an arm had already been launched:\n" + r.stdout)
+
+
+@pytest.mark.parametrize("kind", ["absent", "exists_but_empty"])
+def test_an_EXPLICIT_splatstats_that_cannot_SCORE_is_refused(tmp_path, kind):
+    """--splatstats is the escape hatch for a standalone clone, so a wrong value must not
+    reintroduce the same silent failure by another door.
+
+    THE SECOND CASE EXISTS BECAUSE A MUTANT SURVIVED WITHOUT IT. Weakening the guard from
+    `-f "$SPLATSTATS/scripts/splat_stats.py"` to `-d "$SPLATSTATS"` passed the whole file,
+    because the only value under test was a path that was neither. The realistic operator
+    error is not a typo -- it is pointing at the repo root, or at `analyze/`, instead of
+    `analyze/splatstats`: a directory that exists and cannot score. Only the file check
+    separates the two, and only this case makes the test say so."""
+    mg = tmp_path / "not_a_repo"; (mg / "scripts").mkdir(parents=True)
+    if kind == "absent":
+        target = tmp_path / "nope"
+    else:
+        target = tmp_path / "wrong_level"
+        (target / "scripts").mkdir(parents=True)      # exists, but no splat_stats.py
+        (target / "scripts" / "something_else.py").write_text("")
+    r = _run_runner(tmp_path, mg, "--splatstats", str(target))
+    assert r.returncode != 0, f"{kind}: an unusable --splatstats was accepted"
+    assert "splatstats" in (r.stderr + r.stdout).lower(), (r.stdout, r.stderr)
+    assert "PHASE 1" not in r.stdout
+
+
+def test_a_VALID_explicit_splatstats_is_accepted(tmp_path):
+    """The control for the two refusals above: without it, a guard that refused every
+    value whatsoever would pass both of them and block every real run."""
+    mg = tmp_path / "not_a_repo"; (mg / "scripts").mkdir(parents=True)
+    ss = tmp_path / "splatstats"; (ss / "scripts").mkdir(parents=True)
+    (ss / "scripts" / "splat_stats.py").write_text("")
+    r = _run_runner(tmp_path, mg, "--splatstats", str(ss))
+    assert "splatstats does not resolve" not in (r.stderr + r.stdout), (
+        "the guard refused a splatstats directory that has the script in it:\n" + r.stderr)
+    assert "PHASE 1" in r.stdout, "the run did not get past argument handling"
+
+
+def test_a_run_with_NO_seed_cloud_does_not_need_splatstats_at_all(tmp_path):
+    """The guard must be conditional. A scene with no reference cloud skips splatstats by
+    design (`score_arm` says so and reports the geometry metrics as UNDEFINED), and a
+    guard that demanded it anyway would block every such scene -- lego among them."""
+    mg = tmp_path / "not_a_repo"; (mg / "scripts").mkdir(parents=True)
+    ds = tmp_path / "ds2"; (ds / "sparse" / "0").mkdir(parents=True); (ds / "images").mkdir()
+    r = subprocess.run(
+        ["bash", str(RUNNER), "--dataset", str(ds), "--out", str(tmp_path / "out2"),
+         "--arms", "B0a", "--floors", "B0a,B0b,B0c"],
+        capture_output=True, text=True, timeout=120,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(tmp_path),
+             "MG_ROOT": str(mg)})
+    assert "splatstats" not in (r.stderr + r.stdout).lower(), (
+        "the guard fired on a run that never needed splatstats:\n" + r.stderr)

@@ -105,6 +105,24 @@ done
 [[ -n "$OUT" ]] || { echo "need --out" >&2; exit 2; }
 [[ -n "$DATASET" || -n "$BLENDER" ]] || { echo "need --dataset or --blender" >&2; exit 2; }
 [[ -z "$DATASET" || -z "$BLENDER" ]] || { echo "--dataset and --blender are exclusive" >&2; exit 2; }
+# SPLATSTATS MUST RESOLVE BEFORE ANY ARM TRAINS, when a reference cloud was given.
+# Its default is "$MG/../../analyze/splatstats", which assumes metal-gauss is checked out
+# at <repo>/compute/metal-gauss. On a STANDALONE CLONE that path does not exist, the
+# `|| echo ""` above leaves SPLATSTATS empty, `cd ""` silently stays in $MG, and the
+# scorer runs "$MG/scripts/splat_stats.py" -- which is not there. On 2026-09-06 that took
+# a batch down under `set -e` THIRTY-SEVEN MINUTES in, with all three floor arms trained
+# and not one of them scored. Nothing failed at launch. Pass --splatstats on a standalone
+# clone; this refuses at second zero rather than after the GPU time.
+if [[ -n "$SEED_CLOUD" ]]; then
+  if [[ -z "$SPLATSTATS" || ! -f "$SPLATSTATS/scripts/splat_stats.py" ]]; then
+    echo "--seed-cloud was given but splatstats does not resolve:" >&2
+    echo "    SPLATSTATS='${SPLATSTATS}'" >&2
+    echo "    expected '${SPLATSTATS:-<empty>}/scripts/splat_stats.py' to exist" >&2
+    echo "  Pass --splatstats /path/to/analyze/splatstats. The default assumes this" >&2
+    echo "  checkout sits at <repo>/compute/metal-gauss; a standalone clone does not." >&2
+    exit 2
+  fi
+fi
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 SEED2=$((SEED + 1))
 IFS=',' read -r -a ARM_LIST <<< "$ARMS"
