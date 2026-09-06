@@ -91,7 +91,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 # they are DEFINED.
 from bench.tier3_bands import (                                        # noqa: E402
     ANCHOR_CONFIG_KEYS, BAND2_GATE, COLLAPSE, DIRECTION, DRIFT_SCOPE, GEOMETRY_GATE,
-    ON_SEED_1CM, PSNR_DROP_DB, STAGE4_PSNR_DB, THIN_AXIS_GATED,
+    BAND2_GATE_UNGATED, GEOMETRY_GATE_UNGATED,
+    ON_SEED_1CM, PSNR_DROP_DB, STAGE4_PSNR_DB, THIN_AXIS_GATED, THIN_AXIS_UNGATED,
     _collapse_side, band1, band2, band3, collapse_delta, drift_columns,
     threshold_relative, transfers_between_scenes, verdict_for,
 )
@@ -623,6 +624,20 @@ def score(out: Path, tag: str, seed_cloud: str) -> None:
         if not stats.exists():
             raise SystemExit(f"{tag}: splatstats wrote no JSON\n"
                              f"{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    # THE SECOND SCORING, over EVERY splat. splatstats' default gate admits only splats
+    # within 5 cm of the seed, so a cross-arm delta on the gated median is a composition
+    # statistic; `battery` REFUSES an arm without this file rather than falling back.
+    # CPU-only and cheap, so it runs for every arm rather than on demand.
+    ung = out / f"{tag}.ungated.json"
+    if not ung.exists():
+        r = subprocess.run(
+            ["caffeinate", "-i", "uv", "run", "--frozen", "python",
+             "scripts/splat_stats.py", str(out / f"{tag}.ply"), "--seed", seed_cloud,
+             "--thin-axis-gate", "-1", "--json", str(ung), "--quiet"],
+            cwd=str(SPLATSTATS), capture_output=True, text=True)
+        if not ung.exists():
+            raise SystemExit(f"{tag}: ungated splatstats wrote no JSON\n"
+                             f"{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
     lp = out / f"{tag}.dump" / "lpips.json"
     if not lp.exists():
         r = subprocess.run(["caffeinate", "-i", "uv", "run", "scripts/lpips_eval.py",
@@ -670,6 +685,64 @@ def role_of(tag: str) -> str:
     return ARM_ROLES.get(tag, TREATMENT)
 
 
+#: splatstats echoes every knob that can change a number into its `thresholds` block.
+#: `thin_axis_gate_tolerance_m` is the one that decides WHICH SPLATS were measured: a
+#: distance (0.05 by default) means the median is over splats within that far of the seed;
+#: `None` means `--thin-axis-gate -1` ran and every splat was measured.
+GATE_TOL_KEY = "thin_axis_gate_tolerance_m"
+
+
+def load_ungated_stats(out: Path, tag: str, gated: dict) -> dict:
+    """`<tag>.ungated.json` -- the SECOND splatstats scoring, over every splat.
+
+    ABSENT IS LOUD. An arm scored once has no ungated column, and grading it against the
+    gated one while calling the result a thin-axis verdict is precisely the composition
+    confound the second scoring exists to remove -- and it would read as a pass. Every
+    other guard in this file refuses rather than degrades; so does this one.
+
+    AND THE FILE'S CONTENT IS CHECKED, NOT ITS NAME. A guard that a file EXISTS is not a
+    guard that this run produced it: `cp G0.stats.json G0.ungated.json` yields two
+    identical gated columns and a grade that claims to have compared populations it never
+    did. Both files' `thresholds.thin_axis_gate_tolerance_m` are read -- the ungated one
+    must be None and the gated one must not -- and both must name the same ply, which is
+    what stops an ungated column being carried over from another arm.
+    """
+    p = out / f"{tag}.ungated.json"
+    if not p.exists():
+        raise SystemExit(
+            f"{tag}: no ungated thin-axis scoring at {p}. splatstats' default gate admits "
+            f"only splats within {GATE_TOL_KEY}={gated.get('thresholds', {}).get(GATE_TOL_KEY)!r} "
+            f"of the seed, so a delta between two arms' gated thin-axis medians is a "
+            f"COMPOSITION statistic, not an orientation one (Task 22, 2026-09-05: Task "
+            f"19's -2.35 deg reversed to +0.78 deg WORSE at equal population, r = -0.995 "
+            f"against admitted-population excess). Re-score with "
+            f"`splat_stats.py --thin-axis-gate -1 --json {p.name}`; it needs no GPU. An "
+            f"absent second scoring must never fall back to the gated column.")
+    un = json.loads(p.read_text())
+    g_tol = (gated.get("thresholds") or {}).get(GATE_TOL_KEY, "<absent>")
+    u_tol = (un.get("thresholds") or {}).get(GATE_TOL_KEY, "<absent>")
+    if u_tol is not None:
+        raise SystemExit(
+            f"{tag}: {p.name} reports {GATE_TOL_KEY}={u_tol!r}, so it is a GATED scoring "
+            f"under an ungated filename -- grading it would compare two gated columns "
+            f"while reporting that the populations had been equalised. Re-run splatstats "
+            f"with --thin-axis-gate -1.")
+    if g_tol is None or g_tol == "<absent>":
+        raise SystemExit(
+            f"{tag}: {tag}.stats.json reports {GATE_TOL_KEY}={g_tol!r}. The two scorings "
+            f"are only informative as a PAIR -- one gated, one not -- and a gated file "
+            f"that is not gated makes the comparison vacuous rather than wrong-looking.")
+    a, b = gated.get("splat_ply"), un.get("splat_ply")
+    if a != b:
+        raise SystemExit(
+            f"{tag}: the two scorings name different plys -- splat_ply {a!r} vs {b!r}. An "
+            f"ungated column carried over from another arm is a plausible number for a "
+            f"different reconstruction.")
+    if "thin_axis_angle_p50" not in (un.get("metrics") or {}):
+        raise SystemExit(f"{tag}: {p.name} carries no thin_axis_angle_p50.")
+    return un
+
+
 def battery(out: Path, tag: str) -> dict:
     """Every column the rule grades, from the artifact that produced it -- never stdout.
 
@@ -682,6 +755,7 @@ def battery(out: Path, tag: str) -> dict:
     check_loss_path(tag, role_of(tag), rep)
     resolved = rep.get("resolved") or {}
     st = json.loads((out / f"{tag}.stats.json").read_text())
+    un = load_ungated_stats(out, tag, st)
     ref = str(st.get("seed_cloud") or "")
     # Derived from THIS ARM's own inputs, not from a command line a re-grade never saw.
     check_seed_cloud(ref, resolved.get("colmap"), resolved.get("init_ply"))
@@ -689,6 +763,9 @@ def battery(out: Path, tag: str) -> dict:
     sh = m.get("shape") or {}
     vals = {f"stats.{k}": v for k, v in st["metrics"].items()
             if isinstance(v, (int, float))}
+    # The UNGATED thin-axis median, under its own name. Never merged into the gated key:
+    # two statistics that can disagree in SIGN must not share a name.
+    vals[THIN_AXIS_UNGATED] = un["metrics"]["thin_axis_angle_p50"]
     vals.update({
         "run.psnr_masked": m.get("psnr_masked"), "run.psnr": m.get("psnr"),
         "run.coverage": m.get("coverage"), "run.lpips": m.get("lpips"),
@@ -704,7 +781,11 @@ def battery(out: Path, tag: str) -> dict:
             "git": (rep.get("env") or {}).get("git"), "seed_cloud": ref,
             "resolved": resolved,
             "loss_path": rep["observed"]["loss_path"],
+            # BOTH admitted populations, side by side. The whole reason the ungated
+            # column exists is that these two numbers differ; reporting only one of them
+            # would leave a reader unable to see how much.
             "thin_axis_evaluated": st["metrics"].get("thin_axis_evaluated"),
+            "thin_axis_evaluated_ungated": un["metrics"].get("thin_axis_evaluated"),
             "values": {k: v for k, v in vals.items() if isinstance(v, (int, float))}}
 
 
@@ -931,7 +1012,13 @@ def grade(scene: str, dn: float, t: dict, fl: dict, anchor_entry: dict) -> dict:
             row["verdict"] = verdict[k] = verdict_for(k, d, floor)
         rows[k] = row
 
-    gate = {k: verdict.get(k) for k in GEOMETRY_GATE}
+    # THE UNGATED THIN-AXIS COLUMN, not the gated one. splatstats' default gate admits
+    # only splats within 5 cm of the seed, so two arms are scored over different
+    # POPULATIONS and a delta between their gated medians is a COMPOSITION statistic
+    # wearing an orientation statistic's name (Task 22, 2026-09-05, established BEFORE
+    # these arms were graded). The gated column is still measured, still in `rows`, and
+    # still reported -- it is just not what a band decides on.
+    gate = {k: verdict.get(k) for k in GEOMETRY_GATE_UNGATED}
     psnr = verdict.get("run.psnr_masked")
     missing = [k for k, v in gate.items() if v is None] + \
               ([] if psnr else ["run.psnr_masked"])
@@ -941,15 +1028,37 @@ def grade(scene: str, dn: float, t: dict, fl: dict, anchor_entry: dict) -> dict:
     base_vals = {k: fl[k]["mean"] for k in fl}
     b1 = band1(t["values"], base_vals, anchor_values,
                bool(anchor_entry.get("self_anchored")))
-    b2 = band2(verdict)
+    b2 = band2(verdict, gate=BAND2_GATE_UNGATED)
     # AMENDMENT 2 (`7c738b8`): the scene's OWN n>=3 masked-PSNR floor goes in, so Band 3
     # can tell whether its 0.25 dB threshold still stands ABOVE this scene's reproduction
     # noise. Passing a constant here is how the amendment gets implemented in the band and
     # never reaches a verdict.
     b3 = band3(t["values"]["run.psnr_masked"], fl["run.psnr_masked"]["mean"],
                fl["run.psnr_masked"]["spread_n3"])
-    drift = drift_columns(rows, verdict, b1, b2, b3["fired"])
-    drop = bool(b1["fired"] or b2 == "FAIL" or b3["fired"])
+    drift = drift_columns(rows, verdict, b1, b2, b3["fired"],
+                          gate=BAND2_GATE_UNGATED)
+    # DROP MEANS BAND 1 OR BAND 3 FIRED. A BAND 2 FAILURE IS NOT A DROP.
+    # `3cfd8f3` Reading 2, pinned before any arm ran: "Failing BAND 2 while triggering
+    # neither Band 1 nor Band 3 is NOT ADOPTED, reported as a null result: the shipped
+    # default stands." This line used to read `b1["fired"] or b2 == "FAIL" or b3["fired"]`
+    # -- and because DROP is checked FIRST and is not overridable in `combined_verdict`,
+    # one scene's Band 2 failure would have disqualified the lever everywhere and been
+    # published under `regressed_on`, about a scene that neither collapsed nor lost PSNR.
+    drop = bool(b1["fired"] or b3["fired"])
+    passed = (b2 == "PASS" and not drop)
+    # A THIRD STATE. `scene_drop` and `scene_pass` are two booleans, so three of their
+    # four combinations mean "not adopted" and nothing distinguishes them from each other
+    # or from a pass at a glance. This says which, in one word, with the reason beside it.
+    outcome = "DROP" if drop else ("PASS" if passed else "NOT ADOPTED")
+    reason = ("Band 1 collapse" if b1["fired"] else
+              "Band 3 photometric" if b3["fired"] else
+              "Band 2 FAILED (a geometry gate column WORSENED beyond its floor); "
+              "3cfd8f3 Reading 2 -- a null result, not a DROP: the shipped default stands"
+              if b2 == "FAIL" else
+              "Band 2 WITHIN FLOOR (on-seed@1cm did not rise beyond its floor); "
+              "3cfd8f3 Reading 2 -- a null result: the shipped default stands"
+              if not passed else
+              "Band 2 PASSED and neither Band 1 nor Band 3 fired")
     return {"schema": 2, "rule": "tier3-three-band-2026-09-04", "scene": scene, "dn": dn,
             "arm": t["tag"], "treatment": {k: v for k, v in t.items() if k != "values"},
             "band1": b1, "band1_fired": b1["fired"],
@@ -959,11 +1068,30 @@ def grade(scene: str, dn: float, t: dict, fl: dict, anchor_entry: dict) -> dict:
             # INDETERMINATE "must not be reported as a pass".
             "band3_status": b3["status"],
             "drift": drift, "scene_drop": drop,
-            "scene_pass": (b2 == "PASS" and not drop),
+            "scene_pass": passed,
+            "scene_outcome": outcome, "scene_outcome_reason": reason,
             "falsifier_triggered_on_this_scene":
                 (verdict.get("stats.on_seed_frac_1cm") == "WITHIN FLOOR"
                  and verdict.get("stats.thin_axis_angle_p50") == "WITHIN FLOOR"),
             "geometry_gate": gate, "psnr_verdict": psnr,
+            # WHICH thin-axis column the bands read, recorded rather than implied, and
+            # both columns' admitted populations beside it. A verdict that named neither
+            # would be unreadable a month later, and the gated column's verdict is kept in
+            # `rows` so the composition effect is visible instead of merely corrected for.
+            "band2_gate": list(BAND2_GATE_UNGATED),
+            "geometry_gate_columns": list(GEOMETRY_GATE_UNGATED),
+            "thin_axis_column_note":
+                "Bands read " + THIN_AXIS_UNGATED + " (splatstats --thin-axis-gate -1, "
+                "every splat). " + THIN_AXIS_GATED + " is splatstats' default 5 cm gate "
+                "and is REPORTED ONLY: two arms admitting different numbers of splats "
+                "make a delta between gated medians a composition statistic (Task 22, "
+                "2026-09-05 -- Task 19's -2.35 deg reversed to +0.78 deg WORSE at equal "
+                "population, r = -0.995 against admitted-population excess).",
+            "thin_axis_evaluated": {
+                "gated": {"G0": t.get("thin_axis_evaluated")}
+                         | {k: v for k, v in (fl.get("stats.thin_axis_evaluated") or {}
+                                              ).items() if k in FLOOR_TAGS},
+                "ungated": {"G0": t.get("thin_axis_evaluated_ungated")}},
             "anchor": {"values": anchor_values, "config": anchor_entry.get("config"),
                        "source": anchor_entry.get("source"),
                        "self_anchored": bool(anchor_entry.get("self_anchored"))},
@@ -1063,11 +1191,16 @@ def combined_verdict(per_scene: dict) -> dict:
     scenes = sorted(per_scene)
 
     def _drops(s):
+        # Band 1 or Band 3 ONLY -- see `grade()`. A Band 2 failure is `3cfd8f3` Reading 2's
+        # null result and belongs in `band2_failed_on`, not in `regressed_on`: publishing
+        # it as a regression would say a scene collapsed when it did not, and DROP is
+        # checked first and is not overridable, so it would carry every other scene with it.
         g = per_scene[s]
-        return bool(g.get("band1_fired") or g.get("band2") == "FAIL"
-                    or g.get("band3_fired"))
+        return bool(g.get("band1_fired") or g.get("band3_fired"))
 
     drops = [s for s in scenes if _drops(s)]
+    failed_b2 = [s for s in scenes if per_scene[s].get("band2") == "FAIL"
+                 and s not in drops]
     passes = [s for s in scenes if per_scene[s].get("band2") == "PASS" and s not in drops]
     within = [s for s in scenes if per_scene[s].get("band2") == "WITHIN FLOOR"
               and s not in drops]
@@ -1101,6 +1234,7 @@ def combined_verdict(per_scene: dict) -> dict:
                 "reported as 'detectable early, immaterial at 30k' and is STILL NOT "
                 "ADOPTED.",
             "passed_on": passes, "within_floor_on": within, "regressed_on": drops,
+            "band2_failed_on": failed_b2,
             "band3_indeterminate_on": indet,
             "band3_indeterminate_note":
                 ("Band 3 returned INDETERMINATE on " + ", ".join(indet) + ": each of "
@@ -1140,6 +1274,10 @@ PROBE_COLUMNS = {
     "smax_p50_mm": "run.smax_p50_mm", "splats": "run.n_splats",
     "on_seed_frac_1cm": "stats.on_seed_frac_1cm",
     "thin_axis_angle_p50": "stats.thin_axis_angle_p50",
+    # Reading B's whole output is a set of CROSS-ARM deltas, which is exactly the shape the
+    # gated column cannot carry. Reported beside it rather than instead of it, as in the
+    # 30k grade.
+    "thin_axis_angle_p50_ungated": "stats.thin_axis_angle_p50_ungated",
 }
 
 
@@ -1169,13 +1307,25 @@ def checkpoint_columns(out: Path, tag: str, step: int, seed_cloud: str) -> dict:
         if not js.exists():
             raise SystemExit(f"{tag}@{step}: splatstats wrote no JSON\n"
                              f"{r.stdout[-1500:]}\n{r.stderr[-1500:]}")
+    ju = out / f"{tag}.step{step:06d}.ungated.json"
+    if not ju.exists():
+        r = subprocess.run(
+            ["caffeinate", "-i", "uv", "run", "--frozen", "python",
+             "scripts/splat_stats.py", str(ply), "--seed", seed_cloud,
+             "--thin-axis-gate", "-1", "--json", str(ju), "--quiet"],
+            cwd=str(SPLATSTATS), capture_output=True, text=True)
+        if not ju.exists():
+            raise SystemExit(f"{tag}@{step}: ungated splatstats wrote no JSON\n"
+                             f"{r.stdout[-1500:]}\n{r.stderr[-1500:]}")
     sm = json.loads(js.read_text())["metrics"]
+    um = json.loads(ju.read_text())["metrics"]
     return {"aspect_p50": cols["aspect_p50"], "needle_frac": cols["needle_frac"],
             "hard_needle_frac": cols["hard_needle_frac"],
             "smid_p50_mm": cols["smid_p50_mm"], "smax_p50_mm": cols["smax_p50_mm"],
             "splats": cols["splats"],
             "on_seed_frac_1cm": sm["on_seed_frac_1cm"],
-            "thin_axis_angle_p50": sm["thin_axis_angle_p50"]}
+            "thin_axis_angle_p50": sm["thin_axis_angle_p50"],
+            "thin_axis_angle_p50_ungated": um["thin_axis_angle_p50"]}
 
 
 def early_divergence(out: Path, scene: str) -> dict:

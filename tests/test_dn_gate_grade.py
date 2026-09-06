@@ -35,7 +35,12 @@ BASE = {"run.psnr_masked": 25.0, "run.psnr": 22.0, "run.coverage": 0.95,
         "run.hard_needle_frac": 0.00207, "run.smid_p50_mm": 7.15,
         "run.smax_p50_mm": 25.84,
         "stats.on_seed_frac_1cm": 0.0719, "stats.on_seed_frac_2cm": 0.24,
-        "stats.thin_axis_angle_p50": 40.0, "stats.opacity_p50": 0.20}
+        "stats.thin_axis_angle_p50": 40.0,
+        # The SAME statistic over EVERY splat rather than only those within 5 cm of the
+        # seed. Deliberately not equal to the gated one: a fixture where they agree cannot
+        # tell which column a band read.
+        "stats.thin_axis_angle_p50_ungated": 46.0,
+        "stats.opacity_p50": 0.20}
 
 FLOOR_COUNTS = {"fused_calls": 0, "torch_calls": 9, "dn_gated_calls": 0,
                 "dn_ungated_calls": 9, "dn_skipped_calls": 0}
@@ -67,10 +72,22 @@ def write_arm(out: Path, tag: str, values: dict, seed: int, role: str,
                       "hard_needle_frac": v["run.hard_needle_frac"],
                       "smid_p50_mm": v["run.smid_p50_mm"],
                       "smax_p50_mm": v["run.smax_p50_mm"]}}}, indent=2))
+    # TWO splatstats JSONs, exactly as `score()` writes them and as splatstats shapes
+    # them: `thin_axis_evaluated` lives INSIDE `metrics`, and the gate tolerance is
+    # echoed in `thresholds` (None == `--thin-axis-gate -1`, i.e. every splat).
+    stats = {k[len("stats."):]: v[k] for k in v if k.startswith("stats.")}
+    gated = {k: x for k, x in stats.items() if not k.endswith("_ungated")}
+    gated["thin_axis_evaluated"] = 230000.0            # the gate admits ~230k of 500k
     (out / f"{tag}.stats.json").write_text(json.dumps({
-        "seed_cloud": seed_cloud, "thin_axis_evaluated": 400000.0,
-        "metrics": {k[len("stats."):]: v[k] for k in v if k.startswith("stats.")}},
-        indent=2))
+        "splat_ply": f"{tag}.ply", "seed_cloud": seed_cloud,
+        "thresholds": {"thin_axis_gate_tolerance_m": 0.05},
+        "metrics": gated}, indent=2))
+    ung = {"thin_axis_angle_p50": v["stats.thin_axis_angle_p50_ungated"],
+           "thin_axis_evaluated": 500000.0}            # ungated: every splat
+    (out / f"{tag}.ungated.json").write_text(json.dumps({
+        "splat_ply": f"{tag}.ply", "seed_cloud": seed_cloud,
+        "thresholds": {"thin_axis_gate_tolerance_m": None},
+        "metrics": ung}, indent=2))
 
 
 def make_scene(tmp: Path, name: str = "pgeom", treatment: dict | None = None,
@@ -488,16 +505,26 @@ def test_the_grader_can_reach_EVERY_ONE_of_its_verdicts():
 
 
 def test_a_NULL_RESULT_is_reported_as_a_null_and_not_as_an_adoption():
-    """CATCHES reading 3 of `3cfd8f3`, pinned before any number existed: failing Band 2
+    """CATCHES Reading 2 of `3cfd8f3`, pinned before any number existed: failing Band 2
     while triggering neither Band 1 nor Band 3 is NOT ADOPTED and the shipped default
     stands. For THIS arm that is the most likely outcome -- removing pixels from a loss
-    has no prior reason to raise on-seed@1cm."""
-    v = H.combined_verdict({"pgeom": _scene_verdict(band2="FAIL", scene_pass=False,
-                                                    scene_drop=True)})
-    assert v["decision"] == "DROP"
+    has no prior reason to raise on-seed@1cm.
+
+    THIS TEST USED TO ASSERT THE OPPOSITE OF ITS OWN DOCSTRING. It quoted Reading 2 and
+    then required `decision == "DROP"` for a Band 2 failure, with the fixture handed
+    `scene_drop=True` so the assertion would hold. It named the reading as "reading 3" as
+    well. Both halves are corrected here: a Band 2 failure alone is a null, and it is
+    listed under `band2_failed_on`, never `regressed_on`."""
+    v = H.combined_verdict({"pgeom": _scene_verdict(band2="FAIL", scene_pass=False)})
+    assert v["decision"].startswith("NOT ADOPTED")
+    assert v["regressed_on"] == [] and v["band2_failed_on"] == ["pgeom"]
     v2 = H.combined_verdict({"pgeom": _scene_verdict(band2="WITHIN FLOOR",
                                                      scene_pass=False)})
     assert v2["decision"].startswith("NOT ADOPTED")
+    # ...and the control, so the assertions above are not satisfied by a grader that
+    # returns NOT ADOPTED for everything: a Band 1 firing IS still a DROP.
+    v3 = H.combined_verdict({"pgeom": _scene_verdict(band1_fired=True, scene_pass=False)})
+    assert v3["decision"] == "DROP" and v3["regressed_on"] == ["pgeom"]
 
 
 def test_summary_refuses_an_UNNAMED_grade_in_the_tree(tmp_path):
@@ -576,7 +603,8 @@ def test_the_probe_reads_EXACTLY_the_pre_registered_steps_and_records_which(prob
     never has to trust that."""
     cols = {"aspect_p50": 0.3, "needle_frac": 0.15, "hard_needle_frac": 0.002,
             "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0}
+            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+            "thin_axis_angle_p50_ungated": 47.0}
     _checkpoints(probe_scene, {t: {s: cols for s in (500, 2000)}
                                for t in ("F0", "F1", "G0")})
     r = H.early_divergence(probe_scene, "pgeom")
@@ -591,7 +619,8 @@ def test_the_probe_reports_EFFECT_NOISE_and_their_ratio_per_column(probe_scene):
     def cols(**kw):
         return {"aspect_p50": 0.30, "needle_frac": 0.15, "hard_needle_frac": 0.002,
                 "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-                "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0} | kw
+                "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+                "thin_axis_angle_p50_ungated": 47.0} | kw
     _checkpoints(probe_scene, {
         "F0": {s: cols() for s in (500, 2000)},
         "F1": {s: cols(needle_frac=0.16) for s in (500, 2000)},
@@ -611,7 +640,8 @@ def test_ZERO_NOISE_is_never_reported_as_an_infinite_ratio(probe_scene):
     def cols(**kw):
         return {"aspect_p50": 0.30, "needle_frac": 0.15, "hard_needle_frac": 0.002,
                 "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-                "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0} | kw
+                "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+                "thin_axis_angle_p50_ungated": 47.0} | kw
     _checkpoints(probe_scene, {"F0": {s: cols() for s in (500, 2000)},
                                "F1": {s: cols() for s in (500, 2000)},
                                "G0": {s: cols(needle_frac=0.19) for s in (500, 2000)}})
@@ -630,7 +660,8 @@ def test_the_probe_EMITS_NO_VERDICT_ANYWHERE_IN_ITS_OUTPUT(probe_scene):
     cannot arrive under a new key name."""
     cols = {"aspect_p50": 0.3, "needle_frac": 0.15, "hard_needle_frac": 0.002,
             "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0}
+            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+            "thin_axis_angle_p50_ungated": 47.0}
     _checkpoints(probe_scene, {t: {s: cols for s in (500, 2000)}
                                for t in ("F0", "F1", "G0")})
     doc = json.dumps(H.early_divergence(probe_scene, "pgeom"))
@@ -646,12 +677,16 @@ def test_the_probe_covers_the_five_shape_columns_the_splat_count_and_the_Band2_p
     added or dropped after seeing a number."""
     cols = {"aspect_p50": 0.3, "needle_frac": 0.15, "hard_needle_frac": 0.002,
             "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0}
+            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+            "thin_axis_angle_p50_ungated": 47.0}
     _checkpoints(probe_scene, {t: {s: cols for s in (500, 2000)}
                                for t in ("F0", "F1", "G0")})
     got = set(H.early_divergence(probe_scene, "pgeom")["steps"]["500"])
     assert got == {"aspect_p50", "needle_frac", "hard_needle_frac", "smid_p50_mm",
-                   "smax_p50_mm", "splats", "on_seed_frac_1cm", "thin_axis_angle_p50"}
+                   "smax_p50_mm", "splats", "on_seed_frac_1cm",
+                   # BOTH thin-axis columns: Reading B's output is a set of CROSS-ARM
+                   # deltas, the one shape the gated column cannot carry.
+                   "thin_axis_angle_p50", "thin_axis_angle_p50_ungated"}
 
 
 def test_a_MISSING_checkpoint_is_refused_rather_than_dropping_the_column(probe_scene):
@@ -659,7 +694,8 @@ def test_a_MISSING_checkpoint_is_refused_rather_than_dropping_the_column(probe_s
     F0 absent is not a smaller measurement, it is a different one."""
     cols = {"aspect_p50": 0.3, "needle_frac": 0.15, "hard_needle_frac": 0.002,
             "smid_p50_mm": 7.0, "smax_p50_mm": 25.0, "splats": 300000,
-            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0}
+            "on_seed_frac_1cm": 0.07, "thin_axis_angle_p50": 41.0,
+            "thin_axis_angle_p50_ungated": 47.0}
     _checkpoints(probe_scene, {t: {s: cols for s in (500, 2000)} for t in ("F0", "G0")})
     with pytest.raises((SystemExit, FileNotFoundError)):
         H.early_divergence(probe_scene, "pgeom")
@@ -735,3 +771,168 @@ def test_the_cross_scene_verdict_never_turns_an_INDETERMINATE_into_a_silent_pass
     assert c["per_scene"]["pgeom"]["band3_status"] == "INDETERMINATE"
     assert c["band3_indeterminate_on"] == ["pgeom"]
     assert "INDETERMINATE" in (c["band3_indeterminate_note"] or "")
+
+
+# ----------- DEFECT: a Band 2 FAILURE was reported as a DROP. It is NOT ADOPTED.
+
+def test_a_BAND2_FAILURE_alone_is_NOT_ADOPTED_and_is_NOT_a_scene_drop(tmp_path):
+    """`3cfd8f3` Reading 2, pinned in that commit before any arm ran, verbatim:
+
+        Failing BAND 2 while triggering neither Band 1 nor Band 3 is NOT ADOPTED,
+        reported as a null result: the shipped default stands.
+
+    `grade()` computed `drop = b1["fired"] or b2 == "FAIL" or b3["fired"]`, which returns
+    a hard DROP for a scene the rule says is a null. That matters because DROP is
+    CHECKED FIRST AND IS NOT OVERRIDABLE in `combined_verdict` -- so one scene's Band 2
+    failure would have disqualified the lever across every scene, and the artifact would
+    have said "regressed_on" about a scene that did not collapse and did not lose PSNR.
+
+    CATCHES the restoration of that clause in either place. The arm here worsens
+    thin-axis beyond its floor -- a genuine Band 2 FAIL -- while every collapse column and
+    the PSNR sit comfortably inside their thresholds."""
+    # The UNGATED column is the one Band 2 reads -- see
+    # test_BAND2_grades_the_UNGATED_thin_axis_column_and_REPORTS_BOTH.
+    g = graded(tmp_path,
+               floors=({"stats.thin_axis_angle_p50_ungated": 46.0},
+                       {"stats.thin_axis_angle_p50_ungated": 46.1},
+                       {"stats.thin_axis_angle_p50_ungated": 46.2}),   # floor 0.2 deg
+               treatment={"stats.thin_axis_angle_p50_ungated": 50.0})  # +3.9, WORSENED
+    assert g["band2"] == "FAIL"
+    assert g["band1_fired"] is False and g["band3_fired"] is False
+    assert g["scene_drop"] is False, "a Band 2 failure is a null result, not a DROP"
+    assert g["scene_pass"] is False, "...and it is certainly not a pass"
+    # A THIRD STATE, so "not adopted" is not silently indistinguishable from a pass. Two
+    # booleans that are both False describe four situations and this grade must say which.
+    assert g["scene_outcome"] == "NOT ADOPTED"
+    assert "Band 2" in g["scene_outcome_reason"]
+
+
+def test_the_three_scene_outcomes_are_REACHABLE_and_mutually_exclusive(tmp_path):
+    """A tri-state whose third value nothing can produce is a two-state with extra
+    vocabulary. Each of DROP / PASS / NOT ADOPTED is reached by a real graded scene here,
+    and the two booleans are asserted consistent with it -- so a later edit cannot make
+    `scene_outcome` a label that disagrees with `scene_drop`."""
+    drop = graded(tmp_path / "a", treatment={"run.needle_frac": 0.30})       # Band 1
+    passing = graded(tmp_path / "b",
+                     floors=({"stats.on_seed_frac_1cm": 0.0719},
+                             {"stats.on_seed_frac_1cm": 0.0720},
+                             {"stats.on_seed_frac_1cm": 0.0721}),
+                     treatment={"stats.on_seed_frac_1cm": 0.0800})
+    null = graded(tmp_path / "c")                                            # nothing moved
+    assert (drop["scene_outcome"], drop["scene_drop"], drop["scene_pass"]) == \
+           ("DROP", True, False)
+    assert (passing["band2"], passing["scene_outcome"],
+            passing["scene_drop"], passing["scene_pass"]) == ("PASS", "PASS", False, True)
+    assert (null["band2"], null["scene_outcome"],
+            null["scene_drop"], null["scene_pass"]) == \
+           ("WITHIN FLOOR", "NOT ADOPTED", False, False)
+
+
+def test_the_cross_scene_verdict_does_not_call_a_BAND2_FAILURE_a_REGRESSION(tmp_path):
+    """`combined_verdict` recomputes its own drop set rather than reading `scene_drop`,
+    so the defect had to be fixed in BOTH places or the cross-scene line would still
+    report the scene under `regressed_on` and return DROP.
+
+    A Band 2 failure with nothing else moving is the "nothing passed, none regressed"
+    branch -- the shipped default stands."""
+    g = graded(tmp_path,
+               floors=({"stats.thin_axis_angle_p50_ungated": 46.0},
+                       {"stats.thin_axis_angle_p50_ungated": 46.1},
+                       {"stats.thin_axis_angle_p50_ungated": 46.2}),
+               treatment={"stats.thin_axis_angle_p50_ungated": 50.0})
+    c = H.combined_verdict({"pgeom": g})
+    assert c["regressed_on"] == []
+    assert c["decision"].startswith("NOT ADOPTED")
+    assert c["band2_failed_on"] == ["pgeom"]
+
+
+# ------- DEFECT: a band read the GATED thin-axis column, which is a composition statistic
+
+def test_BAND2_grades_the_UNGATED_thin_axis_column_and_REPORTS_BOTH(tmp_path):
+    """splatstats' default gate admits only splats within `thin_axis_gate_tolerance_m`
+    (0.05) of the seed -- often ~230k of 500k -- so two arms are scored over DIFFERENT
+    POPULATIONS and a delta between their gated medians is a COMPOSITION statistic wearing
+    an orientation statistic's name. Established by Task 22 on 2026-09-05, BEFORE these
+    arms were graded, so it is not post-hoc: Task 19's headline -2.35 deg reversed to
+    +0.78 deg WORSE on ARKitScenes at equal admitted population, tracking admitted-
+    population excess at r = -0.995.
+
+    CATCHES a band reading the gated column. The treatment here IMPROVES gated thin-axis
+    by 4 deg while WORSENING the ungated one by 4 deg -- the exact shape of the reversal
+    Task 22 measured -- so a grader on the wrong column returns PASS where the right one
+    returns FAIL. Both are reported, because a verdict that silently dropped the gated
+    column would leave nobody able to see the composition effect."""
+    g = graded(tmp_path,
+               floors=({"stats.on_seed_frac_1cm": 0.0719},
+                       {"stats.on_seed_frac_1cm": 0.0720},
+                       {"stats.on_seed_frac_1cm": 0.0721}),
+               treatment={"stats.on_seed_frac_1cm": 0.0800,        # a real Band 2 rise
+                          "stats.thin_axis_angle_p50": 36.0,        # gated:   IMPROVED
+                          "stats.thin_axis_angle_p50_ungated": 50.0})  # ungated: WORSENED
+    assert g["rows"]["stats.thin_axis_angle_p50"]["verdict"] == "IMPROVED"
+    assert g["rows"]["stats.thin_axis_angle_p50_ungated"]["verdict"] == "WORSENED"
+    assert g["band2"] == "FAIL", "Band 2 must grade the UNGATED column"
+    assert g["band2_gate"] == list(H.BAND2_GATE_UNGATED)
+    # The COMPLETENESS check ("an absent gate column must never read as a pass") runs over
+    # the columns the bands actually read. Over the gated set it would be satisfied by a
+    # column no band consults -- a check something other than the thing being checked can
+    # satisfy, which is this project's signature failure.
+    assert set(g["geometry_gate"]) == set(H.GEOMETRY_GATE_UNGATED)
+    assert g["geometry_gate_columns"] == list(H.GEOMETRY_GATE_UNGATED)
+    # BOTH populations are reported beside the verdict, or the reader cannot see why the
+    # two columns disagree.
+    assert g["thin_axis_evaluated"]["gated"]["G0"] == 230000.0
+    assert g["thin_axis_evaluated"]["ungated"]["G0"] == 500000.0
+
+
+def test_an_ABSENT_ungated_scoring_is_LOUD_and_never_falls_back_to_the_gated_column(
+        tmp_path):
+    """CATCHES the failure this project keeps repeating -- a check that reads a condition
+    something other than the thing being checked could satisfy. An arm scored only once
+    has no ungated column; grading it against the gated one and calling the result a
+    thin-axis verdict is exactly the confound above, and it would read as a pass."""
+    out = make_scene(tmp_path)
+    H.write_floors(out, "pgeom", 0.05, "disparity")
+    (out / "G0.ungated.json").unlink()
+    with pytest.raises(SystemExit, match="ungated"):
+        H.grade_scene(out, "pgeom", 0.05, "G0", H.ANCHOR_PATH)
+
+
+def test_the_ungated_file_must_ACTUALLY_BE_UNGATED_and_the_gated_one_GATED(tmp_path):
+    """A GUARD THAT CHECKS A FILE EXISTS IS NOT A GUARD THAT THIS RUN PRODUCED IT.
+    splatstats echoes `thin_axis_gate_tolerance_m` into its `thresholds` block -- None
+    when `--thin-axis-gate -1` was passed, a distance otherwise -- so the two files can be
+    told apart by content rather than by filename. Without this, copying `<tag>.stats.json`
+    to `<tag>.ungated.json` produces two identical gated columns and a grade that claims
+    to have compared populations it never did.
+
+    Both directions are asserted: a gated file wearing the ungated name, and an ungated
+    file wearing the gated name."""
+    out = make_scene(tmp_path)
+    H.write_floors(out, "pgeom", 0.05, "disparity")
+    d = json.loads((out / "G0.ungated.json").read_text())
+    d["thresholds"]["thin_axis_gate_tolerance_m"] = 0.05          # not ungated at all
+    (out / "G0.ungated.json").write_text(json.dumps(d))
+    with pytest.raises(SystemExit, match="thin_axis_gate_tolerance_m"):
+        H.grade_scene(out, "pgeom", 0.05, "G0", H.ANCHOR_PATH)
+
+    out2 = make_scene(tmp_path / "two")
+    H.write_floors(out2, "pgeom", 0.05, "disparity")
+    d2 = json.loads((out2 / "G0.stats.json").read_text())
+    d2["thresholds"]["thin_axis_gate_tolerance_m"] = None         # gated file is not
+    (out2 / "G0.stats.json").write_text(json.dumps(d2))
+    with pytest.raises(SystemExit, match="thin_axis_gate_tolerance_m"):
+        H.grade_scene(out2, "pgeom", 0.05, "G0", H.ANCHOR_PATH)
+
+
+def test_the_two_scorings_must_describe_the_SAME_ply(tmp_path):
+    """CATCHES an ungated column carried over from another arm -- the cheapest way to get
+    a plausible number for a different reconstruction, and one no threshold check would
+    notice."""
+    out = make_scene(tmp_path)
+    H.write_floors(out, "pgeom", 0.05, "disparity")
+    d = json.loads((out / "G0.ungated.json").read_text())
+    d["splat_ply"] = "F0.ply"
+    (out / "G0.ungated.json").write_text(json.dumps(d))
+    with pytest.raises(SystemExit, match="splat_ply"):
+        H.grade_scene(out, "pgeom", 0.05, "G0", H.ANCHOR_PATH)

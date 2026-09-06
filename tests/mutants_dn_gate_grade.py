@@ -269,16 +269,22 @@ MUTANTS = [
                    '              "run.aspect_p50", "run.needle_frac")'),
      "test_band2_FAILS_on_a_worsened_column_and_an_ABSENT_column_is_refused"),
 
+    # THE SECOND EDIT OF EACH OF THESE TWO GOES THROUGH `sub`, NOT `str.replace`. It used
+    # to be a bare `.replace` chained onto the first, which cannot fail: when AMENDMENT 2
+    # rewrote band3's return, the anchor vanished, the replace silently did nothing, and
+    # the mutant SURVIVED while only changing a field no test reads. That is the same
+    # defective-mutant class this file's `sub` docstring was written for, arriving through
+    # the one call that bypassed it.
     ("band3_is_TWO_SIDED_again", BANDS,
-     lambda s: sub(s, '"exceeds_allowance": loss > PSNR_DROP_DB',
-                   '"exceeds_allowance": abs(loss) > PSNR_DROP_DB')
-                 .replace('"fired": bool(loss > PSNR_DROP_DB or crossed)',
-                          '"fired": bool(abs(loss) > PSNR_DROP_DB or crossed)'),
+     lambda s: sub(sub(s, '"exceeds_allowance": loss > PSNR_DROP_DB',
+                       '"exceeds_allowance": abs(loss) > PSNR_DROP_DB'),
+                   "    fired = bool(loss > PSNR_DROP_DB or crossed)",
+                   "    fired = bool(abs(loss) > PSNR_DROP_DB or crossed)"),
      "test_band3_is_ONE_SIDED_a_PSNR_GAIN_is_not_a_regression"),
 
     ("band3_comparison_is_not_strict", BANDS,
-     lambda s: sub(s, '"fired": bool(loss > PSNR_DROP_DB or crossed)',
-                   '"fired": bool(loss >= PSNR_DROP_DB or crossed)'),
+     lambda s: sub(s, "    fired = bool(loss > PSNR_DROP_DB or crossed)",
+                   "    fired = bool(loss >= PSNR_DROP_DB or crossed)"),
      "test_band3_is_ONE_SIDED_a_PSNR_GAIN_is_not_a_regression"),
 
     ("band3_drops_the_Stage4_gate_clause", BANDS,
@@ -457,9 +463,88 @@ MUTANTS = [
      lambda s: sub(s, "            effect, noise = g0 - f0, f1 - f0",
                    "            effect, noise = f1 - f0, g0 - f0"),
      "test_the_probe_reports_EFFECT_NOISE_and_their_ratio_per_column"),
+
+    # ---- AMENDMENT 2 (7c738b8): Band 3 INDETERMINATE
+    ("band3_ignores_the_scenes_own_PSNR_floor", HARNESS,
+     lambda s: sub(s, '    b3 = band3(t["values"]["run.psnr_masked"], '
+                      'fl["run.psnr_masked"]["mean"],\n'
+                      '               fl["run.psnr_masked"]["spread_n3"])',
+                   '    b3 = band3(t["values"]["run.psnr_masked"], '
+                   'fl["run.psnr_masked"]["mean"])'),
+     "test_band3_is_INDETERMINATE_in_the_GRADE_when_the_scenes_own_floor_swallows_it"),
+
+    ("an_INDETERMINATE_Band3_still_DROPS_the_scene", BANDS,
+     lambda s: sub(s, '           "fired": False if indeterminate else fired}',
+                   '           "fired": fired}'),
+     "test_band3_is_INDETERMINATE_where_its_threshold_sits_inside_the_scenes_own_floor"),
+
+    ("an_INDETERMINATE_Band3_is_reported_as_a_PASS", BANDS,
+     lambda s: sub(s, '    out["status"] = ("INDETERMINATE" if indeterminate\n'
+                      '                     else ("FIRED" if fired else "PASS"))',
+                   '    out["status"] = "FIRED" if fired else "PASS"'),
+     "test_a_scene_that_is_INDETERMINATE_is_never_silently_a_pass"),
+
+    ("the_INDETERMINATE_trigger_is_STRICTLY_ABOVE_the_threshold", BANDS,
+     lambda s: sub(s, "                     and scene_psnr_floor >= PSNR_DROP_DB)",
+                   "                     and scene_psnr_floor > PSNR_DROP_DB)"),
+     "test_the_INDETERMINATE_trigger_is_at_or_above_the_threshold_and_introduces_no_constant"),
+
+    # ---- DEFECT: a Band 2 failure was a DROP
+    ("a_BAND2_FAILURE_is_a_DROP_again", HARNESS,
+     lambda s: sub(s, '    drop = bool(b1["fired"] or b3["fired"])',
+                   '    drop = bool(b1["fired"] or b2 == "FAIL" or b3["fired"])'),
+     "test_a_BAND2_FAILURE_alone_is_NOT_ADOPTED_and_is_NOT_a_scene_drop"),
+
+    ("the_cross_scene_drop_set_counts_a_BAND2_FAILURE", HARNESS,
+     lambda s: sub(s, '        return bool(g.get("band1_fired") or g.get("band3_fired"))',
+                   '        return bool(g.get("band1_fired") or g.get("band2") == "FAIL"\n'
+                   '                    or g.get("band3_fired"))'),
+     "test_the_cross_scene_verdict_does_not_call_a_BAND2_FAILURE_a_REGRESSION"),
+
+    ("NOT_ADOPTED_collapses_into_PASS", HARNESS,
+     lambda s: sub(s, '    outcome = "DROP" if drop else ("PASS" if passed else '
+                      '"NOT ADOPTED")',
+                   '    outcome = "DROP" if drop else "PASS"'),
+     "test_the_three_scene_outcomes_are_REACHABLE_and_mutually_exclusive"),
+
+    # ---- DEFECT: thin-axis graded on the GATED column
+    ("BAND2_grades_the_GATED_thin_axis_column_again", HARNESS,
+     lambda s: sub(s, "    b2 = band2(verdict, gate=BAND2_GATE_UNGATED)",
+                   "    b2 = band2(verdict)"),
+     "test_BAND2_grades_the_UNGATED_thin_axis_column_and_REPORTS_BOTH"),
+
+    ("the_GEOMETRY_GATE_completeness_check_reads_the_GATED_column", HARNESS,
+     lambda s: sub(s, "    gate = {k: verdict.get(k) for k in GEOMETRY_GATE_UNGATED}",
+                   "    gate = {k: verdict.get(k) for k in GEOMETRY_GATE}"),
+     "test_BAND2_grades_the_UNGATED_thin_axis_column_and_REPORTS_BOTH"),
+
+    ("an_ABSENT_ungated_scoring_falls_back_to_the_gated_column", HARNESS,
+     lambda s: sub(s, "    p = out / f\"{tag}.ungated.json\"\n    if not p.exists():",
+                   "    p = out / f\"{tag}.ungated.json\"\n    if not p.exists():\n"
+                   "        return gated\n    if False:"),
+     "test_an_ABSENT_ungated_scoring_is_LOUD_and_never_falls_back_to_the_gated_column"),
+
+    ("the_ungated_file_is_trusted_by_its_NAME_not_its_content", HARNESS,
+     lambda s: sub(s, "    if u_tol is not None:\n", "    if False:\n"),
+     "test_the_ungated_file_must_ACTUALLY_BE_UNGATED_and_the_gated_one_GATED"),
+
+    ("the_two_scorings_may_describe_different_plys", HARNESS,
+     lambda s: sub(s, '    a, b = gated.get("splat_ply"), un.get("splat_ply")\n'
+                      "    if a != b:\n",
+                   '    a, b = gated.get("splat_ply"), un.get("splat_ply")\n'
+                   "    if False:\n"),
+     "test_the_two_scorings_must_describe_the_SAME_ply"),
+
+    ("the_probe_reads_only_the_GATED_thin_axis_column", HARNESS,
+     lambda s: sub(s, '    "thin_axis_angle_p50_ungated": '
+                      '"stats.thin_axis_angle_p50_ungated",\n', ""),
+     "test_the_probe_covers_the_five_shape_columns_the_splat_count_and_the_Band2_pair"),
 ]
 
-NODES = ["tests/test_dn_gate_grade.py"]
+#: BOTH suites, because the rule now lives in two files and a mutant in `bench/
+#: tier3_bands.py` is killed by `tests/test_tier3_bands.py` -- which is Task 22's file,
+#: and is exactly the coverage a single-suite battery would have silently lost in the move.
+NODES = ["tests/test_dn_gate_grade.py", "tests/test_tier3_bands.py"]
 
 
 def main() -> int:
