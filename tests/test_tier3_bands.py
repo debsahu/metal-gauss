@@ -309,3 +309,31 @@ def test_band2_reads_whichever_thin_axis_column_it_is_GIVEN_and_refuses_the_othe
     with pytest.raises(ValueError, match="thin_axis_angle_p50_ungated"):
         band2({"stats.on_seed_frac_1cm": "IMPROVED", THIN_AXIS_GATED: "IMPROVED"},
               gate=BAND2_GATE_UNGATED)
+
+
+def test_hard_needle_frac_is_REPORTED_and_appears_in_NO_BAND_of_the_unified_rule():
+    """`run.hard_needle_frac` is a DELIVERY statement -- the fraction of splats whose
+    orientation splat-transform's 8-bit smallest-three quaternion cannot represent -- and
+    it is the WEAKEST of the four candidate collapse columns on the only scale a collapse
+    test cares about: adopted-vs-collapse log separation 5.0x, against aspect's 18.8x
+    (research/metal-gauss.md s13.6; derived at length in
+    tests/test_plane_aux_tier3_rule.py::
+    test_the_hard_needle_column_is_a_DELIVERY_STATEMENT_not_a_collapse_discriminator).
+
+    THAT DERIVATION IS PINNED AGAINST `scripts/plane_aux_arms.py` AND NOTHING PINNED IT
+    HERE. `bench/tier3_bands.py` is now the rule Task 20 and Task 22 both grade with, so a
+    promotion of this column to a gate would have gone uncaught in the one module that
+    matters. `DRIFT_SCOPE` is included deliberately: drift is reported, not decided on, but
+    a column in it is one edit from a band.
+    """
+    from bench.tier3_bands import (BAND2_GATE_UNGATED, DRIFT_SCOPE,
+                                   GEOMETRY_GATE_UNGATED)
+    from bench.tier3_bands import BAND2_GATE, COLLAPSE, GEOMETRY_GATE
+    for where, names in (("COLLAPSE", COLLAPSE), ("GEOMETRY_GATE", GEOMETRY_GATE),
+                         ("BAND2_GATE", BAND2_GATE), ("DRIFT_SCOPE", DRIFT_SCOPE),
+                         ("GEOMETRY_GATE_UNGATED", GEOMETRY_GATE_UNGATED),
+                         ("BAND2_GATE_UNGATED", BAND2_GATE_UNGATED)):
+        assert "run.hard_needle_frac" not in set(names), where
+    # The control: the columns that ARE gates are present, or the loop above is satisfied
+    # by a module whose gates are all empty.
+    assert "run.needle_frac" in COLLAPSE and "run.aspect_p50" in COLLAPSE

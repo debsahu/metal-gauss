@@ -482,19 +482,30 @@ def test_shape_metrics_report_the_HARD_needle_fraction_separately():
         [0.0005000, 0.0200, 0.020],   # aspect 1.000  -- healthy disc
         [0.0005000, 0.0050, 0.020],   # aspect 0.250  -- healthy
         [0.0000100, 0.0009, 0.020],   # aspect 0.045  -- NEEDLE, still deliverable
+        [0.0000010, 0.0003, 0.020],   # aspect 0.015  -- JUST ABOVE the delivery limit
         [0.0000010, 0.0001, 0.020],   # aspect 0.005  -- HARD needle, undeliverable
     ]))
     m = shape_metrics(ls)
-    assert m["needle_frac"] == pytest.approx(0.5)
-    assert m["hard_needle_frac"] == pytest.approx(0.25)
+    assert m["needle_frac"] == pytest.approx(0.6)
+    assert m["hard_needle_frac"] == pytest.approx(0.2)
     assert m["hard_needle_frac"] != m["needle_frac"], (
         "fixture has no splat between the two thresholds: it cannot separate them")
+    # ...AND IT PINS THE VALUE OF THE CONSTANT, not merely its existence. The aspect-0.015
+    # row was added after a substitution check showed `HARD_NEEDLE_ASPECT = 0.01 -> 0.02`
+    # SURVIVING the whole suite: the old fixture's nearest splats were 0.005 and 0.045, so
+    # any threshold in (0.005, 0.045] produced the identical fraction. 0.015 is inside
+    # that window and outside 0.01, so a threshold that moves to 0.02 -- or anywhere above
+    # 0.015 -- changes this number.
+    assert 0.01 < 0.015 < 0.02, "the discriminating row must sit between the two"
     # smid / smax are reported columns, and they are the MEDIANS of the sorted middle and
     # largest axes -- not the collapse test (dlog(aspect) = dlog(smid) - dlog(smax), so
     # aspect already IS that differential).
     # 0.9, not the 2.95 an averaging median would give: `torch.median` returns the LOWER
     # of the two middle values on an even-length input. Every p50 in this battery is that
     # median, so the convention is pinned here rather than assumed at reading time.
+    # 5 rows now, so the median is the middle one and the lower/average distinction does
+    # not arise here; it is pinned on an EVEN-length input in
+    # tests/test_bench_ply_shape.py instead.
     assert m["smid_p50_mm"] == pytest.approx(0.9, abs=1e-4)
     assert m["smax_p50_mm"] == pytest.approx(20.0, abs=1e-4)
 
