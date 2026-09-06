@@ -25,6 +25,40 @@ def flatten_loss(log_scales: torch.Tensor) -> torch.Tensor:
     return torch.exp(log_scales).min(dim=-1).values.mean()
 
 
+def inplane_isotropy_loss(log_scales: torch.Tensor, log_ratio_max: float) -> torch.Tensor:
+    """Hinge barrier on the IN-PLANE aspect ratio: mean of relu(log(smax/smid) - log r0).
+
+    THE GAP IT FILLS. Nothing in this trainer's objective mentions smid/smax, and it
+    produces 3-10x more needles than any other trainer on the same scenes (16.6% of
+    playroom_0821's splats at smid/smax < 0.1, against Brush 0.55-4.5% and LFS 0.15%).
+    Flatten cannot be the cause and is not the cure: it acts on smin, and across three
+    single-variable pairs it moved smin 17.6 -> 1.75 mm while smid/smax stayed
+    0.839 -> 0.839.
+
+    ORTHOGONAL TO FLATTEN BY CONSTRUCTION, which is the property that lets both live in
+    one recipe. The sorted smin lane receives EXACTLY zero gradient -- the term does not
+    mention it -- so flatten owns that degree of freedom alone. The published erank
+    barrier `max(-log(erank - 1 + eps), 0)` does not have this property: measured on the
+    real B0a ply, shrinking smin alone (what flatten does) moves it 1.3936 -> 1.5273,
+    +9.6%, so its effective weight would depend on flatten's.
+
+    LOG SPACE IS LOAD-BEARING, and in the OPPOSITE direction to flatten's `exp`. Flatten
+    is a length in metres and needs the activation; this is a RATIO of two lengths, so it
+    is dimensionless and reads straight off the log parameters. The gradient is then
+    exactly +-1/N per paying splat regardless of splat size, so a 2 mm needle and a 2 m
+    needle are corrected at the same rate -- which is what "aspect ratio" should mean.
+    For the same reason the weight must NOT be divided by a metric scale.
+
+    THE HINGE IS NOT DECORATION. Without relu the term is negative for every disc, so
+    minimising it would drive aspect -> 1 on splats that were already correct and spend
+    photometric quality doing it. Above r0 the term is 0 and so is its gradient.
+
+    `log_ratio_max` is log(r0), passed pre-logged so the caller's flag stays a ratio.
+    """
+    s = log_scales.sort(dim=-1).values          # log smin <= log smid <= log smax
+    return torch.relu(s[..., 2] - s[..., 1] - log_ratio_max).mean()
+
+
 from metal_gauss.torch_ref import quat_to_rotmat  # noqa: E402
 
 

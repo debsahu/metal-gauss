@@ -67,11 +67,12 @@ def _args(**over):
 @mps
 def test_recipe_runs_and_logs_every_term():
     from metal_gauss import train as T
-    out = T.train(_args(flatten_loss_weight=1.0, depth_loss_weight=1.0,
+    out = T.train(_args(flatten_loss_weight=1.0, inplane_isotropy_weight=1.0,
+                        depth_loss_weight=1.0,
                         normal_loss_weight=0.2, depth_normal_weight=0.05),
                   scene=_synthetic_scene())
     terms = out["log"][-1]["terms"]
-    for k in ("l1", "ssim", "flatten", "depth", "normal", "depth_normal"):
+    for k in ("l1", "ssim", "flatten", "inplane", "depth", "normal", "depth_normal"):
         assert k in terms, f"{k} not logged"
         assert math.isfinite(terms[k]) and terms[k] > 0, f"{k} = {terms.get(k)}"
     assert 0.9 < out["metrics"]["coverage"] < 0.95        # 4 of 64 columns dropped = 93.75%
@@ -351,8 +352,8 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step(monkeypatch):
     monkeypatch.setenv("MG_TORCH_LOSS", "1")
 
     steps = 6
-    watched = ["photometric_loss", "flatten_loss", "depth_loss", "normal_loss",
-               "depth_normal_loss"]
+    watched = ["photometric_loss", "flatten_loss", "inplane_isotropy_loss", "depth_loss",
+               "normal_loss", "depth_normal_loss"]
     calls = {k: 0 for k in watched}
     originals = {k: getattr(MT, k) for k in watched}
 
@@ -370,6 +371,7 @@ def test_every_loss_term_enters_the_total_exactly_once_per_step(monkeypatch):
         setattr(MT, k, make(k))
     try:
         T.train(_args(steps=steps, eval_every=steps, flatten_loss_weight=1.0,
+                      inplane_isotropy_weight=1.0,
                       depth_loss_weight=1.0, normal_loss_weight=0.2,
                       depth_normal_weight=0.05),
                 scene=_synthetic_scene())

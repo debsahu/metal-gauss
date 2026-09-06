@@ -173,6 +173,22 @@ arm_flags() {                    # extra flags per arm NAME
     # whole battery is mis-wired. It is not a candidate fix -- at 0 metal-gauss is
     # still 3-4x Brush -- it is the arm that proves the instrument responds.
     N4)     echo "--num-downscales 0" ;;
+    # ---- ISOTROPY arms. The in-plane isotropy barrier
+    # (--inplane-isotropy-weight, geometry_loss.inplane_isotropy_loss) is a hinge on
+    # log(smax/smid): mean(relu(log(smax/smid) - log r0)), r0 = 2 by default, so discs
+    # pay nothing. It is the first term in this trainer's objective that mentions the
+    # in-plane aspect ratio at all.
+    #
+    # WHY A DECADE SWEEP AND NOT ONE WEIGHT. The term is dimensionless and its gradient
+    # is exactly +-1/N per paying splat in LOG space, whereas flatten's is s_min/N -- a
+    # factor of ~1e-3 apart on millimetre splats. So the weight that means "as strong as
+    # flatten at 1.0" is not knowable from flatten's scale, and a single guessed weight
+    # that came out inert or catastrophic would say nothing about the term. Three decades
+    # bracket it.
+    I0)     echo "--inplane-isotropy-weight 0.01" ;;
+    I1)     echo "--inplane-isotropy-weight 0.1" ;;
+    I2)     echo "--inplane-isotropy-weight 1.0" ;;
+    I3)     echo "--inplane-isotropy-weight 10.0" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
 }

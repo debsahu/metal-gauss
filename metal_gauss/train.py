@@ -26,9 +26,10 @@ import torch
 from metal_gauss import render
 from metal_gauss.dataset import Scene, downscaled, load_scene
 from metal_gauss.geometry_loss import (depth_loss, depth_normal_loss, flatten_loss,
-                                      fused_geometry_losses, normal_loss,
-                                      normals_from_depth, plane_depth_from_features,
-                                      plane_features, splat_normals_cam)
+                                      fused_geometry_losses, inplane_isotropy_loss,
+                                      normal_loss, normals_from_depth,
+                                      plane_depth_from_features, plane_features,
+                                      splat_normals_cam)
 from metal_gauss.priors import decode_depth, decode_normal
 from metal_gauss.schedule import auto_budget  # noqa: F401  (re-exported)
 from metal_gauss.appearance import AppearanceModel
@@ -775,6 +776,15 @@ def train(args, scene: Scene | None = None) -> dict:
         if args.flatten_loss_weight > 0.0:
             terms["flatten"] = flatten_loss(p["log_scales"][:active])
             loss = loss + args.flatten_loss_weight * terms["flatten"]
+        # In-plane isotropy barrier. Sits beside flatten deliberately: flatten owns the
+        # smin lane and this owns smid/smax, and the two do not share a degree of freedom
+        # (tests/test_inplane_isotropy.py pins the smin gradient at exactly zero). Like
+        # flatten it is NOT ramped down by `aux` -- it is a shape prior on the final
+        # model. Dimensionless, so no metric normalisation, ever. ADDED EXACTLY ONCE.
+        if args.inplane_isotropy_weight > 0.0:
+            terms["inplane"] = inplane_isotropy_loss(
+                p["log_scales"][:active], math.log(args.inplane_isotropy_ratio))
+            loss = loss + args.inplane_isotropy_weight * terms["inplane"]
         if want_geometry:
             keep = None if m01 is None else (m01 > 0.5)
             gt_d = decode_depth(v.depth.to(device)) if v.depth is not None else None
@@ -1221,6 +1231,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "The earthbyte indoor recipe is 1.0, applied at constant weight "
                          "with no metric normalisation. Dominant measured geometry lever "
                          "in Brush (-14.3 deg thin-axis on playroom, -8.9 on ARKitScenes).")
+    ap.add_argument("--inplane-isotropy-weight", type=float, default=0.0,
+                    help="Hinge barrier on the IN-PLANE aspect ratio: weight on "
+                         "mean(relu(log(smax/smid) - log r0)). This trainer produces "
+                         "3-10x more needle-shaped splats than every other trainer on "
+                         "the same scenes (16.6%% of playroom_0821 at smid/smax < 0.1, "
+                         "against Brush 0.55-4.5%% and LFS 0.15%%) and nothing else in "
+                         "its objective mentions smid/smax. Orthogonal to "
+                         "--flatten-loss-weight, which acts on smin alone. The term is "
+                         "DIMENSIONLESS and is never divided by a scene scale.")
+    ap.add_argument("--inplane-isotropy-ratio", type=float, default=2.0,
+                    help="r0, the largest smax/smid a splat may have for free. Splats "
+                         "at or below it pay nothing, so discs are untouched. 2.0 is "
+                         "roughly the median of Brush's delivered plys (aspect_p50 "
+                         "0.451-0.487, i.e. smax/smid 2.05-2.22).")
     ap.add_argument("--appearance", choices=["off", "gain_bias", "affine", "bilagrid"],
                     default="off",
                     help="per-training-image photometric correction; held-out "

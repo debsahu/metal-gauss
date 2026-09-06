@@ -28,7 +28,15 @@ NEEDLE_ARMS = {
     "N2": "--antialias",
     "N3": "--scale-reg 0.0",
     "N4": "--num-downscales 0",
+    "I0": "--inplane-isotropy-weight 0.01",
+    "I1": "--inplane-isotropy-weight 0.1",
+    "I2": "--inplane-isotropy-weight 1.0",
+    "I3": "--inplane-isotropy-weight 10.0",
 }
+
+# The isotropy sweep must actually SPAN decades -- three arms that differ in the third
+# decimal would look like a sweep in the table and be one weight in the data.
+ISOTROPY_ARMS = ("I0", "I1", "I2", "I3")
 
 
 def _extract_arm_flags(text: str) -> str:
@@ -82,3 +90,17 @@ def test_baseline_arms_emit_nothing():
         r = _arm_flags(arm)
         assert r.returncode == 0 and r.stdout.strip() == "", (
             f"{arm} is meant to be a bare baseline but emits {r.stdout.strip()!r}")
+
+
+def test_the_isotropy_sweep_spans_decades():
+    """CATCHES a sweep that is not one: four arms whose weights differ by less than an
+    order of magnitude would be four repeats wearing a sweep's name, and the batch could
+    not distinguish 'the term does nothing' from 'the weight was wrong'."""
+    ws = []
+    for arm in ISOTROPY_ARMS:
+        r = _arm_flags(arm)
+        assert r.returncode == 0, f"{arm} is not wired: {r.stderr.strip()}"
+        ws.append(float(r.stdout.strip().split()[-1]))
+    assert ws == sorted(ws), f"the sweep is not monotone: {ws}"
+    for lo, hi in zip(ws, ws[1:]):
+        assert hi / lo >= 9.9, f"{lo} -> {hi} is less than a decade"
