@@ -195,3 +195,145 @@ def test_an_unknown_lever_is_rejected_rather_than_defaulted():
     v = {"stats.on_seed_frac_1cm": "IMPROVED", "stats.thin_axis_angle_p50": "IMPROVED"}
     with pytest.raises(ValueError, match="lever must be"):
         band2(v, lever="photometrics")
+
+
+# ------------------- AMENDMENT 2 (Task 20, commit 7c738b8, 2026-09-05)
+
+def test_band3_is_INDETERMINATE_where_its_threshold_sits_inside_the_scenes_own_floor():
+    """AMENDMENT 2, pre-registered in `7c738b8` BEFORE the arm it affects existed.
+
+    3cfd8f3 derived 0.25 dB as a PRODUCT-VISIBILITY bar standing ABOVE the noise. On
+    P-MASK the same-seed repeat pair F0/F1 differ by 0.2475 dB, so on that scene the bar
+    IS the noise and has no discriminating power: it would hard-DROP a treatment for a
+    movement two identical runs also produce.
+
+    CATCHES the three ways this could be implemented wrongly, each of which reads as a
+    reasonable result:
+      * INDETERMINATE reported as a PASS -- the rule says explicitly it is neither;
+      * INDETERMINATE reported as FIRED, i.e. a DROP on a scene the band cannot judge;
+      * the amendment applied on a scene whose floor is BELOW the threshold, which would
+        silently retire Band 3 everywhere.
+    """
+    # THE TRIGGER IS THE n>=3 FLOOR, NOT THE n=2 REPEAT PAIR, and this test was wrong
+    # about that on its first run -- worth recording, because the amendment's own
+    # motivating number is the pair difference. P-MASK's F0/F1 differ by 0.2475 dB, which
+    # is what made the amendment necessary, but 0.2475 < 0.25 so IT DOES NOT ITSELF
+    # TRIGGER. The amendment says so explicitly ("the floor itself still requires n=3 and
+    # is not quoted from two samples -- section 8.2") and argues the n=3 floor must reach
+    # >= 0.2475 by monotonicity, not that it must reach 0.25. Asserted both ways here so
+    # nobody re-derives the rule from the headline number.
+    assert band3(24.6, 25.0, 0.2475)["status"] == "FIRED", (
+        "the n=2 repeat-pair difference is not the n=3 floor and must not trigger")
+
+    # A loss that WOULD have fired, on a scene whose own n=3 floor is >= 0.25 dB.
+    b = band3(24.6, 25.0, 0.2600)
+    assert b["status"] == "INDETERMINATE"
+    assert b["fired"] is False, "an INDETERMINATE band must not DROP the scene"
+    assert b["indeterminate"] is True
+    assert b["would_have_fired"] is True, "what it would have said is recorded, not acted on"
+    assert b["scene_psnr_floor_n3"] == 0.2600
+    # "with the scene's floor beside the threshold" -- the rule's own words.
+    assert "0.26" in b["indeterminate_note"] and str(PSNR_DROP_DB) in b["indeterminate_note"]
+
+    # The SAME loss on a scene whose floor is below the threshold is untouched: P-GEOM's
+    # floor is 0.142204, and the amendment's own Scope section says its verdict stands.
+    live = band3(24.6, 25.0, 0.142204)
+    assert live["status"] == "FIRED" and live["fired"] is True
+    assert live["indeterminate"] is False
+
+    # No floor supplied = the pre-amendment behaviour, which is what Task 22's already
+    # scored P-GEOM arm was graded under.
+    assert band3(24.6, 25.0)["status"] == "FIRED"
+    assert band3(24.9, 25.0)["status"] == "PASS"
+
+
+def test_the_INDETERMINATE_trigger_is_at_or_above_the_threshold_and_introduces_no_constant():
+    """The rule is `floor >= 0.25`, not `>`, and not `k x floor`. `max(0.25, k x floor)`
+    was CONSIDERED AND REJECTED in the amendment: `k` would be a number chosen after
+    seeing 0.2475, which is the retuning this project forbids. So the only constant in
+    play is the 0.25 that was already there -- asserted here so a later `k` cannot be
+    slipped in without this failing."""
+    assert band3(24.6, 25.0, PSNR_DROP_DB)["status"] == "INDETERMINATE"     # exactly at
+    assert band3(24.6, 25.0, PSNR_DROP_DB - 1e-12)["status"] == "FIRED"     # just below
+    # A scene whose floor is huge does not become a DROP or a PASS, whatever the loss.
+    assert band3(30.0, 25.0, 1.0)["status"] == "INDETERMINATE"   # a large GAIN
+    assert band3(10.0, 25.0, 1.0)["status"] == "INDETERMINATE"   # a catastrophic loss
+
+
+def test_a_scene_that_is_INDETERMINATE_is_never_silently_a_pass():
+    """The amendment's operative sentence: "must not be reported as a pass". A reader --
+    or a downstream harness -- that only looks at `fired` sees False, which is what a PASS
+    also looks like. `status` is the field that separates them, so it must exist on EVERY
+    return and take exactly one of three values."""
+    for args in ((24.6, 25.0), (24.6, 25.0, 0.10), (24.6, 25.0, 0.30),
+                 (25.5, 25.0), (23.95, 24.05, 0.30)):
+        out = band3(*args)
+        assert out["status"] in ("FIRED", "PASS", "INDETERMINATE")
+        assert (out["status"] == "FIRED") == out["fired"]
+
+
+# --------------------------- the two thin-axis columns are not interchangeable
+
+def test_the_UNGATED_thin_axis_column_is_a_DIFFERENT_column_with_its_own_direction():
+    """splatstats' default gate admits only splats within 5 cm of the seed, so two arms
+    can be scored over different POPULATIONS and a delta between their gated thin-axis
+    medians is a COMPOSITION statistic wearing an orientation statistic's name. Task 22
+    measured that on 2026-09-05: Task 19's -2.35 deg reversed to +0.78 deg WORSE at equal
+    population, tracking admitted-population excess at r = -0.995.
+
+    CATCHES the two columns being conflated -- same name, or a missing direction, either
+    of which would make the ungated column grade two-sided and never able to WORSEN."""
+    from bench.tier3_bands import (BAND2_GATE_UNGATED, GEOMETRY_GATE_UNGATED,
+                                   THIN_AXIS_GATED, THIN_AXIS_UNGATED)
+    assert THIN_AXIS_GATED != THIN_AXIS_UNGATED
+    assert DIRECTION[THIN_AXIS_UNGATED] == DIRECTION[THIN_AXIS_GATED] == -1
+    assert BAND2_GATE_UNGATED == ("stats.on_seed_frac_1cm", THIN_AXIS_UNGATED)
+    assert set(GEOMETRY_GATE_UNGATED) - set(BAND2_GATE_UNGATED) == {"run.aspect_p50",
+                                                                    "run.needle_frac"}
+    # Every column of BOTH gates has a direction, for the reason above.
+    for k in set(BAND2_GATE_UNGATED) | set(GEOMETRY_GATE_UNGATED):
+        assert DIRECTION.get(k) is not None, k
+
+
+def test_band2_reads_whichever_thin_axis_column_it_is_GIVEN_and_refuses_the_other(
+):
+    """CATCHES the gate parameter being accepted and ignored -- an argument sink. The two
+    columns carry different verdicts here, so a band2 that read the hard-coded default
+    would return PASS where the ungated column says FAIL."""
+    from bench.tier3_bands import BAND2_GATE_UNGATED, THIN_AXIS_GATED, THIN_AXIS_UNGATED
+    v = {"stats.on_seed_frac_1cm": "IMPROVED",
+         THIN_AXIS_GATED: "IMPROVED", THIN_AXIS_UNGATED: "WORSENED"}
+    assert band2(v) == "PASS"                                   # the gated column
+    assert band2(v, gate=BAND2_GATE_UNGATED) == "FAIL"          # the ungated one
+    # ...and an arm scored only once cannot be graded on the ungated gate by accident.
+    with pytest.raises(ValueError, match="thin_axis_angle_p50_ungated"):
+        band2({"stats.on_seed_frac_1cm": "IMPROVED", THIN_AXIS_GATED: "IMPROVED"},
+              gate=BAND2_GATE_UNGATED)
+
+
+def test_hard_needle_frac_is_REPORTED_and_appears_in_NO_BAND_of_the_unified_rule():
+    """`run.hard_needle_frac` is a DELIVERY statement -- the fraction of splats whose
+    orientation splat-transform's 8-bit smallest-three quaternion cannot represent -- and
+    it is the WEAKEST of the four candidate collapse columns on the only scale a collapse
+    test cares about: adopted-vs-collapse log separation 5.0x, against aspect's 18.8x
+    (research/metal-gauss.md s13.6; derived at length in
+    tests/test_plane_aux_tier3_rule.py::
+    test_the_hard_needle_column_is_a_DELIVERY_STATEMENT_not_a_collapse_discriminator).
+
+    THAT DERIVATION IS PINNED AGAINST `scripts/plane_aux_arms.py` AND NOTHING PINNED IT
+    HERE. `bench/tier3_bands.py` is now the rule Task 20 and Task 22 both grade with, so a
+    promotion of this column to a gate would have gone uncaught in the one module that
+    matters. `DRIFT_SCOPE` is included deliberately: drift is reported, not decided on, but
+    a column in it is one edit from a band.
+    """
+    from bench.tier3_bands import (BAND2_GATE_UNGATED, DRIFT_SCOPE,
+                                   GEOMETRY_GATE_UNGATED)
+    from bench.tier3_bands import BAND2_GATE, COLLAPSE, GEOMETRY_GATE
+    for where, names in (("COLLAPSE", COLLAPSE), ("GEOMETRY_GATE", GEOMETRY_GATE),
+                         ("BAND2_GATE", BAND2_GATE), ("DRIFT_SCOPE", DRIFT_SCOPE),
+                         ("GEOMETRY_GATE_UNGATED", GEOMETRY_GATE_UNGATED),
+                         ("BAND2_GATE_UNGATED", BAND2_GATE_UNGATED)):
+        assert "run.hard_needle_frac" not in set(names), where
+    # The control: the columns that ARE gates are present, or the loop above is satisfied
+    # by a module whose gates are all empty.
+    assert "run.needle_frac" in COLLAPSE and "run.aspect_p50" in COLLAPSE
