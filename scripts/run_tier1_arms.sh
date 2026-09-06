@@ -190,6 +190,13 @@ arm_flags() {                    # extra flags per arm NAME
     # (n=3) and +3.9 pp on ARKitScenes, so 0 must IMPROVE the needle fraction or the
     # whole battery is mis-wired. It is not a candidate fix -- at 0 metal-gauss is
     # still 3-4x Brush -- it is the arm that proves the instrument responds.
+    # N2b: --antialias again, on a binary where it does not emit NaN gradients. N2 ran
+    # before that was fixed and exported 31,158 non-finite scale_* values over 2.08% of
+    # its splats, which `needle_frac` counted as HEALTHY splats -- so N2's shape columns
+    # are bounded, not measured, and the arm has to be repeated rather than reinterpreted.
+    # Same flag, different NAME, so N2's artifacts are not overwritten and the two remain
+    # comparable side by side.
+    N2b)    echo "--antialias" ;;
     N4)     echo "--num-downscales 0" ;;
     # ---- ISOTROPY arms. The in-plane isotropy barrier
     # (--inplane-isotropy-weight, geometry_loss.inplane_isotropy_loss) is a hinge on

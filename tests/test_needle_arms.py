@@ -27,6 +27,7 @@ NEEDLE_ARMS = {
     "N1": "--filter-3d",
     "N2": "--antialias",
     "N3": "--scale-reg 0.0",
+    "N2b": "--antialias",
     "N4": "--num-downscales 0",
     "I0": "--inplane-isotropy-weight 0.01",
     "I1": "--inplane-isotropy-weight 0.1",
@@ -74,6 +75,15 @@ def test_the_needle_arms_are_single_flag_arms():
     N3 and N4 are `--flag value` (two tokens); N1 and N2 are bare switches (one)."""
     for arm, expected in NEEDLE_ARMS.items():
         assert expected.count("--") == 1, f"{arm} moves more than one flag: {expected}"
+
+
+def test_N2b_repeats_N2_EXACTLY_and_differs_only_in_the_binary():
+    """N2b exists to re-run --antialias on a binary where it does not emit NaN gradients.
+    If its flag string ever drifts from N2's, the comparison stops being about the binary
+    and becomes about the configuration, silently."""
+    a, b = _arm_flags("N2"), _arm_flags("N2b")
+    assert a.returncode == 0 and b.returncode == 0
+    assert a.stdout.strip() == b.stdout.strip() == "--antialias", (a.stdout, b.stdout)
 
 
 def test_an_unknown_arm_still_fails_loudly():
