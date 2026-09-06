@@ -53,53 +53,256 @@ def test_flatten_loss_is_scale_only_and_ignores_splat_count_scaling():
                                                                  rel=1e-6)
 
 
-def test_flatten_flag_actually_reaches_the_training_loss(tmp_path):
-    """Wiring, not arithmetic. This repo's failure log is full of flags that PARSE and do
-    nothing -- LFS's `--train` is a no-op, its `--init=path.ply` is dead, and a harness
-    once forwarded --budget so auto_budget() never ran in an 8-scene sweep. A unit test on
-    flatten_loss() cannot see any of that.
+W_FLAT = 50.0          # any w large enough to flip the min-axis gradient sign; see probe C
 
-    Built through the REAL parser so the arms differ in one flag and inherit every default
-    from the same place the CLI does -- writing the namespace by hand in the test is the
-    exact mistake `_run_report`'s docstring records.
+
+@pytest.fixture(scope="module")
+def flatten_arms(tmp_path_factory):
+    """Three one-step training runs at flatten weights 0, W and 2W, sharing one scene.
+
+    WHY ONE STEP. At step 1 the splat state is EXACTLY the seed in all three arms (same
+    --seed, --no-grow, same view order), so the photometric terms, the regularisers and
+    the rendered view are bit-identical and the ONLY admissible difference between arms
+    is `w * flatten`. That makes both the total loss and d(loss)/d(log_scales) exactly
+    linear in w, which is a mechanism these probes can check to f32 precision instead of
+    an effect size an optimiser can cap.
+
+    The hooks are additive; none of them changes what train() computes.
+      make_optimizer -> stash the optimiser, so the named "scales" param group is
+          reachable in EVERY arm including w = 0, where flatten_loss is never called.
+      flatten_loss   -> record the term, whether it carries grad, and the analytic
+          d(flatten)/d(log_scales) for that arm's seed.
+      Tensor.backward -> record the total loss and d(loss)/d(log_scales) at step 1.
     """
     pytest.importorskip("pycolmap")
     if not torch.backends.mps.is_available():
         pytest.skip("needs MPS")
     import numpy as np
     from PIL import Image
+    import metal_gauss.train as T
     from metal_gauss.train import build_parser, train
 
-    (tmp_path / "sparse").mkdir(); (tmp_path / "images").mkdir()
-    (tmp_path / "sparse" / "cameras.txt").write_text("1 PINHOLE 32 32 32 32 16 16\n")
+    root = tmp_path_factory.mktemp("flatten")
+    (root / "sparse").mkdir(); (root / "images").mkdir()
+    (root / "sparse" / "cameras.txt").write_text("1 PINHOLE 32 32 32 32 16 16\n")
     rng = np.random.default_rng(0)
     lines = []
     for i in range(3):
         lines.append(f"{i + 1} 1 0 0 0 0 0 {i * 0.3 - 0.3} 1 v{i}.png\n\n")
         Image.fromarray(rng.integers(0, 255, (32, 32, 3), dtype=np.uint8)).save(
-            tmp_path / "images" / f"v{i}.png")
-    (tmp_path / "sparse" / "images.txt").write_text("".join(lines))
+            root / "images" / f"v{i}.png")
+    (root / "sparse" / "images.txt").write_text("".join(lines))
     pts = rng.normal(0, 0.4, (60, 3)) + np.array([0, 0, 3.0])
-    (tmp_path / "sparse" / "points3D.txt").write_text("".join(
+    (root / "sparse" / "points3D.txt").write_text("".join(
         f"{i + 1} {x} {y} {z} 128 128 128 0.5\n" for i, (x, y, z) in enumerate(pts)))
 
-    def run(w, out):
-        a = build_parser().parse_args([
-            "--colmap", str(tmp_path / "sparse"), "--images", str(tmp_path / "images"),
-            "--steps", "40", "--budget", "400", "--max-resolution", "32",
-            "--eval-every", "40", "--eval-split-every", "1000", "--seed", "0",
-            "--num-downscales", "0", "--no-grow", "--sh-warmup", "0",
-            "--flatten-loss-weight", str(w), "--export", str(out)])
-        a.resolution_schedule = max(1, a.steps // 3)
-        train(a)
-        import plyfile
-        v = plyfile.PlyData.read(str(out))["vertex"]
-        s = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1))
-        return float(np.median(s.min(1)))
+    def run(w, tag):
+        rec = {"w": w, "flatten_calls": 0, "flatten": None, "grad_ls": None,
+               "term_requires_grad": None, "dflatten_dls": None}
+        real_mo, real_fl, real_bw = T.make_optimizer, T.flatten_loss, torch.Tensor.backward
 
-    off = run(0.0, tmp_path / "off.ply")
-    on = run(50.0, tmp_path / "on.ply")
-    assert on < off * 0.9, f"flatten weight did not reach the loss: min-axis p50 {off} -> {on}"
+        def mo(*a, **k):
+            o = real_mo(*a, **k)
+            g = next(g for g in o.param_groups if g.get("name") == "scales")
+            rec["scales_param"], rec["scales_lr"] = g["params"][0], g["lr"]
+            return o
+
+        def fl(ls):
+            out = real_fl(ls)
+            rec["flatten_calls"] += 1
+            rec["flatten"] = float(out.detach())
+            rec["term_requires_grad"] = bool(out.requires_grad)
+            with torch.no_grad():                 # analytic d(flatten)/d(log_scales)
+                e = ls.detach().exp()
+                am = e.argmin(dim=1, keepdim=True)
+                rec["dflatten_dls"] = (torch.zeros_like(e).scatter_(
+                    1, am, e.gather(1, am)) / e.shape[0]).cpu().clone()
+            return out
+
+        def bw(self, *a, **k):
+            r = real_bw(self, *a, **k)
+            if "loss" not in rec:                                  # the step-1 backward
+                rec["loss"] = float(self.detach())
+                sp = rec.get("scales_param")
+                rec["grad_ls"] = None if sp is None or sp.grad is None else sp.grad.cpu().clone()
+            return r
+
+        T.make_optimizer, T.flatten_loss, torch.Tensor.backward = mo, fl, bw
+        try:
+            a = build_parser().parse_args([
+                "--colmap", str(root / "sparse"), "--images", str(root / "images"),
+                "--steps", "1", "--budget", "400", "--max-resolution", "32",
+                "--eval-every", "1", "--eval-split-every", "1000", "--seed", "0",
+                "--num-downscales", "0", "--no-grow", "--sh-warmup", "0",
+                "--flatten-loss-weight", str(w), "--export", str(root / f"{tag}.ply")])
+            a.resolution_schedule = 1
+            train(a)
+        finally:
+            T.make_optimizer, T.flatten_loss, torch.Tensor.backward = real_mo, real_fl, real_bw
+
+        import plyfile
+        v = plyfile.PlyData.read(str(root / f"{tag}.ply"))["vertex"]
+        ls = np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1)
+        rec["ply_log_min"] = ls.min(1)
+        rec["ply_minaxis_p50"] = float(np.median(np.exp(ls).min(1)))
+        assert "loss" in rec, f"w={w}: no backward was observed; the probe is vacuous"
+        return rec
+
+    return {0.0: run(0.0, "w0"), 1.0: run(W_FLAT, "w1"), 2.0: run(2 * W_FLAT, "w2")}
+
+
+def test_flatten_flag_actually_reaches_the_training_loss(flatten_arms):
+    """Wiring, not arithmetic. This repo's failure log is full of flags that PARSE and do
+    nothing -- LFS's `--train` is a no-op, its `--init=path.ply` is dead, and a harness
+    once forwarded --budget so auto_budget() never ran in an 8-scene sweep. A unit test on
+    flatten_loss() cannot see any of that.
+
+    REPLACED 2026-09-04. This test used to run two 40-step arms and assert a >=10% drop in
+    the median min axis. That assertion SATURATES: at step 1 Adam's update is exactly
+    -lr*sign(g), so every w past the point that flips the min-axis gradient sign gives the
+    IDENTICAL result -- MEASURED, w = 50 and w = 100 export min-axis p50 0.278286368 and
+    0.278286368, bit-identical, and the previous agent measured w = 1, 50 and 200 identical
+    to 0.1 pp at 40 steps. The 10% bar was therefore measuring the optimiser's step budget,
+    not flatten's strength, and could not be repaired by raising the weight. It also read
+    10.51-10.67% on the lockfile torch against 9.38-9.48% on 2.14.0, i.e. it sat on the
+    edge of its own bar for a reason that had nothing to do with flatten.
+
+    What replaces it asserts the mechanism the name claims, at f32 precision: the total
+    loss is exactly linear in the flatten weight, because at step 1 nothing else can differ.
+
+    MEASURED on clean code, twice, identical to every digit: rel residual 1.9e-8 (W-0),
+    6.4e-8 (2W-W), 1.9e-8 (2W-0) -- f32 rounding of a single addition. An inert term gives
+    EXACTLY 0.0, a halved weight gives 0.5 and a sign flip gives 2.0, so the bar below
+    separates clean from broken by six orders. Confirmed by substitution against seven
+    mutants; this test kills inert, half-weight, sign-flip and double-add, and is BLIND by
+    construction to a detached term and to a term spread over all three axes -- both of
+    which leave the loss value exactly right. Those two are why
+    test_flatten_gradient_reaches_log_scales exists.
+
+    NOTE the earlier record of this probe said the residual was 4.4e-16 at w=10 and 1.8e-15
+    at w=50, i.e. f64 roundoff. That does not reproduce and cannot be right: the loss is
+    f32, so `fl32(loss + w*flatten) - loss` differs from `w*flatten` by ~eps_f32, which is
+    what the 2e-8 - 6e-8 above is. The probe is exact to f32, not to f64.
+    """
+    a0, a1, a2 = flatten_arms[0.0], flatten_arms[1.0], flatten_arms[2.0]
+
+    # The block must run in the weighted arms and NOT in the w = 0 arm. Without this a
+    # mutant that deletes both lines 618-619 would leave `flatten` at None and the
+    # arithmetic below would never execute.
+    assert a0["flatten_calls"] == 0, "flatten_loss ran at weight 0"
+    assert a1["flatten_calls"] == 1 and a2["flatten_calls"] == 1, (
+        f"flatten_loss ran {a1['flatten_calls']}/{a2['flatten_calls']} times, expected once "
+        "-- a second add would double the term, which has happened in this project before")
+    assert a1["flatten"] is not None and a1["flatten"] > 0.0
+
+    # THE NULL, first: the predicted contribution must dominate the loss it is added to,
+    # or "the two arms agree" would be a statement about two near-equal numbers.
+    # Measured 33.60x.
+    pred = W_FLAT * a1["flatten"]
+    assert pred > a0["loss"], (
+        f"fixture does NOT discriminate: w*flatten {pred:.3e} is not large against "
+        f"loss(w=0) {a0['loss']:.3e}, so a missing term would barely move the total")
+
+    for name, hi, lo, k in (("W-0", a1, a0, 1), ("2W-W", a2, a1, 1), ("2W-0", a2, a0, 2)):
+        d = hi["loss"] - lo["loss"]
+        # IMPOSSIBLE VALUE, not a plausible one: an inert term gives exactly zero.
+        assert d != 0.0, f"{name}: d_loss is EXACTLY 0.0 -- the flatten term is INERT"
+        rel = abs(d - k * pred) / (k * pred)
+        assert rel <= 1e-6, (
+            f"{name}: d_loss {d:.9e} != w*flatten {k * pred:.9e} (rel {rel:.3e}); the term "
+            "reaches the loss with the wrong weight, wrong sign, or is added twice")
+
+
+def test_flatten_gradient_reaches_log_scales(flatten_arms):
+    """ADDED 2026-09-04 alongside the rewrite above, and it catches a mutant the loss-value
+    probe CANNOT see: `flatten_loss(p["log_scales"][:active].detach())`. That leaves the
+    loss value exactly right -- the probe above passes clean -- while the term contributes
+    no gradient at all, so flatten does nothing to the model.
+
+    At step 1 the photometric gradient is identical across arms, so the difference between
+    two arms' d(loss)/d(log_scales) is exactly `dw * d(flatten)/d(log_scales)`, which is
+    analytically `exp(s_min)/N` on each splat's argmin lane and EXACTLY zero on the other
+    two. Both halves are asserted: the lanes that should move do, elementwise, and the
+    lanes that should not stay put.
+
+    MEASURED clean: per-element relative error on the 400 predicted lanes max 9.9e-8 -
+    1.5e-7; leakage onto the other 800 lanes <= 1.2e-8 of the on-lane magnitude. Scored
+    PER ELEMENT deliberately -- `max|delta| / max|ref|` is the form the Checkpoint F audit
+    found could be satisfied by a single degenerate value.
+
+    WHAT THIS CANNOT SEE, stated because the step-1 design makes it structural rather than
+    incidental. At the moment flatten_loss is called the splat state is the seed, and the
+    seed is EXACTLY isotropic -- measured, per-splat log-scale spread max 0.000e+00 on
+    400 of 400 -- so min, max and any other order statistic coincide. Replacing `.min()`
+    with `.max()` in flatten_loss is therefore a BEHAVIOURALLY IDENTICAL mutant here and
+    this probe passes it; confirmed by substitution. Lane SELECTION is owned by
+    test_flatten_loss_is_mean_min_activated_scale_and_only_moves_min_axis and
+    test_flatten_loss_gradient_pushes_the_thin_axis_DOWN, which build anisotropic input by
+    hand and do kill it. What this probe does own is lane COUNT: spreading the term over
+    all three axes (`.min()` -> `.mean()`) leaves the value untouched under an isotropic
+    seed, so the loss probe above cannot see it, and this one kills it on the leakage
+    assertion. Both substitutions were run.
+    """
+    a0, a1, a2 = flatten_arms[0.0], flatten_arms[1.0], flatten_arms[2.0]
+    assert a1["term_requires_grad"] is True, "the flatten term carries no gradient at all"
+    for r in (a0, a1, a2):
+        assert r["grad_ls"] is not None, "no d(loss)/d(log_scales) was captured"
+
+    for name, hi, lo, k in (("W-0", a1, a0, 1.0), ("2W-W", a2, a1, 1.0), ("2W-0", a2, a0, 2.0)):
+        d = (hi["grad_ls"] - lo["grad_ls"]).double()
+        want = (a1["dflatten_dls"] * (k * W_FLAT)).double()
+        lane = want.abs() > 0
+
+        # THE NULL. Measured max|want| = 4.9e-2 at k = 1. If this ever falls quiet the
+        # comparison below is satisfied by two zeros.
+        assert want.abs().max().item() > 1e-3, (
+            f"{name}: the predicted flatten gradient is ~0, so this test is vacuous")
+        assert int(lane.sum()) == want.shape[0], (
+            f"{name}: expected exactly one lane per splat, got {int(lane.sum())} "
+            f"of {want.numel()}")
+
+        rel = ((d[lane] - want[lane]).abs() / want[lane].abs()).max().item()
+        assert rel <= 1e-5, (
+            f"{name}: d(loss)/d(log_scales) does not carry w * d(flatten)/d(log_scales) "
+            f"(worst per-element rel {rel:.3e}). A detached term reads 1.0 here.")
+
+        leak = d[~lane].abs().max().item() / want.abs().max().item()
+        assert leak <= 1e-6, (
+            f"{name}: flatten leaked gradient onto lanes that are not the smallest axis "
+            f"({leak:.3e} of the on-lane magnitude)")
+
+
+def test_flatten_moves_the_min_axis_through_the_optimiser(flatten_arms):
+    """The end-to-end half, and the only thing the two probes above do not cover: that the
+    gradient survives into the optimiser and actually moves the parameter, in the right
+    direction. This is what the deleted 40-step arm was really testing.
+
+    Asserted as a DIRECTION with no magnitude bar, so it cannot saturate the way the 10%
+    assertion did. One Adam step is bit-reproducible here (measured: identical to nine
+    decimals across two full repeats), so the noise floor is zero and `<` is meaningful.
+
+    MEASURED clean: min-axis p50 0.280929387 (w=0) -> 0.278286368 (w=W), with 62.75% of
+    splats lower in log space and a median shift of exactly -2*lr = -1.0e-2, which is
+    Adam's first step being -lr*sign(g) on both sides of a flipped sign. That last number
+    is also the saturation: it does not depend on w, which is why the old bar could not be
+    rescued by raising the weight.
+    """
+    import numpy as np
+    a0, a1 = flatten_arms[0.0], flatten_arms[1.0]
+    d = a0["ply_log_min"] - a1["ply_log_min"]          # > 0 where flatten shrank the axis
+
+    assert not np.array_equal(a0["ply_log_min"], a1["ply_log_min"]), (
+        "the exported min axis is bit-identical with and without flatten: the gradient "
+        "never reached the optimiser")
+    assert a1["ply_minaxis_p50"] < a0["ply_minaxis_p50"], (
+        f"flatten did not shrink the min axis: p50 {a0['ply_minaxis_p50']:.9f} -> "
+        f"{a1['ply_minaxis_p50']:.9f}")
+    assert float((d > 0).mean()) > 0.5, (
+        f"only {100 * float((d > 0).mean()):.2f}% of splats moved their min axis DOWN; "
+        "a sign error inverts this")
+    assert d.min() >= 0.0, (
+        f"flatten INFLATED the min axis of at least one splat by {-d.min():.3e} in log "
+        "space; the term can only ever push it down")
 
 
 # ---------------------------------------------------- normals_from_depth (Task 6)
