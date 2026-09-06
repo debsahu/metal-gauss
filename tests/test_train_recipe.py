@@ -66,8 +66,19 @@ def _args(**over):
 
 @mps
 def test_recipe_runs_and_logs_every_term():
+    """`--inplane-isotropy-ratio 1e-9` is not decoration and not a workaround.
+
+    That term is a HINGE, so 0.0 is its healthy value -- on this 40-step synthetic scene
+    the splats end at aspect_p50 0.9724, every one of them under the operational r0 = 2
+    knee, and the term reads exactly 0.0 as it should. But 0.0 is also what a term that
+    never reached the loss reads, so leaving it there would make this assertion pass for
+    the wrong reason on the one term whose branch it is meant to exercise. Pushing the
+    knee below every splat puts the term on its ACTIVE branch, which is what the loop
+    below is checking. The alternative -- exempting `inplane` from the `> 0` assertion --
+    would have weakened the invariant for every other term to accommodate this one."""
     from metal_gauss import train as T
     out = T.train(_args(flatten_loss_weight=1.0, inplane_isotropy_weight=1.0,
+                        inplane_isotropy_ratio=1e-9,
                         depth_loss_weight=1.0,
                         normal_loss_weight=0.2, depth_normal_weight=0.05),
                   scene=_synthetic_scene())
