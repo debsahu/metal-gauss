@@ -209,3 +209,35 @@ def test_identical_ply_and_report_shapes_raise_NO_disagreement_note(tmp_path):
     rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a"])}
     assert rows["B0a"]["shape_disagreement"] is None
     assert not any("graded on the PLY" in n for n in rows["B0a"]["notes"])
+
+
+def test_collateral_columns_are_reported_in_units_of_the_FLOOR_and_not_folded_into_the_verdict(tmp_path):
+    """The pre-registered thin-axis / on-seed bar reads 'within floor of the arm's own
+    recipe value'. Taken literally that is a two-sided band of one REPEAT FLOOR --
+    0.055 deg -- which no arm that changes anything can meet, a beneficial one included.
+    Folding it into PASS/FAIL would therefore fail every arm in the batch and say nothing.
+
+    CATCHES: (i) the literal bar silently deciding the verdict, (ii) a delta reported in
+    raw units where 0.055 deg and 0.6 deg look equally small, (iii) an improvement being
+    called damage. `thin_axis_p50` is better LOWER and `on_seed_1cm` better HIGHER, and a
+    grader that got that backwards would recommend the wrong arm."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", thin=49.0, on_seed=0.0850, ungated=51.0)
+    _write_ply_shape(tmp_path, "B0a")
+    # thin-axis 20 deg BETTER, on-seed 0.004 better: far outside the floor, all upside.
+    _write(tmp_path, "GOOD", thin=29.0, on_seed=0.0890, ungated=31.0)
+    _write_ply_shape(tmp_path, "GOOD")
+    # thin-axis 3 deg worse, on-seed 0.003 worse.
+    _write(tmp_path, "BAD", thin=52.0, on_seed=0.0820, ungated=54.0)
+    _write_ply_shape(tmp_path, "BAD")
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a", "GOOD", "BAD"])}
+    assert rows["GOOD"]["verdict"] == "PASS" and rows["BAD"]["verdict"] == "PASS", (
+        "collateral must not decide the verdict")
+    g, b = rows["GOOD"]["collateral"], rows["BAD"]["collateral"]
+    assert g["thin_axis_p50"]["direction"] == "better" and g["thin_axis_p50"]["no_worse"]
+    assert g["on_seed_1cm"]["direction"] == "better" and g["on_seed_1cm"]["no_worse"]
+    assert b["thin_axis_p50"]["direction"] == "worse" and not b["thin_axis_p50"]["no_worse"]
+    assert b["on_seed_1cm"]["direction"] == "worse" and not b["on_seed_1cm"]["no_worse"]
+    # x_floor: -20 deg against a 0.0548 deg floor is -365x, not "-20".
+    assert g["thin_axis_p50"]["x_floor"] == pytest.approx(-20.0 / 0.0548, rel=1e-9)
+    assert g["thin_axis_p50"]["strict"] == "outside"

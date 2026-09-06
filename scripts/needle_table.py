@@ -147,15 +147,30 @@ def grade(rows: list[dict], baseline: str, floors: dict | None) -> list[dict]:
             r["psnr_delta"] = d
             if d < -PSNR_DROP_ALLOWED:
                 fails.append(f"psnr {d:+.4f} dB < -{PSNR_DROP_ALLOWED}")
-        for name, key, base_key, floor in (
-                ("thin-axis p50", "thin_gated_p50", "thin_gated_p50", thin_floor),
-                ("on-seed@1cm", "on_seed_1cm", "on_seed_1cm", seed_floor)):
-            if r[key] is None or base[base_key] is None:
-                notes.append(f"{name}: not scored")
-            elif floor is None:
-                notes.append(f"{name}: no floor in floors.json, ungraded")
-            else:
-                r[f"{key}_delta"] = r[key] - base[base_key]
+        # COLLATERAL columns, reported separately from the PASS/FAIL bars on purpose.
+        # The pre-registered bar reads "within floor of the arm's own recipe value", and
+        # taken as a two-sided band that is a repeat floor -- 0.055 deg and 0.0006 -- which
+        # NO arm that changes anything can meet, including a wholly beneficial one. So the
+        # delta is reported in units of that floor and graded BOTH ways: `strict` is the
+        # literal two-sided reading, `no_worse` is the one that can distinguish a fix from
+        # collateral damage. Neither is folded into the verdict; the operator reads them.
+        r["collateral"] = {}
+        for name, key, floor, better in (
+                ("thin_axis_p50", "thin_gated_p50", thin_floor, "lower"),
+                ("on_seed_1cm", "on_seed_1cm", seed_floor, "higher")):
+            if r[key] is None or base[key] is None:
+                notes.append(f"{name}: not scored"); continue
+            d = r[key] - base[key]
+            r[f"{key}_delta"] = d
+            if floor is None or floor == 0:
+                notes.append(f"{name}: no usable floor in floors.json, ungraded"); continue
+            xf = d / floor
+            worse = d > 0 if better == "lower" else d < 0
+            r["collateral"][name] = {
+                "delta": d, "x_floor": xf,
+                "strict": "within" if abs(xf) <= 1.0 else "outside",
+                "direction": "worse" if worse else "better",
+                "no_worse": (not worse) or abs(xf) <= 1.0}
         # A gated thin-axis delta is only an ORIENTATION statement if the two arms were
         # scored over comparable populations. Say so rather than assume it.
         if r["thin_gated_n"] and base["thin_gated_n"]:
@@ -204,6 +219,14 @@ def render(rows: list[dict], baseline: str) -> str:
             f(r["on_seed_1cm"], "{:.5f}"),
             (f(r["ms_per_step"], "{:.2f}") + ("!" if r["schedule_arm"] else "")),
             r["verdict"]]) + " |")
+    out.append("")
+    out.append("Collateral (reported, NOT folded into the verdict -- see grade()):")
+    for r in rows:
+        for name, c in (r.get("collateral") or {}).items():
+            out.append(f"* {r['arm']} {name}: {c['delta']:+.6g} "
+                       f"({c['x_floor']:+.1f}x floor, {c['direction']}, "
+                       f"strict={c['strict']})")
+    out.append("")
     for r in rows:
         for x in r.get("fails", []):
             out.append(f"* {r['arm']} FAIL: {x}")
