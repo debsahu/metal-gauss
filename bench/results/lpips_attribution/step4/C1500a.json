@@ -1,0 +1,2157 @@
+{
+  "schema": 1,
+  "resolved": {
+    "antialias": false,
+    "appearance": "off",
+    "appearance_reg": 0.01,
+    "blender": null,
+    "budget": 1500000,
+    "colmap": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/sparse/0",
+    "densify_gate_frac": 0.3,
+    "densify_weight": "opacity_grad",
+    "depth_dir": null,
+    "depth_loss_space": "disparity",
+    "depth_loss_weight": 0.0,
+    "depth_normal_weight": 0.0,
+    "eval_dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/cap/C1500a.dump",
+    "eval_every": 2500,
+    "eval_split_every": 8,
+    "export": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/cap/C1500a.ply",
+    "export_every": 0,
+    "filter_3d": false,
+    "filter_3d_every": 0,
+    "flatten_loss_weight": 0.0,
+    "fused_adam": true,
+    "grow": true,
+    "grow_until_frac": 0.7,
+    "images": "/Users/debsahu/Workspace/slam/work/playroom_0821/ds/images",
+    "init_ply": null,
+    "lr_appearance": 0.001,
+    "lr_means": 0.0002,
+    "lr_means_end": 2e-06,
+    "lr_opac": 0.01,
+    "lr_scene_scaled": true,
+    "mask_polarity": "auto",
+    "masks": null,
+    "max_resolution": 1920,
+    "no_priors": false,
+    "noise_weight": 40000.0,
+    "normal_dir": null,
+    "normal_loss_weight": 0.0,
+    "num_downscales": 2,
+    "opac_reg": 0.01,
+    "out": null,
+    "prior_resident": "quantized",
+    "relocate_every": 100,
+    "relocate_until_frac": 0.85,
+    "report": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t21/cap/C1500a.json",
+    "resolution_schedule": 10000,
+    "scale_reg": 0.01,
+    "seed": 42,
+    "selective_adam": false,
+    "sh_lr_div": 20.0,
+    "sh_warmup": 1000,
+    "start_active": 150000,
+    "steps": 30000,
+    "steps_scaler": 1.0
+  },
+  "env": {
+    "git": null,
+    "dirty": false,
+    "torch": "2.13.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "started_at": "2026-09-04T21:16:02.698563Z",
+    "finished_at": "2026-09-04T21:44:42.820691Z"
+  },
+  "metrics": {
+    "psnr": 22.321220877651008,
+    "psnr_masked": 22.321220877651008,
+    "coverage": 1.0,
+    "terms": {
+      "l1": 0.0270511656999588,
+      "ssim": 0.18256355822086334
+    },
+    "shape": {
+      "aspect_p50": 0.26541605591773987,
+      "needle_frac": 0.19743333756923676,
+      "smid_p50_mm": 3.4424455165863037,
+      "smax_p50_mm": 15.278090476989746
+    },
+    "wall_s": 1710.1,
+    "n_splats": 1500000,
+    "ms_per_step": 57.0,
+    "term_view_coverage": {},
+    "term_coverage_warning": null
+  },
+  "steps": 30000,
+  "budget": 1500000,
+  "wall_clock_s": 1710.1,
+  "final_psnr": 22.321220877651008,
+  "log": [
+    {
+      "step": 100,
+      "active": 156428
+    },
+    {
+      "step": 200,
+      "active": 162857
+    },
+    {
+      "step": 300,
+      "relocated": 1
+    },
+    {
+      "step": 300,
+      "active": 169285
+    },
+    {
+      "step": 400,
+      "relocated": 9
+    },
+    {
+      "step": 400,
+      "active": 175714
+    },
+    {
+      "step": 500,
+      "relocated": 19
+    },
+    {
+      "step": 500,
+      "active": 182142
+    },
+    {
+      "step": 600,
+      "relocated": 41
+    },
+    {
+      "step": 600,
+      "active": 188571
+    },
+    {
+      "step": 700,
+      "relocated": 56
+    },
+    {
+      "step": 700,
+      "active": 195000
+    },
+    {
+      "step": 800,
+      "relocated": 86
+    },
+    {
+      "step": 800,
+      "active": 201428
+    },
+    {
+      "step": 900,
+      "relocated": 103
+    },
+    {
+      "step": 900,
+      "active": 207857
+    },
+    {
+      "step": 1000,
+      "relocated": 161
+    },
+    {
+      "step": 1000,
+      "active": 214285
+    },
+    {
+      "step": 1100,
+      "relocated": 173
+    },
+    {
+      "step": 1100,
+      "active": 220714
+    },
+    {
+      "step": 1200,
+      "relocated": 203
+    },
+    {
+      "step": 1200,
+      "active": 227142
+    },
+    {
+      "step": 1300,
+      "relocated": 235
+    },
+    {
+      "step": 1300,
+      "active": 233571
+    },
+    {
+      "step": 1400,
+      "relocated": 269
+    },
+    {
+      "step": 1400,
+      "active": 240000
+    },
+    {
+      "step": 1500,
+      "relocated": 274
+    },
+    {
+      "step": 1500,
+      "active": 246428
+    },
+    {
+      "step": 1600,
+      "relocated": 251
+    },
+    {
+      "step": 1600,
+      "active": 252857
+    },
+    {
+      "step": 1700,
+      "relocated": 343
+    },
+    {
+      "step": 1700,
+      "active": 259285
+    },
+    {
+      "step": 1800,
+      "relocated": 323
+    },
+    {
+      "step": 1800,
+      "active": 265714
+    },
+    {
+      "step": 1900,
+      "relocated": 347
+    },
+    {
+      "step": 1900,
+      "active": 272142
+    },
+    {
+      "step": 2000,
+      "relocated": 357
+    },
+    {
+      "step": 2000,
+      "active": 278571
+    },
+    {
+      "step": 2100,
+      "relocated": 374
+    },
+    {
+      "step": 2100,
+      "active": 285000
+    },
+    {
+      "step": 2200,
+      "relocated": 381
+    },
+    {
+      "step": 2200,
+      "active": 291428
+    },
+    {
+      "step": 2300,
+      "relocated": 401
+    },
+    {
+      "step": 2300,
+      "active": 297857
+    },
+    {
+      "step": 2400,
+      "relocated": 403
+    },
+    {
+      "step": 2400,
+      "active": 304285
+    },
+    {
+      "step": 2500,
+      "relocated": 458
+    },
+    {
+      "step": 2500,
+      "active": 310714
+    },
+    {
+      "step": 2500,
+      "psnr": 20.69658367774056,
+      "psnr_masked": 20.69658367774056,
+      "coverage": 1.0,
+      "wall_s": 48.7,
+      "active": 310714,
+      "terms": {
+        "l1": 0.06120077148079872,
+        "ssim": 0.26122012734413147
+      },
+      "shape": {
+        "aspect_p50": 0.815321683883667,
+        "needle_frac": 0.001493334653787315,
+        "smid_p50_mm": 15.5626220703125,
+        "smax_p50_mm": 21.1717472076416
+      }
+    },
+    {
+      "step": 2600,
+      "relocated": 484
+    },
+    {
+      "step": 2600,
+      "active": 317142
+    },
+    {
+      "step": 2700,
+      "relocated": 495
+    },
+    {
+      "step": 2700,
+      "active": 323571
+    },
+    {
+      "step": 2800,
+      "relocated": 466
+    },
+    {
+      "step": 2800,
+      "active": 330000
+    },
+    {
+      "step": 2900,
+      "relocated": 479
+    },
+    {
+      "step": 2900,
+      "active": 336428
+    },
+    {
+      "step": 3000,
+      "relocated": 512
+    },
+    {
+      "step": 3000,
+      "active": 342857
+    },
+    {
+      "step": 3100,
+      "relocated": 533
+    },
+    {
+      "step": 3100,
+      "active": 349285
+    },
+    {
+      "step": 3200,
+      "relocated": 571
+    },
+    {
+      "step": 3200,
+      "active": 355714
+    },
+    {
+      "step": 3300,
+      "relocated": 577
+    },
+    {
+      "step": 3300,
+      "active": 362142
+    },
+    {
+      "step": 3400,
+      "relocated": 606
+    },
+    {
+      "step": 3400,
+      "active": 368571
+    },
+    {
+      "step": 3500,
+      "relocated": 646
+    },
+    {
+      "step": 3500,
+      "active": 375000
+    },
+    {
+      "step": 3600,
+      "relocated": 652
+    },
+    {
+      "step": 3600,
+      "active": 381428
+    },
+    {
+      "step": 3700,
+      "relocated": 765
+    },
+    {
+      "step": 3700,
+      "active": 387857
+    },
+    {
+      "step": 3800,
+      "relocated": 740
+    },
+    {
+      "step": 3800,
+      "active": 394285
+    },
+    {
+      "step": 3900,
+      "relocated": 777
+    },
+    {
+      "step": 3900,
+      "active": 400714
+    },
+    {
+      "step": 4000,
+      "relocated": 746
+    },
+    {
+      "step": 4000,
+      "active": 407142
+    },
+    {
+      "step": 4100,
+      "relocated": 782
+    },
+    {
+      "step": 4100,
+      "active": 413571
+    },
+    {
+      "step": 4200,
+      "relocated": 781
+    },
+    {
+      "step": 4200,
+      "active": 420000
+    },
+    {
+      "step": 4300,
+      "relocated": 791
+    },
+    {
+      "step": 4300,
+      "active": 426428
+    },
+    {
+      "step": 4400,
+      "relocated": 814
+    },
+    {
+      "step": 4400,
+      "active": 432857
+    },
+    {
+      "step": 4500,
+      "relocated": 897
+    },
+    {
+      "step": 4500,
+      "active": 439285
+    },
+    {
+      "step": 4600,
+      "relocated": 877
+    },
+    {
+      "step": 4600,
+      "active": 445714
+    },
+    {
+      "step": 4700,
+      "relocated": 914
+    },
+    {
+      "step": 4700,
+      "active": 452142
+    },
+    {
+      "step": 4800,
+      "relocated": 938
+    },
+    {
+      "step": 4800,
+      "active": 458571
+    },
+    {
+      "step": 4900,
+      "relocated": 985
+    },
+    {
+      "step": 4900,
+      "active": 465000
+    },
+    {
+      "step": 5000,
+      "relocated": 960
+    },
+    {
+      "step": 5000,
+      "active": 471428
+    },
+    {
+      "step": 5000,
+      "psnr": 21.46902401553534,
+      "psnr_masked": 21.46902401553534,
+      "coverage": 1.0,
+      "wall_s": 103.8,
+      "active": 471428,
+      "terms": {
+        "l1": 0.032514557242393494,
+        "ssim": 0.13497813045978546
+      },
+      "shape": {
+        "aspect_p50": 0.6935218572616577,
+        "needle_frac": 0.012540621683001518,
+        "smid_p50_mm": 11.157380104064941,
+        "smax_p50_mm": 19.098970413208008
+      }
+    },
+    {
+      "step": 5100,
+      "relocated": 1168
+    },
+    {
+      "step": 5100,
+      "active": 477857
+    },
+    {
+      "step": 5200,
+      "relocated": 1070
+    },
+    {
+      "step": 5200,
+      "active": 484285
+    },
+    {
+      "step": 5300,
+      "relocated": 1193
+    },
+    {
+      "step": 5300,
+      "active": 490714
+    },
+    {
+      "step": 5400,
+      "relocated": 1239
+    },
+    {
+      "step": 5400,
+      "active": 497142
+    },
+    {
+      "step": 5500,
+      "relocated": 1193
+    },
+    {
+      "step": 5500,
+      "active": 503571
+    },
+    {
+      "step": 5600,
+      "relocated": 1302
+    },
+    {
+      "step": 5600,
+      "active": 510000
+    },
+    {
+      "step": 5700,
+      "relocated": 1249
+    },
+    {
+      "step": 5700,
+      "active": 516428
+    },
+    {
+      "step": 5800,
+      "relocated": 1345
+    },
+    {
+      "step": 5800,
+      "active": 522857
+    },
+    {
+      "step": 5900,
+      "relocated": 1377
+    },
+    {
+      "step": 5900,
+      "active": 529285
+    },
+    {
+      "step": 6000,
+      "relocated": 1395
+    },
+    {
+      "step": 6000,
+      "active": 535714
+    },
+    {
+      "step": 6100,
+      "relocated": 1476
+    },
+    {
+      "step": 6100,
+      "active": 542142
+    },
+    {
+      "step": 6200,
+      "relocated": 1501
+    },
+    {
+      "step": 6200,
+      "active": 548571
+    },
+    {
+      "step": 6300,
+      "relocated": 1479
+    },
+    {
+      "step": 6300,
+      "active": 555000
+    },
+    {
+      "step": 6400,
+      "relocated": 1566
+    },
+    {
+      "step": 6400,
+      "active": 561428
+    },
+    {
+      "step": 6500,
+      "relocated": 1619
+    },
+    {
+      "step": 6500,
+      "active": 567857
+    },
+    {
+      "step": 6600,
+      "relocated": 1690
+    },
+    {
+      "step": 6600,
+      "active": 574285
+    },
+    {
+      "step": 6700,
+      "relocated": 1669
+    },
+    {
+      "step": 6700,
+      "active": 580714
+    },
+    {
+      "step": 6800,
+      "relocated": 1745
+    },
+    {
+      "step": 6800,
+      "active": 587142
+    },
+    {
+      "step": 6900,
+      "relocated": 1676
+    },
+    {
+      "step": 6900,
+      "active": 593571
+    },
+    {
+      "step": 7000,
+      "relocated": 1805
+    },
+    {
+      "step": 7000,
+      "active": 600000
+    },
+    {
+      "step": 7100,
+      "relocated": 1966
+    },
+    {
+      "step": 7100,
+      "active": 606428
+    },
+    {
+      "step": 7200,
+      "relocated": 1910
+    },
+    {
+      "step": 7200,
+      "active": 612857
+    },
+    {
+      "step": 7300,
+      "relocated": 2073
+    },
+    {
+      "step": 7300,
+      "active": 619285
+    },
+    {
+      "step": 7400,
+      "relocated": 1952
+    },
+    {
+      "step": 7400,
+      "active": 625714
+    },
+    {
+      "step": 7500,
+      "relocated": 1972
+    },
+    {
+      "step": 7500,
+      "active": 632142
+    },
+    {
+      "step": 7500,
+      "psnr": 21.829141396254,
+      "psnr_masked": 21.829141396254,
+      "coverage": 1.0,
+      "wall_s": 165.0,
+      "active": 632142,
+      "terms": {
+        "l1": 0.03149156644940376,
+        "ssim": 0.0798240378499031
+      },
+      "shape": {
+        "aspect_p50": 0.590149462223053,
+        "needle_frac": 0.03288501501083374,
+        "smid_p50_mm": 8.65318489074707,
+        "smax_p50_mm": 17.1573429107666
+      }
+    },
+    {
+      "step": 7600,
+      "relocated": 1991
+    },
+    {
+      "step": 7600,
+      "active": 638571
+    },
+    {
+      "step": 7700,
+      "relocated": 2136
+    },
+    {
+      "step": 7700,
+      "active": 645000
+    },
+    {
+      "step": 7800,
+      "relocated": 2240
+    },
+    {
+      "step": 7800,
+      "active": 651428
+    },
+    {
+      "step": 7900,
+      "relocated": 2264
+    },
+    {
+      "step": 7900,
+      "active": 657857
+    },
+    {
+      "step": 8000,
+      "relocated": 2376
+    },
+    {
+      "step": 8000,
+      "active": 664285
+    },
+    {
+      "step": 8100,
+      "relocated": 2277
+    },
+    {
+      "step": 8100,
+      "active": 670714
+    },
+    {
+      "step": 8200,
+      "relocated": 2265
+    },
+    {
+      "step": 8200,
+      "active": 677142
+    },
+    {
+      "step": 8300,
+      "relocated": 2448
+    },
+    {
+      "step": 8300,
+      "active": 683571
+    },
+    {
+      "step": 8400,
+      "relocated": 2413
+    },
+    {
+      "step": 8400,
+      "active": 690000
+    },
+    {
+      "step": 8500,
+      "relocated": 2441
+    },
+    {
+      "step": 8500,
+      "active": 696428
+    },
+    {
+      "step": 8600,
+      "relocated": 2668
+    },
+    {
+      "step": 8600,
+      "active": 702857
+    },
+    {
+      "step": 8700,
+      "relocated": 2361
+    },
+    {
+      "step": 8700,
+      "active": 709285
+    },
+    {
+      "step": 8800,
+      "relocated": 2588
+    },
+    {
+      "step": 8800,
+      "active": 715714
+    },
+    {
+      "step": 8900,
+      "relocated": 2707
+    },
+    {
+      "step": 8900,
+      "active": 722142
+    },
+    {
+      "step": 9000,
+      "relocated": 2553
+    },
+    {
+      "step": 9000,
+      "active": 728571
+    },
+    {
+      "step": 9100,
+      "relocated": 2730
+    },
+    {
+      "step": 9100,
+      "active": 735000
+    },
+    {
+      "step": 9200,
+      "relocated": 2755
+    },
+    {
+      "step": 9200,
+      "active": 741428
+    },
+    {
+      "step": 9300,
+      "relocated": 2885
+    },
+    {
+      "step": 9300,
+      "active": 747857
+    },
+    {
+      "step": 9400,
+      "relocated": 2794
+    },
+    {
+      "step": 9400,
+      "active": 754285
+    },
+    {
+      "step": 9500,
+      "relocated": 2864
+    },
+    {
+      "step": 9500,
+      "active": 760714
+    },
+    {
+      "step": 9600,
+      "relocated": 2912
+    },
+    {
+      "step": 9600,
+      "active": 767142
+    },
+    {
+      "step": 9700,
+      "relocated": 3050
+    },
+    {
+      "step": 9700,
+      "active": 773571
+    },
+    {
+      "step": 9800,
+      "relocated": 2979
+    },
+    {
+      "step": 9800,
+      "active": 780000
+    },
+    {
+      "step": 9900,
+      "relocated": 3095
+    },
+    {
+      "step": 9900,
+      "active": 786428
+    },
+    {
+      "step": 10000,
+      "relocated": 3004
+    },
+    {
+      "step": 10000,
+      "active": 792857
+    },
+    {
+      "step": 10000,
+      "psnr": 21.815408540023633,
+      "psnr_masked": 21.815408540023633,
+      "coverage": 1.0,
+      "wall_s": 233.5,
+      "active": 792857,
+      "terms": {
+        "l1": 0.047228049486875534,
+        "ssim": 0.2816413938999176
+      },
+      "shape": {
+        "aspect_p50": 0.5030522346496582,
+        "needle_frac": 0.06161388382315636,
+        "smid_p50_mm": 7.175760746002197,
+        "smax_p50_mm": 16.211095809936523
+      }
+    },
+    {
+      "step": 10100,
+      "relocated": 2385
+    },
+    {
+      "step": 10100,
+      "active": 799285
+    },
+    {
+      "step": 10200,
+      "relocated": 2546
+    },
+    {
+      "step": 10200,
+      "active": 805714
+    },
+    {
+      "step": 10300,
+      "relocated": 2538
+    },
+    {
+      "step": 10300,
+      "active": 812142
+    },
+    {
+      "step": 10400,
+      "relocated": 2493
+    },
+    {
+      "step": 10400,
+      "active": 818571
+    },
+    {
+      "step": 10500,
+      "relocated": 2699
+    },
+    {
+      "step": 10500,
+      "active": 825000
+    },
+    {
+      "step": 10600,
+      "relocated": 2829
+    },
+    {
+      "step": 10600,
+      "active": 831428
+    },
+    {
+      "step": 10700,
+      "relocated": 2907
+    },
+    {
+      "step": 10700,
+      "active": 837857
+    },
+    {
+      "step": 10800,
+      "relocated": 2944
+    },
+    {
+      "step": 10800,
+      "active": 844285
+    },
+    {
+      "step": 10900,
+      "relocated": 3094
+    },
+    {
+      "step": 10900,
+      "active": 850714
+    },
+    {
+      "step": 11000,
+      "relocated": 3298
+    },
+    {
+      "step": 11000,
+      "active": 857142
+    },
+    {
+      "step": 11100,
+      "relocated": 3123
+    },
+    {
+      "step": 11100,
+      "active": 863571
+    },
+    {
+      "step": 11200,
+      "relocated": 3114
+    },
+    {
+      "step": 11200,
+      "active": 870000
+    },
+    {
+      "step": 11300,
+      "relocated": 3360
+    },
+    {
+      "step": 11300,
+      "active": 876428
+    },
+    {
+      "step": 11400,
+      "relocated": 3416
+    },
+    {
+      "step": 11400,
+      "active": 882857
+    },
+    {
+      "step": 11500,
+      "relocated": 3379
+    },
+    {
+      "step": 11500,
+      "active": 889285
+    },
+    {
+      "step": 11600,
+      "relocated": 3437
+    },
+    {
+      "step": 11600,
+      "active": 895714
+    },
+    {
+      "step": 11700,
+      "relocated": 3642
+    },
+    {
+      "step": 11700,
+      "active": 902142
+    },
+    {
+      "step": 11800,
+      "relocated": 3519
+    },
+    {
+      "step": 11800,
+      "active": 908571
+    },
+    {
+      "step": 11900,
+      "relocated": 3843
+    },
+    {
+      "step": 11900,
+      "active": 915000
+    },
+    {
+      "step": 12000,
+      "relocated": 3421
+    },
+    {
+      "step": 12000,
+      "active": 921428
+    },
+    {
+      "step": 12100,
+      "relocated": 3832
+    },
+    {
+      "step": 12100,
+      "active": 927857
+    },
+    {
+      "step": 12200,
+      "relocated": 3782
+    },
+    {
+      "step": 12200,
+      "active": 934285
+    },
+    {
+      "step": 12300,
+      "relocated": 3979
+    },
+    {
+      "step": 12300,
+      "active": 940714
+    },
+    {
+      "step": 12400,
+      "relocated": 4017
+    },
+    {
+      "step": 12400,
+      "active": 947142
+    },
+    {
+      "step": 12500,
+      "relocated": 3954
+    },
+    {
+      "step": 12500,
+      "active": 953571
+    },
+    {
+      "step": 12500,
+      "psnr": 22.03291907222012,
+      "psnr_masked": 22.03291907222012,
+      "coverage": 1.0,
+      "wall_s": 332.1,
+      "active": 953571,
+      "terms": {
+        "l1": 0.03345690667629242,
+        "ssim": 0.11084367334842682
+      },
+      "shape": {
+        "aspect_p50": 0.43888211250305176,
+        "needle_frac": 0.08080782741308212,
+        "smid_p50_mm": 6.127761363983154,
+        "smax_p50_mm": 15.711381912231445
+      }
+    },
+    {
+      "step": 12600,
+      "relocated": 4094
+    },
+    {
+      "step": 12600,
+      "active": 960000
+    },
+    {
+      "step": 12700,
+      "relocated": 4129
+    },
+    {
+      "step": 12700,
+      "active": 966428
+    },
+    {
+      "step": 12800,
+      "relocated": 3995
+    },
+    {
+      "step": 12800,
+      "active": 972857
+    },
+    {
+      "step": 12900,
+      "relocated": 4119
+    },
+    {
+      "step": 12900,
+      "active": 979285
+    },
+    {
+      "step": 13000,
+      "relocated": 4316
+    },
+    {
+      "step": 13000,
+      "active": 985714
+    },
+    {
+      "step": 13100,
+      "relocated": 4186
+    },
+    {
+      "step": 13100,
+      "active": 992142
+    },
+    {
+      "step": 13200,
+      "relocated": 4427
+    },
+    {
+      "step": 13200,
+      "active": 998571
+    },
+    {
+      "step": 13300,
+      "relocated": 4434
+    },
+    {
+      "step": 13300,
+      "active": 1005000
+    },
+    {
+      "step": 13400,
+      "relocated": 4355
+    },
+    {
+      "step": 13400,
+      "active": 1011428
+    },
+    {
+      "step": 13500,
+      "relocated": 4356
+    },
+    {
+      "step": 13500,
+      "active": 1017857
+    },
+    {
+      "step": 13600,
+      "relocated": 4569
+    },
+    {
+      "step": 13600,
+      "active": 1024285
+    },
+    {
+      "step": 13700,
+      "relocated": 4539
+    },
+    {
+      "step": 13700,
+      "active": 1030714
+    },
+    {
+      "step": 13800,
+      "relocated": 4556
+    },
+    {
+      "step": 13800,
+      "active": 1037142
+    },
+    {
+      "step": 13900,
+      "relocated": 4573
+    },
+    {
+      "step": 13900,
+      "active": 1043571
+    },
+    {
+      "step": 14000,
+      "relocated": 4814
+    },
+    {
+      "step": 14000,
+      "active": 1050000
+    },
+    {
+      "step": 14100,
+      "relocated": 4807
+    },
+    {
+      "step": 14100,
+      "active": 1056428
+    },
+    {
+      "step": 14200,
+      "relocated": 4677
+    },
+    {
+      "step": 14200,
+      "active": 1062857
+    },
+    {
+      "step": 14300,
+      "relocated": 4694
+    },
+    {
+      "step": 14300,
+      "active": 1069285
+    },
+    {
+      "step": 14400,
+      "relocated": 4965
+    },
+    {
+      "step": 14400,
+      "active": 1075714
+    },
+    {
+      "step": 14500,
+      "relocated": 4692
+    },
+    {
+      "step": 14500,
+      "active": 1082142
+    },
+    {
+      "step": 14600,
+      "relocated": 4985
+    },
+    {
+      "step": 14600,
+      "active": 1088571
+    },
+    {
+      "step": 14700,
+      "relocated": 5008
+    },
+    {
+      "step": 14700,
+      "active": 1095000
+    },
+    {
+      "step": 14800,
+      "relocated": 4922
+    },
+    {
+      "step": 14800,
+      "active": 1101428
+    },
+    {
+      "step": 14900,
+      "relocated": 5040
+    },
+    {
+      "step": 14900,
+      "active": 1107857
+    },
+    {
+      "step": 15000,
+      "relocated": 5065
+    },
+    {
+      "step": 15000,
+      "active": 1114285
+    },
+    {
+      "step": 15000,
+      "psnr": 22.05005569185195,
+      "psnr_masked": 22.05005569185195,
+      "coverage": 1.0,
+      "wall_s": 439.9,
+      "active": 1114285,
+      "terms": {
+        "l1": 0.02919415570795536,
+        "ssim": 0.2281898409128189
+      },
+      "shape": {
+        "aspect_p50": 0.38473427295684814,
+        "needle_frac": 0.10601057857275009,
+        "smid_p50_mm": 5.194157123565674,
+        "smax_p50_mm": 15.430405616760254
+      }
+    },
+    {
+      "step": 15100,
+      "relocated": 4880
+    },
+    {
+      "step": 15100,
+      "active": 1120714
+    },
+    {
+      "step": 15200,
+      "relocated": 4971
+    },
+    {
+      "step": 15200,
+      "active": 1127142
+    },
+    {
+      "step": 15300,
+      "relocated": 5142
+    },
+    {
+      "step": 15300,
+      "active": 1133571
+    },
+    {
+      "step": 15400,
+      "relocated": 4997
+    },
+    {
+      "step": 15400,
+      "active": 1140000
+    },
+    {
+      "step": 15500,
+      "relocated": 4963
+    },
+    {
+      "step": 15500,
+      "active": 1146428
+    },
+    {
+      "step": 15600,
+      "relocated": 5212
+    },
+    {
+      "step": 15600,
+      "active": 1152857
+    },
+    {
+      "step": 15700,
+      "relocated": 5297
+    },
+    {
+      "step": 15700,
+      "active": 1159285
+    },
+    {
+      "step": 15800,
+      "relocated": 5079
+    },
+    {
+      "step": 15800,
+      "active": 1165714
+    },
+    {
+      "step": 15900,
+      "relocated": 5243
+    },
+    {
+      "step": 15900,
+      "active": 1172142
+    },
+    {
+      "step": 16000,
+      "relocated": 5246
+    },
+    {
+      "step": 16000,
+      "active": 1178571
+    },
+    {
+      "step": 16100,
+      "relocated": 5435
+    },
+    {
+      "step": 16100,
+      "active": 1185000
+    },
+    {
+      "step": 16200,
+      "relocated": 5165
+    },
+    {
+      "step": 16200,
+      "active": 1191428
+    },
+    {
+      "step": 16300,
+      "relocated": 5141
+    },
+    {
+      "step": 16300,
+      "active": 1197857
+    },
+    {
+      "step": 16400,
+      "relocated": 5296
+    },
+    {
+      "step": 16400,
+      "active": 1204285
+    },
+    {
+      "step": 16500,
+      "relocated": 5115
+    },
+    {
+      "step": 16500,
+      "active": 1210714
+    },
+    {
+      "step": 16600,
+      "relocated": 5354
+    },
+    {
+      "step": 16600,
+      "active": 1217142
+    },
+    {
+      "step": 16700,
+      "relocated": 5316
+    },
+    {
+      "step": 16700,
+      "active": 1223571
+    },
+    {
+      "step": 16800,
+      "relocated": 5224
+    },
+    {
+      "step": 16800,
+      "active": 1230000
+    },
+    {
+      "step": 16900,
+      "relocated": 5285
+    },
+    {
+      "step": 16900,
+      "active": 1236428
+    },
+    {
+      "step": 17000,
+      "relocated": 5289
+    },
+    {
+      "step": 17000,
+      "active": 1242857
+    },
+    {
+      "step": 17100,
+      "relocated": 5437
+    },
+    {
+      "step": 17100,
+      "active": 1249285
+    },
+    {
+      "step": 17200,
+      "relocated": 5065
+    },
+    {
+      "step": 17200,
+      "active": 1255714
+    },
+    {
+      "step": 17300,
+      "relocated": 5228
+    },
+    {
+      "step": 17300,
+      "active": 1262142
+    },
+    {
+      "step": 17400,
+      "relocated": 5215
+    },
+    {
+      "step": 17400,
+      "active": 1268571
+    },
+    {
+      "step": 17500,
+      "relocated": 5416
+    },
+    {
+      "step": 17500,
+      "active": 1275000
+    },
+    {
+      "step": 17500,
+      "psnr": 22.22040143227057,
+      "psnr_masked": 22.22040143227057,
+      "coverage": 1.0,
+      "wall_s": 556.8,
+      "active": 1275000,
+      "terms": {
+        "l1": 0.021686939522624016,
+        "ssim": 0.11831174045801163
+      },
+      "shape": {
+        "aspect_p50": 0.34390243887901306,
+        "needle_frac": 0.13224706053733826,
+        "smid_p50_mm": 4.51952600479126,
+        "smax_p50_mm": 15.269293785095215
+      }
+    },
+    {
+      "step": 17600,
+      "relocated": 5142
+    },
+    {
+      "step": 17600,
+      "active": 1281428
+    },
+    {
+      "step": 17700,
+      "relocated": 5317
+    },
+    {
+      "step": 17700,
+      "active": 1287857
+    },
+    {
+      "step": 17800,
+      "relocated": 5398
+    },
+    {
+      "step": 17800,
+      "active": 1294285
+    },
+    {
+      "step": 17900,
+      "relocated": 5217
+    },
+    {
+      "step": 17900,
+      "active": 1300714
+    },
+    {
+      "step": 18000,
+      "relocated": 5451
+    },
+    {
+      "step": 18000,
+      "active": 1307142
+    },
+    {
+      "step": 18100,
+      "relocated": 5137
+    },
+    {
+      "step": 18100,
+      "active": 1313571
+    },
+    {
+      "step": 18200,
+      "relocated": 5396
+    },
+    {
+      "step": 18200,
+      "active": 1320000
+    },
+    {
+      "step": 18300,
+      "relocated": 5334
+    },
+    {
+      "step": 18300,
+      "active": 1326428
+    },
+    {
+      "step": 18400,
+      "relocated": 5339
+    },
+    {
+      "step": 18400,
+      "active": 1332857
+    },
+    {
+      "step": 18500,
+      "relocated": 5271
+    },
+    {
+      "step": 18500,
+      "active": 1339285
+    },
+    {
+      "step": 18600,
+      "relocated": 5278
+    },
+    {
+      "step": 18600,
+      "active": 1345714
+    },
+    {
+      "step": 18700,
+      "relocated": 5232
+    },
+    {
+      "step": 18700,
+      "active": 1352142
+    },
+    {
+      "step": 18800,
+      "relocated": 5247
+    },
+    {
+      "step": 18800,
+      "active": 1358571
+    },
+    {
+      "step": 18900,
+      "relocated": 5099
+    },
+    {
+      "step": 18900,
+      "active": 1365000
+    },
+    {
+      "step": 19000,
+      "relocated": 5232
+    },
+    {
+      "step": 19000,
+      "active": 1371428
+    },
+    {
+      "step": 19100,
+      "relocated": 5375
+    },
+    {
+      "step": 19100,
+      "active": 1377857
+    },
+    {
+      "step": 19200,
+      "relocated": 5063
+    },
+    {
+      "step": 19200,
+      "active": 1384285
+    },
+    {
+      "step": 19300,
+      "relocated": 5428
+    },
+    {
+      "step": 19300,
+      "active": 1390714
+    },
+    {
+      "step": 19400,
+      "relocated": 5171
+    },
+    {
+      "step": 19400,
+      "active": 1397142
+    },
+    {
+      "step": 19500,
+      "relocated": 5346
+    },
+    {
+      "step": 19500,
+      "active": 1403571
+    },
+    {
+      "step": 19600,
+      "relocated": 4919
+    },
+    {
+      "step": 19600,
+      "active": 1410000
+    },
+    {
+      "step": 19700,
+      "relocated": 5246
+    },
+    {
+      "step": 19700,
+      "active": 1416428
+    },
+    {
+      "step": 19800,
+      "relocated": 5245
+    },
+    {
+      "step": 19800,
+      "active": 1422857
+    },
+    {
+      "step": 19900,
+      "relocated": 5208
+    },
+    {
+      "step": 19900,
+      "active": 1429285
+    },
+    {
+      "step": 20000,
+      "relocated": 5131
+    },
+    {
+      "step": 20000,
+      "active": 1435714
+    },
+    {
+      "step": 20000,
+      "psnr": 22.17196652437293,
+      "psnr_masked": 22.17196652437293,
+      "coverage": 1.0,
+      "wall_s": 683.4,
+      "active": 1435714,
+      "terms": {
+        "l1": 0.026461193338036537,
+        "ssim": 0.12868456542491913
+      },
+      "shape": {
+        "aspect_p50": 0.31154608726501465,
+        "needle_frac": 0.15951645374298096,
+        "smid_p50_mm": 3.9955391883850098,
+        "smax_p50_mm": 15.041484832763672
+      }
+    },
+    {
+      "step": 20100,
+      "relocated": 3916
+    },
+    {
+      "step": 20100,
+      "active": 1442142
+    },
+    {
+      "step": 20200,
+      "relocated": 3710
+    },
+    {
+      "step": 20200,
+      "active": 1448571
+    },
+    {
+      "step": 20300,
+      "relocated": 4040
+    },
+    {
+      "step": 20300,
+      "active": 1455000
+    },
+    {
+      "step": 20400,
+      "relocated": 4094
+    },
+    {
+      "step": 20400,
+      "active": 1461428
+    },
+    {
+      "step": 20500,
+      "relocated": 4229
+    },
+    {
+      "step": 20500,
+      "active": 1467857
+    },
+    {
+      "step": 20600,
+      "relocated": 4313
+    },
+    {
+      "step": 20600,
+      "active": 1474285
+    },
+    {
+      "step": 20700,
+      "relocated": 4273
+    },
+    {
+      "step": 20700,
+      "active": 1480714
+    },
+    {
+      "step": 20800,
+      "relocated": 4514
+    },
+    {
+      "step": 20800,
+      "active": 1487142
+    },
+    {
+      "step": 20900,
+      "relocated": 4104
+    },
+    {
+      "step": 20900,
+      "active": 1493571
+    },
+    {
+      "step": 21000,
+      "relocated": 4706
+    },
+    {
+      "step": 21000,
+      "active": 1500000
+    },
+    {
+      "step": 21100,
+      "relocated": 4478
+    },
+    {
+      "step": 21200,
+      "relocated": 4420
+    },
+    {
+      "step": 21300,
+      "relocated": 4575
+    },
+    {
+      "step": 21400,
+      "relocated": 4479
+    },
+    {
+      "step": 21500,
+      "relocated": 4424
+    },
+    {
+      "step": 21600,
+      "relocated": 4593
+    },
+    {
+      "step": 21700,
+      "relocated": 4730
+    },
+    {
+      "step": 21800,
+      "relocated": 4552
+    },
+    {
+      "step": 21900,
+      "relocated": 4515
+    },
+    {
+      "step": 22000,
+      "relocated": 4604
+    },
+    {
+      "step": 22100,
+      "relocated": 4633
+    },
+    {
+      "step": 22200,
+      "relocated": 4392
+    },
+    {
+      "step": 22300,
+      "relocated": 4487
+    },
+    {
+      "step": 22400,
+      "relocated": 4473
+    },
+    {
+      "step": 22500,
+      "relocated": 4420
+    },
+    {
+      "step": 22500,
+      "psnr": 22.257975096412018,
+      "psnr_masked": 22.257975096412018,
+      "coverage": 1.0,
+      "wall_s": 936.0,
+      "active": 1500000,
+      "terms": {
+        "l1": 0.02491222880780697,
+        "ssim": 0.06732235848903656
+      },
+      "shape": {
+        "aspect_p50": 0.2963161766529083,
+        "needle_frac": 0.16539666056632996,
+        "smid_p50_mm": 3.8214974403381348,
+        "smax_p50_mm": 15.239652633666992
+      }
+    },
+    {
+      "step": 22600,
+      "relocated": 4491
+    },
+    {
+      "step": 22700,
+      "relocated": 4587
+    },
+    {
+      "step": 22800,
+      "relocated": 4524
+    },
+    {
+      "step": 22900,
+      "relocated": 4306
+    },
+    {
+      "step": 23000,
+      "relocated": 4330
+    },
+    {
+      "step": 23100,
+      "relocated": 4477
+    },
+    {
+      "step": 23200,
+      "relocated": 4257
+    },
+    {
+      "step": 23300,
+      "relocated": 4477
+    },
+    {
+      "step": 23400,
+      "relocated": 4426
+    },
+    {
+      "step": 23500,
+      "relocated": 4270
+    },
+    {
+      "step": 23600,
+      "relocated": 4315
+    },
+    {
+      "step": 23700,
+      "relocated": 4044
+    },
+    {
+      "step": 23800,
+      "relocated": 4246
+    },
+    {
+      "step": 23900,
+      "relocated": 4325
+    },
+    {
+      "step": 24000,
+      "relocated": 3942
+    },
+    {
+      "step": 24100,
+      "relocated": 4177
+    },
+    {
+      "step": 24200,
+      "relocated": 4213
+    },
+    {
+      "step": 24300,
+      "relocated": 3917
+    },
+    {
+      "step": 24400,
+      "relocated": 4040
+    },
+    {
+      "step": 24500,
+      "relocated": 3930
+    },
+    {
+      "step": 24600,
+      "relocated": 3872
+    },
+    {
+      "step": 24700,
+      "relocated": 3904
+    },
+    {
+      "step": 24800,
+      "relocated": 3815
+    },
+    {
+      "step": 24900,
+      "relocated": 3824
+    },
+    {
+      "step": 25000,
+      "relocated": 3625
+    },
+    {
+      "step": 25000,
+      "psnr": 22.209017141070024,
+      "psnr_masked": 22.209017141070024,
+      "coverage": 1.0,
+      "wall_s": 1194.0,
+      "active": 1500000,
+      "terms": {
+        "l1": 0.021820247173309326,
+        "ssim": 0.13343827426433563
+      },
+      "shape": {
+        "aspect_p50": 0.28056660294532776,
+        "needle_frac": 0.17954933643341064,
+        "smid_p50_mm": 3.6778087615966797,
+        "smax_p50_mm": 15.56210994720459
+      }
+    },
+    {
+      "step": 25100,
+      "relocated": 3605
+    },
+    {
+      "step": 25200,
+      "relocated": 3776
+    },
+    {
+      "step": 25300,
+      "relocated": 3531
+    },
+    {
+      "step": 25400,
+      "relocated": 3515
+    },
+    {
+      "step": 27500,
+      "psnr": 22.313873185216256,
+      "psnr_masked": 22.313873185216256,
+      "coverage": 1.0,
+      "wall_s": 1453.3,
+      "active": 1500000,
+      "terms": {
+        "l1": 0.03350609540939331,
+        "ssim": 0.1506483554840088
+      },
+      "shape": {
+        "aspect_p50": 0.271872878074646,
+        "needle_frac": 0.1897166669368744,
+        "smid_p50_mm": 3.54447078704834,
+        "smax_p50_mm": 15.415667533874512
+      }
+    },
+    {
+      "step": 30000,
+      "psnr": 22.321220877651008,
+      "psnr_masked": 22.321220877651008,
+      "coverage": 1.0,
+      "wall_s": 1710.0,
+      "active": 1500000,
+      "terms": {
+        "l1": 0.0270511656999588,
+        "ssim": 0.18256355822086334
+      },
+      "shape": {
+        "aspect_p50": 0.26541605591773987,
+        "needle_frac": 0.19743333756923676,
+        "smid_p50_mm": 3.4424455165863037,
+        "smax_p50_mm": 15.278090476989746
+      }
+    }
+  ]
+}

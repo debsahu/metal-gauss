@@ -1,0 +1,24 @@
+{
+  "kind": "lpips_attribution",
+  "schema": 1,
+  "stage": "degrade_calibration",
+  "scene": "pgeom",
+  "dump": "/private/tmp/claude-502/-Users-debsahu-Workspace-slam/9eb0a979-95af-4e5c-a3aa-3173d345c52d/scratchpad/t10run/R1.dump",
+  "net": "vgg",
+  "n_views": 12,
+  "image_hw": [
+    1440,
+    1920
+  ],
+  "identity_lpips_max": 0.0,
+  "blur_sigma_px": {
+    "8": 0.4029374768336614,
+    "10": 0.41622448960940045,
+    "12": 0.4237884332736333
+  },
+  "resample_factor": {
+    "10": 0.41161872322360676,
+    "12": 0.4268866429726283,
+    "16": 0.45732999096314114
+  }
+}

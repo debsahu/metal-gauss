@@ -1,0 +1,55 @@
+{
+  "kind": "lpips_attribution",
+  "schema": 1,
+  "stage": "step5_verdict",
+  "scene": "lego",
+  "arm": "L1",
+  "tag": "converged",
+  "n_views": 25,
+  "baseline_lpips": 0.017041319943964482,
+  "baseline_psnr": 36.60712371826172,
+  "build_threshold": 0.015,
+  "rows": {
+    "affine": {
+      "delta_lpips": -0.00014356039464473723,
+      "delta_psnr": 0.07173004150390624,
+      "n_params_per_view": 12,
+      "usable": true,
+      "c1": "C1 passed (0.907)"
+    },
+    "bilagrid_tv0": {
+      "delta_lpips": 0.0012611940503120423,
+      "delta_psnr": 1.5742263793945312,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 passed (0.989)"
+    },
+    "bilagrid_tv10": {
+      "delta_lpips": 0.00011329676955938339,
+      "delta_psnr": 0.3165666961669922,
+      "n_params_per_view": 24576,
+      "usable": true,
+      "c1": "C1 passed (0.937)"
+    },
+    "ppisp": {
+      "delta_lpips": -3.399714827537537e-05,
+      "delta_psnr": -0.01453643798828125,
+      "n_params_per_view": 27,
+      "usable": true,
+      "c1": "C1 passed (0.945)"
+    }
+  },
+  "per_view_coupling": {
+    "n_views": 25,
+    "pearson_psnr_lpips": -0.8184180333008253,
+    "lpips_min": 0.011061226949095726,
+    "lpips_max": 0.026729153469204903,
+    "psnr_min": 25.43570327758789,
+    "psnr_max": 40.123435974121094
+  },
+  "ceiling_fitter": "bilagrid_tv10",
+  "ceiling": 0.00011329676955938339,
+  "excluded": [],
+  "verdict": "CUT",
+  "why": "the best usable fitter (bilagrid_tv10) recovers 0.00011, under the pre-registered 0.015. A free post-hoc per-view fit cannot recover the LPIPS, so nothing constrained and indirect can."
+}
