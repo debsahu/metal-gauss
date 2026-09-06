@@ -71,19 +71,28 @@ def test_anchor_reports_mean_and_spread(tmp_path):
 #   * EVEN count, so the median convention is live. `torch.median` takes the lower of the
 #     two middle values and `np.median` averages them; an odd count would hide the
 #     difference and let a wrong convention pass.
-#   * three populations -- hard needles (aspect < 0.01), soft needles (0.01 <= a < 0.1) and
-#     healthy -- so `needle_frac` and `hard_needle_frac` are BOTH strictly inside (0, 1) and
-#     are DIFFERENT NUMBERS. A swapped threshold changes the answer.
+#   * FIVE populations, not three. The obvious three -- hard needles, soft needles, healthy
+#     -- make `needle_frac` and `hard_needle_frac` different numbers, which catches a
+#     SWAPPED threshold. They do NOT catch a MOVED one, and that was measured rather than
+#     reasoned: with populations at aspect 0.004 / 0.04 / >=0.4, mutating
+#     `train.HARD_NEEDLE_ASPECT` from 0.01 to 0.02 changed `hard_needle_frac` by exactly
+#     nothing and SURVIVED ALL 716 TESTS IN THIS SUITE, this file's first draft included.
+#     So two more populations sit just ABOVE each threshold, at 0.015 and 0.15, and
+#     `test_the_fixture_can_actually_SEPARATE_the_two_tools` asserts they do their job.
 #   * nothing near either threshold, so the counts are not decided by float32 rounding.
-_N_HARD, _N_SOFT, _N_OK = 20, 30, 70
 _SMAX = 0.025
+#            aspect,  count,  what it is
+_POPS = [(0.004, 20),   # hard needle, well below 0.01
+         (0.015, 15),   # BETWEEN 0.01 and 0.02 -- sees a moved hard-needle threshold
+         (0.040, 25),   # soft needle: a needle, not a hard one
+         (0.150, 20),   # BETWEEN 0.1 and 0.2 -- sees a moved needle threshold
+         (None,  40)]   # healthy, a spread so the medians are not all ties
 
 
 def _fixture_log_scales() -> torch.Tensor:
-    smax = torch.full((_N_HARD + _N_SOFT + _N_OK,), _SMAX)
-    smid = torch.cat([torch.full((_N_HARD,), _SMAX * 0.004),    # aspect 0.004  -- hard
-                      torch.full((_N_SOFT,), _SMAX * 0.04),     # aspect 0.04   -- soft
-                      torch.linspace(0.010, 0.024, _N_OK)])     # aspect >= 0.4 -- healthy
+    smid = torch.cat([torch.full((n,), _SMAX * a) if a is not None
+                      else torch.linspace(0.010, 0.024, n) for a, n in _POPS])
+    smax = torch.full((smid.shape[0],), _SMAX)
     return torch.log(torch.stack([smid * 0.3, smid, smax], dim=1))
 
 
@@ -111,6 +120,16 @@ def test_the_fixture_can_actually_SEPARATE_the_two_tools(tmp_path):
     from metal_gauss.train import shape_metrics
     m = shape_metrics(ls)
     assert 0.0 < m["hard_needle_frac"] < m["needle_frac"] < 1.0, m
+    # A MOVED threshold must change the answer, not only a swapped one. Measured against
+    # the actual mutant: 0.01 -> 0.02 survived the whole suite before these populations
+    # existed. `aspect` here is smid/smax with smax constant, so it is exact.
+    aspect = torch.exp(ls).sort(dim=-1).values
+    aspect = aspect[:, 1] / aspect[:, 2]
+    for col, lo, hi in (("hard_needle_frac", 0.01, 0.02), ("needle_frac", 0.1, 0.2)):
+        between = int(((aspect >= lo) & (aspect < hi)).sum())
+        assert between > 0, (
+            f"no splat with aspect in [{lo}, {hi}): {col} cannot see a threshold moved "
+            f"from {lo} to {hi}, which is a mutant this suite has already let through")
     # the wrong convention must be separable by more than the tolerance the test uses
     _write(tmp_path / "f.ply", ls)
     avg = shape_from_ply(tmp_path / "f.ply", "average")
@@ -186,3 +205,38 @@ def test_the_numpy_tool_is_NaN_BLIND_and_the_cross_check_REFUSES_rather_than_agr
     rep2.write_text(json.dumps({"metrics": {"shape": shape_metrics(_fixture_log_scales())}}))
     checked = cross_check(shape_from_ply(clean, "lower"), rep2, None, clean)
     assert {"aspect_p50", "needle_frac"} <= set(checked), checked
+
+
+def test_the_hard_needle_threshold_is_ONE_number_in_two_files_and_matches_its_derivation():
+    """`HARD_NEEDLE_ASPECT` is written out independently in `metal_gauss/train.py` and in
+    `scripts/ply_shape.py`, because the second is a deliberate re-implementation of the
+    first. Two literals of the same constant drift; this is what stops them.
+
+    It also re-derives the number rather than taking 0.01 on trust, because 0.01 looks
+    exactly like a taste threshold and is not one. splat-transform's SOG writer stores the
+    quaternion's smallest three components as `255 * (q * 0.5 + 0.5)` in uint8 after
+    scaling by +-sqrt(2), so:
+
+        step        = sqrt(2) / 255                 one uint8 level, in component units
+        per-comp    = step / 2                      worst-case round-to-nearest
+        |dq|        = (step / 2) * sqrt(3)          over three components
+        rotation    = 2 * |dq|                      a quaternion perturbation of norm e
+                                                    is a rotation of 2e
+                    = 0.0096058 rad
+
+    Below that aspect a splat's minor in-plane half-axis is smaller than the rim
+    displacement its own quantised orientation produces. The constant is that number
+    rounded UP to two significant figures -- so it must sit at or above the derivation and
+    comfortably below twice it, which is what pins it to 0.01 rather than to 0.02.
+    """
+    import math
+    from metal_gauss.train import HARD_NEEDLE_ASPECT as trainer
+    from ply_shape import HARD_NEEDLE_ASPECT as crosscheck
+    assert trainer == crosscheck, (
+        f"the trainer says {trainer} and the ply cross-check says {crosscheck}; a column "
+        f"named hard_needle_frac would then mean two different things")
+    derived = 2.0 * (math.sqrt(2.0) / 255.0 / 2.0) * math.sqrt(3.0)
+    assert derived == pytest.approx(0.0096058, abs=5e-8), derived
+    assert derived <= trainer < 2.0 * derived, (
+        f"{trainer} is not the delivery-derived threshold {derived:.7f} rounded up; it is "
+        f"either below the quantisation floor or a different number entirely")
