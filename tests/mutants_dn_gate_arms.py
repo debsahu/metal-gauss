@@ -238,7 +238,7 @@ MUTANTS = [
     ("port_the_depth_source_dimension_across",
      lambda s: sub(s, '    argv = ["--colmap", a.colmap,',
                    '    argv = ["--depth-source", "center", "--colmap", a.colmap,'),
-     "test_no_arm_passes_depth_source_and_the_trainer_would_reject_it_if_it_did"),
+     "test_no_arm_passes_depth_source_and_the_TRAINERS_DEFAULT_is_the_centre_path"),
 
     ("export_every_lost",
      lambda s: sub(s, "EXPORT_EVERY = 500  ", "EXPORT_EVERY = 0  "),

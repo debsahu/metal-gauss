@@ -120,18 +120,35 @@ def test_the_queue_is_three_floors_at_two_seeds_and_one_treatment():
         ("G0", "treatment", 42)]
 
 
-def test_no_arm_passes_depth_source_and_the_trainer_would_reject_it_if_it_did():
-    """CATCHES: porting Task 19's `--depth-source` dimension across. That flag is Task
-    19's and does not exist on this branch, so an arm carrying it exits 2 -- which is why
-    the second half of this test matters: it proves the flag is genuinely absent from the
-    trainer rather than merely absent from our argv."""
+def test_no_arm_passes_depth_source_and_the_TRAINERS_DEFAULT_is_the_centre_path():
+    """CATCHES: porting Task 19's `--depth-source` dimension across, which would add a
+    second treatment variable to a four-arm protocol whose whole design is that only the
+    dn gate differs.
+
+    THE SECOND HALF OF THIS TEST WAS REWRITTEN AT THE REBASE ONTO PR #3, and the reason
+    is worth recording rather than quietly fixing. It used to assert that the trainer
+    REJECTS `--depth-source` at all -- true when this branch was cut, because the flag
+    was Task 19's and unmerged. PR #3 merged it, so that assertion is now false and the
+    guard it provided is gone: an arm that carried the flag would today be ACCEPTED.
+
+    What actually has to hold is therefore the stronger statement, and it is the one the
+    old test was standing in for: our argv omits the flag, AND omitting it yields the
+    CENTRE path. If the trainer's default ever moved to `plane-aux`, every arm in this
+    protocol would silently change its depth channel while this file went on saying the
+    flag was absent from the argv -- absence from argv only means anything alongside a
+    known default."""
     a = _args()
     for arm in H.arm_queue(a):
         assert "--depth-source" not in H.build_arm_argv(a, arm)
     from metal_gauss.train import build_parser as trainer_parser
+    defaulted = trainer_parser().parse_args(["--colmap", "x", "--images", "y"])
+    assert defaulted.depth_source == "center"
+    # ...and the flag is a CHOICE-restricted one, so a typo is refused rather than
+    # silently taking some third path. Without this the assertion above is satisfied by a
+    # parser that accepts anything and stores the last thing it saw.
     with pytest.raises(SystemExit):
         trainer_parser().parse_args(["--colmap", "x", "--images", "y",
-                                     "--depth-source", "center"])
+                                     "--depth-source", "plane-fused"])
 
 
 def test_every_arm_exports_a_checkpoint_every_500_steps():
