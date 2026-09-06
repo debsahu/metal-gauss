@@ -93,6 +93,7 @@ def read_arm(out: Path, arm: str, ungated_suffix: str = ".ungated.json") -> dict
         "thin_ungated_n": um.get("thin_axis_evaluated"),
         "on_seed_1cm": sm.get("on_seed_frac_1cm"),
         "num_downscales": resolved.get("num_downscales"),
+        "filter_3d": resolved.get("filter_3d"),
         "schedule_arm": False,
     }
     # `.get`, not `[]`: reports written before per-eval shape metrics existed carry no
@@ -208,10 +209,20 @@ def grade(rows: list[dict], baseline: str, floors: dict | None) -> list[dict]:
                          "the ply is what gets delivered")
         if r["shape_disagreement"]:
             d = r["shape_disagreement"]
+            # NAME THE CAUSE ONLY WHEN IT IS KNOWN. This note used to assert
+            # "--filter-3d bakes the widened scales into the export" on EVERY
+            # disagreement, and it fired on the --antialias arm, whose gap has an
+            # entirely different cause (2.08% of its splats are non-finite, and the two
+            # readings exclude them differently). A note that confidently gives the wrong
+            # reason is worse than one that gives none.
+            cause = ("--filter-3d bakes the widened scales into the export"
+                     if r.get("filter_3d")
+                     else "this arm does not use --filter-3d, so the usual cause does "
+                          "not apply; a non-finite population excluded differently by "
+                          "the two readings is the other known one")
             notes.append("ply shape differs from the in-memory shape by "
                          + ", ".join(f"{k} {v:+.6f}" for k, v in d.items())
-                         + " -- graded on the PLY. Expected on --filter-3d, which bakes "
-                           "the widened scales into the export.")
+                         + f" -- graded on the PLY. {cause}.")
         if r["thin_ungated_p50"] is None:
             notes.append("UNGATED THIN-AXIS NOT MEASURED -- rerun splat_stats.py with "
                          "--thin-axis-gate -1; the gated number alone is not reportable")

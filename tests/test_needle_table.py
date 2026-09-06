@@ -24,10 +24,10 @@ GOOD_SHAPE = {"aspect_p50": 0.55, "needle_frac": 0.02, "hard_needle_frac": 0.000
 
 
 def _write(out: Path, arm: str, *, shape=None, psnr=22.5, thin=49.0, n_thin=304000,
-           on_seed=0.085, ungated=None, num_downscales=2, lpips=0.39):
+           on_seed=0.085, ungated=None, num_downscales=2, lpips=0.39, filter_3d=False):
     (out / f"{arm}.json").write_text(json.dumps({
         "env": {"git": "abc1234", "dirty": False},
-        "resolved": {"num_downscales": num_downscales},
+        "resolved": {"num_downscales": num_downscales, "filter_3d": filter_3d},
         "metrics": {"psnr_masked": psnr, "lpips": lpips, "coverage": 1.0,
                     "ms_per_step": 32.0, "n_splats": 500000,
                     "shape": dict(GOOD_SHAPE if shape is None else shape)},
@@ -275,3 +275,24 @@ def test_an_arm_scored_by_a_binary_with_NO_integrity_check_says_UNKNOWN(tmp_path
     rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a"])}
     assert rows["B0a"]["integrity"] == "UNKNOWN"
     assert any("predating the check" in n for n in rows["B0a"]["notes"])
+
+
+def test_the_disagreement_note_does_not_blame_a_flag_the_arm_never_used(tmp_path):
+    """CATCHES a note that gives a CONFIDENT WRONG REASON, which is worse than no reason.
+
+    The first version asserted "--filter-3d bakes the widened scales into the export" on
+    every ply-vs-report disagreement, and it duly fired on the --antialias arm, whose gap
+    has a completely different cause: 2.08% of its splats are non-finite and the two
+    readings exclude them differently. A reader following that note would have gone
+    looking for a filter that was never switched on."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0); _write_ply_shape(tmp_path, "B0a")
+    _write(tmp_path, "N1", filter_3d=True, ungated=50.0)
+    _write_ply_shape(tmp_path, "N1", needle_frac=0.03)
+    _write(tmp_path, "N2", filter_3d=False, ungated=50.0)
+    _write_ply_shape(tmp_path, "N2", needle_frac=0.03)
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a", "N1", "N2"])}
+    n1 = " ".join(rows["N1"]["notes"]); n2 = " ".join(rows["N2"]["notes"])
+    assert "--filter-3d bakes" in n1, n1
+    assert "does not use --filter-3d" in n2, n2
+    assert "non-finite population" in n2, n2
