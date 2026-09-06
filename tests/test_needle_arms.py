@@ -33,6 +33,7 @@ NEEDLE_ARMS = {
     "I1": "--inplane-isotropy-weight 0.1",
     "I2": "--inplane-isotropy-weight 1.0",
     "I3": "--inplane-isotropy-weight 10.0",
+    "Im3": "--inplane-isotropy-weight 0.001",
 }
 
 # The isotropy sweep must actually SPAN decades -- three arms that differ in the third
@@ -210,3 +211,20 @@ def test_a_run_with_NO_seed_cloud_does_not_need_splatstats_at_all(tmp_path):
              "MG_ROOT": str(mg)})
     assert "splatstats" not in (r.stderr + r.stdout).lower(), (
         "the guard fired on a run that never needed splatstats:\n" + r.stderr)
+
+
+def test_IRb_is_R1p_plus_EXACTLY_ONE_flag():
+    """The orthogonality arm is only a one-variable comparison if it is R1p verbatim plus
+    the barrier. A drift in any of R1p's three weights turns it into a different recipe
+    and the flatten-survival claim would rest on nothing."""
+    r1p = _arm_flags("R1p").stdout.split()
+    irb = _arm_flags("IRb").stdout.split()
+    assert irb[:len(r1p)] == r1p, f"IRb does not start with R1p: {irb} vs {r1p}"
+    assert irb[len(r1p):] == ["--inplane-isotropy-weight", "0.01"], irb[len(r1p):]
+
+
+def test_the_minimum_dose_arm_is_BELOW_the_sweep():
+    """Im3 exists to find the smallest weight that works. If it were inside the sweep's
+    range it would be a repeat, and the sweep's own lower end would still be untested."""
+    lo = float(_arm_flags("I0").stdout.split()[-1])
+    assert float(_arm_flags("Im3").stdout.split()[-1]) < lo

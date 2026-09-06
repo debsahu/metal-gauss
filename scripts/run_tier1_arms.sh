@@ -214,6 +214,17 @@ arm_flags() {                    # extra flags per arm NAME
     I1)     echo "--inplane-isotropy-weight 0.1" ;;
     I2)     echo "--inplane-isotropy-weight 1.0" ;;
     I3)     echo "--inplane-isotropy-weight 10.0" ;;
+    # Im3: below the sweep. I0 at 0.01 already took needle_frac 16.80% -> 0.078%, so the
+    # sweep found the effect but not its MINIMUM DOSE, and the dose matters: at 0.01 smax
+    # also fell 25.7 -> 18.1 mm, a 30% change to the whole model that nothing asked for.
+    Im3)    echo "--inplane-isotropy-weight 0.001" ;;
+    # IR / IRb: THE ORTHOGONALITY CHECK, end to end. The barrier's whole design rests on
+    # flatten owning the smin lane and the barrier owning smid/smax, and that is proven so
+    # far only at the tensor (the sorted smin lane takes exactly zero gradient). These two
+    # arms are the same recipe with and without the barrier, so flatten's own measured
+    # effect -- the collapse of smin -- must survive unchanged in IRb, or the tensor-level
+    # proof does not transfer to a 30k run.
+    IRb)    echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2 --inplane-isotropy-weight 0.01" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
 }
