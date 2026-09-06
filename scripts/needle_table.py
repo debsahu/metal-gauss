@@ -54,12 +54,20 @@ def _load(path: Path) -> dict | None:
 
 def read_arm(out: Path, arm: str, ungated_suffix: str = ".ungated.json") -> dict:
     """Everything about one arm, from its files. Absent inputs stay None -- never 0.0,
-    which would grade as a spectacular pass on `needle_frac` and a failure on `aspect`."""
+    which would grade as a spectacular pass on `needle_frac` and a failure on `aspect`.
+
+    THE PLY WINS OVER THE REPORT, and on one arm in this batch they genuinely differ.
+    `--filter-3d` bakes Mip-Splatting's widened scales into the export (`export_ply`),
+    while the per-eval `shape_metrics` reads `p["log_scales"]`, the raw parameter the
+    filter never touches. The ply is what a client receives, so `<arm>.shape.json` from
+    `bench/ply_shape.py` is preferred when present and the disagreement is reported."""
     rep = _load(out / f"{arm}.json")
     st = _load(out / f"{arm}.stats.json")
     un = _load(out / f"{arm}{ungated_suffix}")
+    plyshape = _load(out / f"{arm}.shape.json")
     m = (rep or {}).get("metrics") or {}
-    shape = m.get("shape") or {}
+    report_shape = m.get("shape") or {}
+    shape = plyshape if plyshape else report_shape
     sm = (st or {}).get("metrics") or {}
     um = (un or {}).get("metrics") or {}
     resolved = (rep or {}).get("resolved") or {}
@@ -89,6 +97,15 @@ def read_arm(out: Path, arm: str, ungated_suffix: str = ".ungated.json") -> dict
     # `.get`, not `[]`: reports written before per-eval shape metrics existed carry no
     # "shape" key at all, and an arm scored by an older binary carries a partial one.
     # A time course that CRASHES on those is worse than one that is short.
+    row["shape_source"] = "ply" if plyshape else ("report" if report_shape else None)
+    row["report_shape"] = report_shape or None
+    # A disagreement is information, not an error: it is how --filter-3d announces itself.
+    row["shape_disagreement"] = None
+    if plyshape and report_shape:
+        d = {k: plyshape[k] - report_shape[k] for k in ("aspect_p50", "needle_frac")
+             if k in plyshape and k in report_shape}
+        if any(abs(v) > 1e-6 for v in d.values()):
+            row["shape_disagreement"] = d
     row["shape_course"] = [(e["step"], (e.get("shape") or {}).get("needle_frac"),
                             (e.get("shape") or {}).get("aspect_p50"))
                            for e in ((rep or {}).get("log") or []) if e.get("shape")
@@ -148,6 +165,18 @@ def grade(rows: list[dict], baseline: str, floors: dict | None) -> list[dict]:
                 notes.append(f"gated thin-axis population differs {100*(ratio-1):+.1f}% "
                              f"from the baseline's: the gated delta is a COMPOSITION "
                              f"statistic here, read the ungated column")
+        if r["shape_source"] is None:
+            notes.append("no shape measured from either the report or the ply")
+        elif r["shape_source"] == "report":
+            notes.append("shape read from the REPORT, not the ply -- run "
+                         "bench/ply_shape.py; on a --filter-3d arm these differ and only "
+                         "the ply is what gets delivered")
+        if r["shape_disagreement"]:
+            d = r["shape_disagreement"]
+            notes.append("ply shape differs from the in-memory shape by "
+                         + ", ".join(f"{k} {v:+.6f}" for k, v in d.items())
+                         + " -- graded on the PLY. Expected on --filter-3d, which bakes "
+                           "the widened scales into the export.")
         if r["thin_ungated_p50"] is None:
             notes.append("UNGATED THIN-AXIS NOT MEASURED -- rerun splat_stats.py with "
                          "--thin-axis-gate -1; the gated number alone is not reportable")

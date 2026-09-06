@@ -162,3 +162,50 @@ def test_the_time_course_is_carried_through_from_the_per_eval_log(tmp_path):
     _write(tmp_path, "B0a", ungated=51.0)
     rows = _grade(tmp_path, ["B0a"])
     assert [s for s, _, _ in rows[0]["shape_course"]] == [2500, 30000]
+
+
+def _write_ply_shape(out: Path, arm: str, **over):
+    (out / f"{arm}.shape.json").write_text(json.dumps({**GOOD_SHAPE, "splats": 500000,
+                                                      **over}))
+
+
+def test_the_PLY_shape_wins_over_the_report_and_the_gap_is_reported(tmp_path):
+    """CATCHES the --filter-3d measurement trap. That flag bakes Mip-Splatting's widened
+    scales into the exported ply but never touches `p["log_scales"]`, which is what the
+    per-eval `shape_metrics` reads. So on exactly the arm whose whole purpose is to widen
+    thin splats, the report understates the effect and the ply is the only artifact a
+    client actually receives.
+
+    Here the report says the arm is a needle disaster and the ply says it is fine. A
+    grader reading the report FAILS it; one reading the ply PASSES it and says why."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0); _write_ply_shape(tmp_path, "B0a")
+    _write(tmp_path, "N1", shape={**GOOD_SHAPE, "needle_frac": 0.40, "aspect_p50": 0.11},
+           ungated=50.0)
+    _write_ply_shape(tmp_path, "N1", needle_frac=0.02, aspect_p50=0.55)
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a", "N1"])}
+    r = rows["N1"]
+    assert r["shape_source"] == "ply"
+    assert r["needle_frac"] == 0.02 and r["aspect_p50"] == 0.55
+    assert r["verdict"] == "PASS", r["fails"]
+    assert any("graded on the PLY" in n for n in r["notes"]), r["notes"]
+
+
+def test_shape_read_only_from_the_report_is_flagged_as_incomplete(tmp_path):
+    """An arm with no `.shape.json` may still be graded -- but silently grading it from
+    the in-memory parameters is how the trap above goes unnoticed on the next batch."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0)
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a"])}
+    assert rows["B0a"]["shape_source"] == "report"
+    assert any("shape read from the REPORT" in n for n in rows["B0a"]["notes"])
+
+
+def test_identical_ply_and_report_shapes_raise_NO_disagreement_note(tmp_path):
+    """The note must be silent when the two agree, or it fires on all six arms that have
+    no filter and nobody reads it on the one that does."""
+    _floors(tmp_path)
+    _write(tmp_path, "B0a", ungated=51.0); _write_ply_shape(tmp_path, "B0a")
+    rows = {r["arm"]: r for r in _grade(tmp_path, ["B0a"])}
+    assert rows["B0a"]["shape_disagreement"] is None
+    assert not any("graded on the PLY" in n for n in rows["B0a"]["notes"])
