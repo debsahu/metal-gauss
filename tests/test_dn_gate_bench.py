@@ -305,6 +305,20 @@ def test_bench_terms_reproduce_the_trainers_torch_path_exactly(monkeypatch):
     CATCHES: a missing `clamp_min`, a `keep` applied to the wrong operand, the alpha divide
     dropped from `n_img`, the wrong loss space. Bit-exact, not approximate: they are the
     same arithmetic in the same order, so anything else is a difference in the chain.
+
+    `depth_source="center"` IS AN EXPLICIT SCOPE STATEMENT, added at the rebase onto PR #3
+    and not a stub to make a Namespace complete. `geometry_terms` gained a `plane-aux`
+    branch there and reads `args.depth_source` unconditionally, so this test stopped
+    running at all -- it failed on the attribute, which is the honest outcome, but the
+    scope question it raises has to be answered rather than silenced. THE TOOL'S `_terms`
+    MODELS THE CENTRE PATH ONLY: it takes `[n_sum, z]` and divides z by alpha, and there
+    is no PGSR ray-plane intersection anywhere in `bench/dn_neighbour_gate.py`. So this
+    asserts faithfulness for the depth source Task 20's arms actually run, and
+    `tests/test_dn_gate_arms.py::
+    test_no_arm_passes_depth_source_and_the_TRAINERS_DEFAULT_is_the_centre_path` is what
+    pins that they run it. Extending `_terms` to plane-aux would need a second faithfulness
+    case here; using the tool on a plane-aux arm without one would measure a function the
+    trainer does not compute.
     """
     import argparse
 
@@ -325,12 +339,18 @@ def test_bench_terms_reproduce_the_trainers_torch_path_exactly(monkeypatch):
     for space in ("disparity", "metric"):
         for k in (None, keep):
             args = argparse.Namespace(depth_loss_weight=1.0, normal_loss_weight=0.2,
-                                      depth_normal_weight=0.05, depth_loss_space=space)
+                                      depth_normal_weight=0.05, depth_loss_space=space,
+                                      depth_source="center")
             want = geometry_terms(args, [n_sum, z], alpha, K, gt_d, gt_n, k)
             got, _, _ = _terms(n_sum, z, alpha, k, K, gt_d, gt_n, gate=False, space=space)
             assert set(got) == set(want)
             for name in want:
                 assert torch.equal(got[name], want[name]), (space, k is None, name)
+    # The scope statement, asserted rather than left in prose: the tool has no plane-aux
+    # path, so a caller that reached for one must not get a plausible number from the
+    # centre chain. `_terms` takes no depth source at all, which is the guarantee.
+    import inspect
+    assert "depth_source" not in inspect.signature(_terms).parameters
 
 
 def test_summary_refuses_an_incomplete_scene_x_step_grid(tmp_path):
