@@ -146,6 +146,33 @@ arm_flags() {                    # extra flags per arm NAME
     # run with --depth-normal-weight > 0 in `center` mode is a known-broken configuration,
     # so this arm gives the first clean read on the depth and normal PRIORS in isolation.
     R1p)    echo "--flatten-loss-weight 1.0 --depth-loss-weight 1.0 --normal-loss-weight 0.2" ;;
+    # ---- NEEDLE arms (2026-09-05). metal-gauss produces 3-10x more needle-shaped
+    # splats than every other trainer on the same scenes: needle_frac = frac(smid/smax
+    # < 0.1) is 16.6% here against Brush 0.55-4.5% and LFS 0.15% on playroom_0821.
+    # Flatten is EXONERATED -- it collapses smin and leaves smid/smax at 0.839 -> 0.839
+    # -- so these arms probe the remaining flag-reachable candidates. Every one is
+    # FLAG-ONLY: no trainer code differs between them and the B0 floors, which is what
+    # makes them comparable at all (contrast the Tier 1 protocol deviation, where 18
+    # arms spanned 7 commits).
+    #
+    # N1/N2 are the sub-pixel-dilation hypothesis: a splat thinner than a pixel is
+    # widened by the 2D screen-space dilation, so the trainer never pays for a needle it
+    # cannot see. PRE-REGISTERED PREDICTION: both buy <= 2-3 pp, because only 14% of
+    # measured needles are below 1 px at the nearest training camera. --filter-3d is
+    # view-INDEPENDENT (it widens in world space and bakes into the export);
+    # --antialias is view-dependent and compensates opacity instead.
+    N1)     echo "--filter-3d" ;;
+    N2)     echo "--antialias" ;;
+    # N3: the MCMC scale regulariser is a mean over exp(log_scales) across ALL THREE
+    # axes, so it is dominated by smax and pushes the largest axis down hardest --
+    # which is a pressure on the aspect ratio nobody has measured. Direction UNKNOWN
+    # and deliberately not predicted.
+    N3)     echo "--scale-reg 0.0" ;;
+    # N4: the known-positive control. --num-downscales 2 costs +4.1 pp on this scene
+    # (n=3) and +3.9 pp on ARKitScenes, so 0 must IMPROVE the needle fraction or the
+    # whole battery is mis-wired. It is not a candidate fix -- at 0 metal-gauss is
+    # still 3-4x Brush -- it is the arm that proves the instrument responds.
+    N4)     echo "--num-downscales 0" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
 }
